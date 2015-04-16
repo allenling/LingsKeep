@@ -26,4 +26,4 @@ The RPC server will then see a reply-to property with a generated name. It shoul
 Rabbitmq的Direct Replyto是用于RPC（Remote procedure call）
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-http://videlalvaro.github.io/2010/10/rpc-over-rabbitmq.html
+https://www.rabbitmq.com/tutorials/tutorial-six-python.html

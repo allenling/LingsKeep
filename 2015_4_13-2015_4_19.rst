@@ -23,10 +23,15 @@ mysql_tzinfo_to_sql /usr/share/zoneinfo | mysql -u root -p mysql
 
 
 [1] https://docs.djangoproject.com/en/dev/releases/1.6/#time-zone-aware-day-month-and-week-day-lookups
+
 [2] https://code.djangoproject.com/ticket/22528
+
 [3] https://docs.djangoproject.com/en/1.7/ref/models/querysets/#datetimes
+
 [4] https://docs.djangoproject.com/en/1.7/ref/models/querysets/#month
+
 [5] http://dev.mysql.com/doc/refman/5.6/en/mysql-tzinfo-to-sql.html
+
 [6] http://www.zhiwehu.com/blog/django-filter-on-datetime__month-with-mysql-should/
 
 Rabbitmq: Direct reply-to:

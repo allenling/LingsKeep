@@ -34,8 +34,16 @@ mysql_tzinfo_to_sql /usr/share/zoneinfo | mysql -u root -p mysql
 
 [6] http://www.zhiwehu.com/blog/django-filter-on-datetime__month-with-mysql-should/
 
-Rabbitmq: Direct reply-to:
+Rabbitmq: Direct reply-to
 ==========================
+
+在celery中，如果使用了flower，总是会出现一个名为xxx.reply.celery.pidbox的queue。
+
+我们知道celery中的monitor是基于event，远程命令也一样。当flower发送远程命令给worker之后，worker的回复就通过那个queue传递给flower，但是那个queue在rabbitmq的监控页面却看不到任何的income和outcome，
+
+并且，肯定是flower消费该queue的message，但是同样的，在rabbitmq的监控页面也没显示consumer。
+
+猜想reply-to这个功能应该是amqp或者rabbitmq自己实现的。
 
 关于reply-to行为和特点
 ----------------------

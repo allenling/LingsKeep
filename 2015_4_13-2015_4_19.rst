@@ -60,6 +60,6 @@ Usage:
 The RPC server will then see a reply-to property with a generated name. It should publish to the default exchange ("") with the routing key set to this value (i.e. just as if it were sending to a reply queue as usual). **The message will then be sent straight to the client consumer.**
 
 Rabbitmq的Direct Replyto是用于RPC（Remote procedure call）
------------------------------------------------------------
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 http://videlalvaro.github.io/2010/10/rpc-over-rabbitmq.html

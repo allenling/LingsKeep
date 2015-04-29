@@ -41,7 +41,7 @@ Late acknowledgements和Retry功能上都是为了能够在出现异常的时候
 `So use retry for Python errors, and if your task is idempotent combine that with acks_late if that level of reliability is required.`\ :sup:`[1]`
 
 
-[1] http://docs.celeryproject.org/en/latest/faq.html#faq-acks-late-vs-retry 
+.. [1] http://docs.celeryproject.org/en/latest/faq.html#faq-acks-late-vs-retry 
 
-[2] 来自源码celery.app.task
+.. [2] 来自源码celery.app.task
 

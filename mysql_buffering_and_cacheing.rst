@@ -18,7 +18,7 @@ mysql会对select语句以及select语句的结果进行缓存, 一旦命中缓�
 
 任何对表的修改, 包括update, delet等, 都会把query cache中对应表的缓存给清除(flush)掉.
 
-query cache在数据库数据比较静态, 变动不是很经常的情况下非常有用.
+**query cache在数据库数据比较静态, 变动不是很经常的情况下非常有用.**
 
 query cache也会有维护的代价(内存分配等), 一般而言, query cache的命中概率越大越好, 若命中率在50%一下, 基本上可以关闭query cache了.
 
@@ -169,11 +169,134 @@ Com_select = Qcache_hits + queries with errors found by parser
 
 Qcache_inserts = Qcache_not_cached + queries with errors found during the column-privileges check
 
-而nagios的check_mysql_health中的qcache-hitrate的计算方法是Qcache_hits/(Qcache_hits + Com_select)
+*而nagios的check_mysql_health中的qcache-hitrate的计算方法是Qcache_hits/(Qcache_hits + Com_select)*
 
 
 Innodb Buffer Pool [#]_
 ------------------------
+
+innodb在内存中会维护一个称为buffer pool的存储区域来缓存数据和索引.
+
+What is Innodb Buffer Pool
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+innodb buffer pool的大小越大, innodb越表现得像一个内存数据库. buffer pool也缓存被insert和update更改过的数据, 而不像query cache只缓存select语句.
+
+在64位系统中, 你可以把很大的buffer pool分隔成多个部分以最小化并发产生的内存争用(to minimize contention for the memory structures among concurrent operations)
+
+How Innodb Buffer Pool works
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+innodb buffer pool是\ **LRU(Least Recently Used)**\ 算法的一个实现.
+
+innodb buffer pool是一个列表, 需要缓存的block会被插入到这个列表中.当列表被填满并且有新的block要添加到列表中的时候, innodb会将一个处于列表最后一位的block剔除出
+buffer pool的列表中. 新的block插入到列表中的\ **中间位置**, 称为中间插入策略(midpoint insertion strategy). 这样就把buffer pool列表\ **形式**\ 上分成两个子列表:
+
+1. new列表, 以中间位置为基准, 越往列表头部的block是越新的.
+2. old列表, 以中间位置为基准, 越往列表尾部的block是越旧的.
+
+buffer pool的结构是这样的
+
+[new blocks, new inserted block, old blocks]
+
+**这样中间位置是old列表的第一位的前一位**
+
+* innodb会将最经常用的block放在new列表中, 而将不经常使用的block放在old列表中, 在old列表中最后一个block会被剔除出列表当整个buffer pool已被填满但又有新的block需要插入的时候.
+
+* 在buffer pool中, 默认3/8大小的大小是用来存储old列表的.
+
+* 当用户请求一个query, 或者innodb自动的read-ahead操作的时候, 产生的block就会被插入到buffer pool中.
+
+* 一旦一个在old列表中的block被访问, 则innodb会将这block往前移到buffer pool的第一位(new列表的第一位), 使之变为'young'. 如果这个block被访问是因为用户请求的, 则innodb会马上返回
+  block, 并且立刻将block移动到列表第一位, 若是因为innodb的read-ahead请求的, 则innodb并不会立马返回并移动block到列表的第一位.
+
+* 这样, 一旦有block\ **(无论是在new列表还是old列表)**\ 被访问, 它总会被移动到new列表的第一位, 而一直没有被访问的block就自动地往buffer pool尾部移动, 这样当需要剔除block的时候, 直接剔除列表最后一个block就可以了.
+
+
+值得注意的是, 一个全表查询(mysqldump操作, 不带where的select语句, 一些性能测试等)会产生大量的block插入到buffer pool中, 这样可能导致大量的block被剔除, 或者大量的block移动到old列表中.
+而这些查询的block只使用一次的情况下很明显对innodb的性能有比较大的影响, 这个情况下可以通过调整下面innodb_old_block_time数值来避免.
+
+
+Innodb Buffer Pool Configuration
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+* innodb_buffer_pool_size
+  buffer pool的大小
+
+* innodb_buffer_pool_instance
+  buffer pool的实例个数, 这个配置只在buffer pool的大小至少大于1G的时候才有效. 这个配置会将buffer pool分隔成多个独立的区域, 这样可以减少并发下的内存读写的争用.
+
+* innodb_old_block_pct
+  old列表的大小百分比, 范围是5-95, 默认是37(3/8).
+
+* innodb_old_block_time
+  在old列表中的block\ **能**\ 被移动到new列表之前, 它在old列表必须存在的毫秒数, 默认是0. 若该值大于0, 比如1000, 也就是, 一个在old列表的block在第一次访问之后, 并不会立刻被移动到new列表中
+  而是继续存在old列表中, 直到这1秒之后有一个访问, 这个时候, 这个block才会被移动到new列表中.
+
+Setting innodb_old_blocks_time greater than 0 prevents one-time table scans from flooding the new sublist with blocks used only for the scan. Rows in a block read in for a scan are
+accessed many times in rapid succession, but the block is unused after that. If innodb_old_blocks_time is set to a value greater than time to process the block, the block remains in
+the “old” sublist and ages to the tail of the list to be evicted quickly. This way, blocks used only for a one-time scan do not act to the detriment of heavily used blocks in the new
+sublist.
+
+设置innodb_old_block_time默认值为0, 这样一次性的全表查询, 例如有些性能测试, 使得大量处于old列表的block移动到new列表中, 而原先new列表中的block就自动地移动到buffer pool的尾部,
+而这样一旦需要剔除buffer pool的block, 原先new列表中的block就会被优先剔除了. 若设置一个大于0的值(set to a value greater than time to process the block), 则原先old列表中的block
+则不会马上移动到new列表, 这样就不会危害到new列表中的blocks了.
+
+可以在运行时设置innodb_old_block_time, 所以你可以在性能测试期间暂时地将innodb_old_block_time增大, 之后在将innodb_old_block_time设置为0.
+
+Monitoring and Buffer Pool
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+SHOW ENGINE INNODB STATUS输出的innodb状态中, 在BUFFER POOL AND MEMORY一节输出了buffer pool的状态.
+
+.. code-block:: python
+
+    mysql> SHOW ENGINE INNODB STATUS;
+    BUFFER POOL AND MEMORY
+    ----------------------
+    Total memory allocated 536576000; in additional pool allocated 0
+    Dictionary memory allocated 2311279
+    Buffer pool size   31999
+    Free buffers       26133
+    Database pages     5834
+    Old database pages 2171
+    Modified db pages  0
+    Pending reads 0
+    Pending writes: LRU 0, flush list 0, single page 0
+    Pages made young 0, not young 0
+    0.00 youngs/s, 0.00 non-youngs/s
+    Pages read 5825, created 9, written 318
+    0.00 reads/s, 0.00 creates/s, 0.00 writes/s
+    No buffer pool page gets since the last printout
+    Pages read ahead 0.00/s, evicted without access 0.00/s, Random read ahead 0.00/s
+    LRU len: 5834, unzip_LRU len: 0
+    I/O sum[0]:cur[0], unzip sum[0]:cur[0]
+
+
+其中
+
+* Old database pages: old列表中的page数量
+
+* Pages made young, not young: 从old列表中移动到new列表中的page数量, old列表中的从没有被移动到new列表的page数量.
+
+* youngs/s, non-youngs/s: 访问old page中的page使得page移动到new列表的访问个数, 多个访问同一个old page, 则依然会计数. non-young/s跟youngs/s相反.
+
+* young-making rate: 缓存命中中使得block移动到new列表的的比率.
+
+* not: 缓存命中中, 但是不满足innodb_old_block_time的要求而没有使得block移动到new列表的的比率.
+
+当没有大量的查询产生但是youngs/s值却很低的时候(一般查询应该尽可能保持block处于new列表中, 尽量不优先被剔除, youngs/s应该比较大), 可以要么减少innodb_old_block_time的值, 要么调高
+old列表在buffer pool的大小百分比.
+调高old列表大小的百分比会延缓block到达buffer pool最后一位并被剔除的时间.
+
+如果产生大量的查询, 但是non-youngs/s并没有相应的增大, 则可以将innodb_old_block_time增大.
+全表查询应尽可能处于old列表中, 防止全表查询产生的block只访问一次而导致之前很多new列表中的block变得old.
+
+**也就是说**:
+
+1. 大量查询下, non-youngs/s应该变大, 增大innodb_old_block_time大小.
+
+2. 一般情况下, youngs/s不应该低, 减小innodb_old_block_time的大小或调大old列表的大小.
 
 .. [#] https://dev.mysql.com/doc/refman/5.5/en/buffering-caching.html
 .. [#] https://dev.mysql.com/doc/refman/5.5/en/query-cache.html

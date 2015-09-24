@@ -360,6 +360,31 @@ pidbox主要是用来处理发送过来的control命令, control命令定义cele
 
 调用关系使用Panel的register来设置的, 其实就是一个字典对应名字和调用函数
 
+celery.worker.pidbox.Pidbox
+
+.. code-block:: python
+
+    class Pidbox(object):
+        consumer = None
+
+        def __init__(self, c):
+            self.c = c
+            self.hostname = c.hostname
+            # 命令和调用绑定, 使用Panel
+            self.node = c.app.control.mailbox.Node(
+                safe_str(c.hostname),
+                handlers=control.Panel.data,
+                state=AttributeDict(app=c.app, hostname=c.hostname, consumer=c),
+            )
+            self._forward_clock = self.c.app.clock.forward
+
+        def start(self, c):
+            self.node.channel = c.connection.channel()
+            # 监听channel
+            self.consumer = self.node.listen(callback=self.on_message)
+            self.consumer.on_decode_error = c.on_decode_error
+
+
 celery.worker.consumer.Control
 
 .. code-block:: python

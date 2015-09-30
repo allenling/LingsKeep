@@ -163,3 +163,12 @@ __new__方法是一个实例生成的时候调用的静态方法(print type.__ne
 
 __new__参考: http://agiliq.com/blog/2012/06/__new__-python/
 
+django upload
+=============================
+
+上传文件的时候, 文件应该使用rb模式打开. python打开文件的默认的text模式(r)会将文件的换行符转换成系统指定的, windows下就是\n\r, 而linux下的就是\n. 若客户端是windows, 打开文件使用
+text模式, 上传到linux之后, 很可能造成文件失效. 比如windows下客户端上传一个xlxs文件到linux服务器, 则文件内容会被xlrd判别为无效文件, 若客户端使用读取二进制(rb)的模式读取文件, 则不会
+出现这个问题. linux下打开文件的text模式和二进制模式是相等的.
+
+文档: https://docs.python.org/2/library/functions.html#open
+

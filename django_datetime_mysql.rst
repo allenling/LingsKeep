@@ -1,5 +1,3 @@
-Django filter Datetime with Mysql
-=================================
 Django支持通过指定的月，日，周几来搜索datetime, 如
 
 yourobj.objects.filter(datetime_file__month=your_month)

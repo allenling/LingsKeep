@@ -1,5 +1,5 @@
 Rabbitmq: Direct reply-to
-==========================
+--------------------------
 
 在celery中，如果使用了flower，总是会出现一个名为xxx.reply.celery.pidbox的queue。
 
@@ -24,6 +24,6 @@ Usage:
 The RPC server will then see a reply-to property with a generated name. It should publish to the default exchange ("") with the routing key set to this value (i.e. just as if it were sending to a reply queue as usual). **The message will then be sent straight to the client consumer.**
 
 Rabbitmq的Direct Replyto是用于RPC（Remote procedure call）
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+-----------------------------------------------------------
 
 https://www.rabbitmq.com/tutorials/tutorial-six-python.html

@@ -1,6 +1,5 @@
-Celery Retry and Late acknowledgements acknowledgements
+Celery Retry and Late acknowledgements
 =======================================================
-
 
 
 Retry

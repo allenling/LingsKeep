@@ -13,6 +13,78 @@ Django的orm只需要配置好settings中的DATABASES, PTHONPATH中包含有mode
 
 并且测试的时候最好使用sqlite, 内存型数据库, 测试完之后, 释放内存, 不存留sqlite文件. 其他的数据库就必须配置用户权限等等, 比较麻烦.
 
+**上面说的, orm不需要INSTALLED_APPS是错误的, 最好必须有INSTALLED_APPS. 例子:** 
+
+Query: SELECT "djangoapp_person"."id", "djangoapp_person"."name" FROM 
+
+ "djangoapp_person" INNER JOIN "djangoapp_group_members" ON ( "djangoapp_person"."id" = 
+
+ "djangoapp_group_members"."person_id" ) WHERE "djangoapp_group_members"."group_id" = 1
+
+不在INSTALLED_APPS中加载ManyToMany所指向的app的话, 报错, 则是models的opts初始化问题
+
+.. code-block:: python
+
+    # django.db.models.options.get_field_by_name(line413):
+    def get_field_by_name(self, name):
+        try:
+            try:
+                return self._name_map[name]
+            except AttributeError:
+                cache = self.init_name_map()
+                return cache[name]
+        except KeyError:
+            raise FieldDoesNotExist('%s has no field named %r'
+                    % (self.object_name, name))
+
+如上, 寻找m2m的时候, 主要是看opts中存的fields有没有. 而最终, init_name_map中会负责找出所有的ManyToManyField.
+
+INSTALLED_APPS中不写带有ManyToManyField的models(包括在model中定义的和reverse的), 则_name_map中始终找不到 ManyToManyField. INSTALLED_APPS中的app只是在setup的时候导入models module而已, 貌似没什么特别的.
+
+django.setup()中只是简单的import_module.import_module(app.models)模块而已, 若我在其他脚本中先导入了ManyToManyField的类, 效果应该和setup中导入models mudle一样的~~!?
+
+
+若不在model中显式指定app_label或者把model所在的app写在INSTALLED_APPS, 会报这个warnings, 1.9之后就报错了.
+
+unicode: Model class __main__.Person doesn't declare an explicit app_label and either isn't in an 
+ application in INSTALLED_APPS or else was imported before its application was loaded. This will 
+ no longer be supported in Django 1.9.
+
+
+源码证明问题跟import没关系, 是django寻找ManyToManyfield关系的机制问题
+
+model的fields都存在model._meta(opts).fields中, 而不定义在model中的ManyToManyfield字段会寻找所有的app.models
+来搜索对应的ManyToManyfield.
+
+.. code-block:: python
+
+    # 源码在db.models.options(line577)
+    def _fill_related_many_to_many_cache(self):
+        cache = OrderedDict()
+        parent_list = self.get_parent_list()
+        for parent in self.parents:
+            for obj, model in parent._meta.get_all_related_m2m_objects_with_model():
+                if obj.field.creation_counter < 0 and obj.model not in parent_list:
+                    continue
+                if not model:
+                    cache[obj] = parent
+                else:
+                    cache[obj] = model
+        # 这里会遍历所有的app的models来寻找ManyToManyfield
+        for klass in self.apps.get_models():
+            if not klass._meta.swapped:
+                for f in klass._meta.local_many_to_many:
+                    if (f.rel
+                            and not isinstance(f.rel.to, six.string_types)
+                            and self == f.rel.to._meta):
+                        cache[f.related] = None
+
+所以若带有ManyToManyfield的model的app并没有设置在INSTALLED_APPS或者为在models中显式指定app的话, 是找不到
+ManyToManyField的.
+
+所以, 一句话, django1.7之后的Application会带上很多配置信息, 所以INSTALLED_APPS是非常必须的.
+
+
 Settings
 ==============
 
@@ -171,4 +243,200 @@ text模式, 上传到linux之后, 很可能造成文件失效. 比如windows下�
 出现这个问题. linux下打开文件的text模式和二进制模式是相等的.
 
 文档: https://docs.python.org/2/library/functions.html#open
+
+django model form
+==================
+
+clean中调用self.instance
+-------------------------
+django model form中, 若field有默认值 ,
+则self.instance初始化的时候会自动赋上默认值(null=True, blank=True相当于默认值为None), 若field没有默认值, 则初始化的时候则self.instance并不会有这个属性
+
+比如field: package
+若没有默认值, 在clean中调用self.instance.package会报没有这个属性错误
+
+在changeform_view方法中, 调用form.save的时候, commit是false, 真正save是在save_model方法中, 所有要自定义外键等对象赋值, 就必须在save_model中操作
+
+.. code-block:: python
+
+    # chageform_view方法中save_form总是commit=False
+    def save_form(self, request, form, change):
+        return form.save(commit=False)
+
+    # 由于commit=False, 则form.save中并不会save_m2m
+    def save(self, commit=True):
+    if self.instance.pk is None:
+        fail_message = 'created'
+    else:
+        fail_message = 'changed'
+    # save_instance函数负责save model
+    return save_instance(self, self.instance, self._meta.fields,
+                         fail_message, commit, self._meta.exclude,
+                         construct=False)
+    # save_instance函数中判断commit是否是True来绝对是否save_m2m
+    def save_instance(form, instance, fields=None, fail_message='saved',
+                  commit=True, exclude=None, construct=True):
+        # 省略了很多代码
+        if commit:
+            instance.save()
+            save_m2m()
+        else:
+            form.save_m2m = save_m2m
+        return instance
+
+    # 真正的保存到数据库是在changeform_view的save_model方法
+    def save_model(self, request, obj, form, change):
+        obj.save()
+
+model_form的field的初始化和显示
+--------------------------------
+
+若使用django admin, 则change_form中初始化多少个field并不是model_form决定的, 而是ModelAdmin中的fieldsets决定的, fieldsets形式为
+
+.. code-block:: python
+
+    fieldsets = (
+        (None, {
+            'fields': ('url', 'title', 'content', 'sites')
+        }), )
+
+而显示多少个field则是changeform_view方法中初始化的adminForm来决定的
+
+.. code-block:: python
+
+    def changeform_view(...):
+
+        adminForm = helpers.AdminForm(
+            form,
+            list(self.get_fieldsets(request, obj)),
+            self.get_prepopulated_fields(request, obj),
+            self.get_readonly_fields(request, obj),
+            model_admin=self)
+
+这里get_readonly_field返回的字段在html上就是一串文本, 也就是只读了.
+
+而在model_form中的__init__中也可以设置某个field是只读的
+
+.. code-block:: python
+
+    class MyModelForm(ModelForm):
+        def __init__(...):
+            super(MyModelForm, self).__init__(...)
+            # 设置field只读
+            self.fields['field'].readonly = True
+
+**但是这里的只读只是不可输入, 但是组件还是为显示出来, 比如还是一个input框, 但是鼠标不可输入而已.**
+
+django bulk_create
+========================
+
+方法1 normal bulk create:
+
+.. code-block:: python
+
+    obj=Obj.save()
+
+    obj.save()
+
+    OtherObj.objects.bulk_create([OtherObj(obj=obj, name=name), ...])
+
+sql语句为:
+
+INSERT INTO `myapp_otherobj` (`obj_id`, `name`) VALUES (2593, 50001), ...
+
+方法2 lazy bulk create:
+
+.. code-block:: python
+
+    obj = Obj()
+
+    tmp_bulk.append(lambda: obj.pk)
+
+    tmp_bulk = [lambda: OtherObj.objects.bulk_create([OtherObj(obj=obj, name=name), ...])]
+
+    obj.save()
+
+    for _ in tmp_bulk:
+        _()
+
+sql语句为:
+
+INSERT INTO `myapp_otherobj` (`obj_id`, `name`) VALUES (NULL, 50001), ...
+
+**很明显, lazy执行bulk_create的时候, obj的pk并没有设置上, 但是实际上, lazy bulk_create之前已经调用obj.save了. 并且打印出来的obj的pk是存在的, Why?**
+
+猜测应该跟lazy没关系, 而是外键的obj.save()前后的问题.
+
+*形式1*
+
+obj.save()
+
+OtherObj.objects.bulk_create([OtherObj(obj=obj, ...), ...])
+
+*形式2*
+
+tmp = [OtherObj(obj=obj, ...), ...]
+
+obj.save()
+
+OtherObj.objects.bulk_create(tmp)
+
+形式1是可以的
+
+形式2是不可以的(lazy的方式也是这种, 先组装好list, 在最后调用bulk_create)
+
+区别就是上面显示的insert语句的区别. 组建sql的时候, 代码如下
+
+.. code-block:: python
+
+    # django.db.models.sql.compiler(860)
+
+    def as_sql(self):
+        # 省略了代码
+        # 这里当f是外键的时候, 走到f.pre_save(obj, True)中
+        if has_fields:
+            params = values = [
+                [
+                    f.get_db_prep_save(getattr(obj, f.attname) if self.query.raw else f.pre_save(obj, True), connection=self.connection)
+                    for f in fields
+                ]
+                for obj in self.query.objs
+            ]
+
+    # 会调用在django.db.models.fields.__init__(597)中的pre_save方法
+
+    def pre_save(self, model_instance, add):
+        # 这里attname就是外键在数据库里面的字段名, 这里是obj_id
+        return getattr(model_instance, self.attname)
+
+所以, 组建sql的时候, 会去找外键在model中数据库的字段的属性值, 这里就是otherobj.obj_id, 形式1中会在生成mode实例的时候赋值上obj_id, 而形式2则不会. 两者应该都是找外键obj的pk
+但是为何不一样.?
+
+区别在model.__init__方法中
+
+.. code-block:: python
+
+    # django.db.models.base(435)
+
+    def __init__(self, *args, **kwargs):
+        # 省略了代码
+        # 若传进来的参数有外键, 则赋值外键
+        if is_related_object:
+            setattr(self, field.name, rel_obj)
+        else:
+            setattr(self, field.attname, val)
+
+    #  setattr最后会调用django.db.models.fields.related(583)中的__set__方法, 设置model中外键的pk
+    def __set__(self, instance, value):
+        # 省略了代码
+        # 这里instance是model实例, lh_field.attrname则是外键的数据库字段名, 如obj, 这里attrname就是obj_id, value就是外键对象, 即obj实例, rh_field.attname则是关联外键的数据库字段, 这里是id
+        try:
+            setattr(instance, lh_field.attname, getattr(value, rh_field.attname))
+        except AttributeError:
+            setattr(instance, lh_field.attname, None)
+
+
+所以, model.__init__方法一开始就将外键的数据库字段名属性给赋值好了, 若是形式1的情况, 自然是能将外键的pk赋值上, 若是形式2, 则赋值为None, 组建sql的时候也就是为None.
+
+所以也就是, bulk_create必须在外键obj.save之后, 也就是外键obj必须有pk
 

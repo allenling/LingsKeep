@@ -484,7 +484,7 @@ django.core.management.sql(256)
                 db=db)
 
 完成migration之后, 会发送post_migrate, reciver中包含了create permissions
----------------------------------------------
+-----------------------------------------------------------------------------
 
 .. code-block:: python
 
@@ -499,7 +499,7 @@ django.core.management.sql(256)
         return responses
 
 create permissions在这里: django.contrib.auth.management(62)
----------------------------------------------
+------------------------------------------------------------------
 
 .. code-block:: python
 

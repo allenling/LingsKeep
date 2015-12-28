@@ -440,3 +440,89 @@ OtherObj.objects.bulk_create(tmp)
 
 所以也就是, bulk_create必须在外键obj.save之后, 也就是外键obj必须有pk
 
+proxy model permission
+========================
+
+创建proxy model的时候, model的类名必须跟原来的类名不一致才能创建出权限
+
+源码:
+
+# django.core.management.commands.migrate(165)
+.. code-block:: python
+
+    emit_post_migrate_signal(created_models, self.verbosity, self.interactive, connection.alias)
+
+
+# django.core.management.sql(256)
+
+.. code-block:: python
+
+    def emit_post_migrate_signal(created_models, verbosity, interactive, db):
+        # Emit the post_migrate signal for every application.
+        for app_config in apps.get_app_configs():
+            if app_config.models_module is None:
+                continue
+            if verbosity >= 2:
+                print("Running post-migrate handlers for application %s" % app_config.label)
+            models.signals.post_migrate.send(
+                sender=app_config,
+                app_config=app_config,
+                verbosity=verbosity,
+                interactive=interactive,
+                using=db)
+            # For backwards-compatibility -- remove in Django 1.9.
+            models.signals.post_syncdb.send(
+                sender=app_config.models_module,
+                app=app_config.models_module,
+                created_models=created_models,
+                verbosity=verbosity,
+                interactive=interactive,
+                db=db)
+
+# 完成migration之后, 会发送post_migrate, reciver中包含了create permissions
+
+.. code-block:: python
+
+    def send(self, sender, **named):
+        responses = []
+        if not self.receivers or self.sender_receivers_cache.get(sender) is NO_RECEIVERS:
+            return responses
+        # reciver中有create permissions
+        for receiver in self._live_receivers(sender):
+            response = receiver(signal=self, sender=sender, **named)
+            responses.append((receiver, response))
+        return responses
+
+# create permissions在这里: django.contrib.auth.management(62)
+
+.. code-block:: python
+
+    def create_permissions(app_config, verbosity=2, interactive=True, using=DEFAULT_DB_ALIAS, **kwargs):
+        # 上面省略了代码
+        searched_perms = list()
+        ctypes = set()
+
+        # 这个for去寻找app中所有的model的permission
+        for klass in app_config.get_models():
+            # 注意, 若proxy model的类名和被proxy的model的类型一致, 这里会得到被proxy的model的ContentType, 这样proxy model的权限就不会被创建
+            ctype = ContentType.objects.db_manager(using).get_for_model(klass)
+            ctypes.add(ctype)
+            for perm in _get_all_permissions(klass._meta, ctype):
+                searched_perms.append((ctype, perm))
+
+        # 这里去数据库查找该app下所有的permissions
+        all_perms = set(Permission.objects.using(using).filter(
+            content_type__in=ctypes,
+        ).values_list(
+            "content_type", "codename"
+        ))
+
+        # 两者相差, 找出需要创建的permissions
+        perms = [
+            Permission(codename=codename, name=name, content_type=ct)
+            for ct, (codename, name) in searched_perms
+            if (ct.pk, codename) not in all_perms
+        ]
+        # 最后省略了代码
+
+

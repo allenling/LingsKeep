@@ -443,17 +443,21 @@ OtherObj.objects.bulk_create(tmp)
 proxy model permission
 ========================
 
-创建proxy model的时候, model的类名必须跟原来的类名不一致才能创建出权限
+创建proxy model的时候, model的类名必须跟原来的类名不一致才能创建出权限.
+**若proxy model和source model不再同一个app下, 则为proxy model创建的permissions指向的content type不是proxy model所在的app, 而是source model所在的app.!**
 
 源码:
 
-# django.core.management.commands.migrate(165)
+django.core.management.commands.migrate(165)
+---------------------------------------------
+
 .. code-block:: python
 
     emit_post_migrate_signal(created_models, self.verbosity, self.interactive, connection.alias)
 
 
-# django.core.management.sql(256)
+django.core.management.sql(256)
+---------------------------------------------
 
 .. code-block:: python
 
@@ -479,7 +483,8 @@ proxy model permission
                 interactive=interactive,
                 db=db)
 
-# 完成migration之后, 会发送post_migrate, reciver中包含了create permissions
+完成migration之后, 会发送post_migrate, reciver中包含了create permissions
+---------------------------------------------
 
 .. code-block:: python
 
@@ -493,7 +498,8 @@ proxy model permission
             responses.append((receiver, response))
         return responses
 
-# create permissions在这里: django.contrib.auth.management(62)
+create permissions在这里: django.contrib.auth.management(62)
+---------------------------------------------
 
 .. code-block:: python
 
@@ -505,6 +511,7 @@ proxy model permission
         # 这个for去寻找app中所有的model的permission
         for klass in app_config.get_models():
             # 注意, 若proxy model的类名和被proxy的model的类型一致, 这里会得到被proxy的model的ContentType, 这样proxy model的权限就不会被创建
+            # 若proxy model和source model不再同一个app下, 这里get_for_model拿到的meta永远是source model的meta, 也就是拿到的content type是source model的content type!
             ctype = ContentType.objects.db_manager(using).get_for_model(klass)
             ctypes.add(ctype)
             for perm in _get_all_permissions(klass._meta, ctype):
@@ -524,5 +531,22 @@ proxy model permission
             if (ct.pk, codename) not in all_perms
         ]
         # 最后省略了代码
+
+获取content type的过程: django.contrib.contenttypes.models_module
+--------------------------------------------------------------------
+
+.. code-block:: python
+
+    # 这里总是返回source model的meta, 而不会是proxy model的meta
+    def _get_opts(self, model, for_concrete_model):
+        if for_concrete_model:
+            model = model._meta.concrete_model
+        elif model._deferred:
+            model = model._meta.proxy_for_model
+        return model._meta
+
+    def get_for_model(self, model, for_concrete_model=True):
+        opts = self._get_opts(model, for_concrete_model)
+        # 省略代码
 
 

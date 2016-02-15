@@ -446,6 +446,21 @@ proxy model permission
 创建proxy model的时候, model的类名必须跟原来的类名不一致才能创建出权限.
 **若proxy model和source model不再同一个app下, 则为proxy model创建的permissions指向的content type不是proxy model所在的app, 而是source model所在的app.!**
 
+
+可以使用shell来更新proxy model的permission
+
+.. code-block:: python
+
+    In [9]: for app in apps:
+        contenttypes = ContentType.objects.filter(app_label=app)
+        permissions = Permission.objects.filter(codename__contains='_%s'%app)
+        for p in permissions:
+            for c in contenttypes:
+                if c.name in p.name:
+                    print p, p.content_type_id, c, c.pk
+                    p.content_type=c
+                    p.save()
+
 源码:
 
 django.core.management.commands.migrate(165)
@@ -549,4 +564,193 @@ create permissions在这里: django.contrib.auth.management(62)
         opts = self._get_opts(model, for_concrete_model)
         # 省略代码
 
+
+大文件下载
+-----------
+
+首先, open(filename)会返回一个file-like对象, 这个对象是自己的一个迭代器, 也就是说open一个文件并没有加载文件所有的内容
+
+file.readline, file.readlines(重复调用readline)是一行一行返回, file.read才是读取所有的内容到内存.
+
+1. 静态文件应该交由服务器来处理
+
+2. 可以在django中配置使用服务器来发送文件
+
+.. code-block:: python
+
+    from django.utils.encoding import smart_str
+
+    response = HttpResponse(mimetype='application/force-download')
+    response['Content-Disposition'] = 'attachment; filename=%s' % smart_str(file_name)
+    response['X-Sendfile'] = smart_str(path_to_file)
+    # It's usually a good idea to set the 'Content-Length' header too.
+    # You can also set any other required headers: Cache-Control, etc.
+    return response
+
+这里的X-Sendfile标识位表示使用服务器来发送文件, 前提是服务器已经开启了mod_xsendfile模块.
+
+**但是有个问题是mod_xsendfile不支持带有unicode字符的文件名**
+
+3. 可用用StreamingHttpResponse, 流式下载
+
+django文档的建议, 就是将一个迭代器传入Streaminghttpresponse,返回这个httpresponse.
+
+.. code-block:: python
+
+    import csv
+
+    from django.utils.six.moves import range
+    from django.http import StreamingHttpResponse
+
+    class Echo(object):
+        def write(self, value):
+            """Write the value by returning it, instead of storing in a buffer."""
+            return value
+
+    def some_streaming_csv_view(request):
+        """A view that streams a large CSV file."""
+        rows = (["Row {}".format(idx), str(idx)] for idx in range(65536))
+        pseudo_buffer = Echo()
+        writer = csv.writer(pseudo_buffer)
+        response = StreamingHttpResponse((writer.writerow(row) for row in rows),
+                                         content_type="text/csv")
+        response['Content-Disposition'] = 'attachment; filename="somefilename.csv"'
+        return response
+
+
+其中QuerySet是可以当做迭代器来使用
+
+django.db.models.query
+
+.. code-block:: python
+
+    class QuerySet(object):
+        def __iter__(self):
+            """
+            The queryset iterator protocol uses three nested iterators in the
+            default case:
+                1. sql.compiler:execute_sql()
+                   - Returns 100 rows at time (constants.GET_ITERATOR_CHUNK_SIZE)
+                     using cursor.fetchmany(). This part is responsible for
+                     doing some column masking, and returning the rows in chunks.
+                2. sql/compiler.results_iter()
+                   - Returns one row at time. At this point the rows are still just
+                     tuples. In some cases the return values are converted to
+                     Python values at this location.
+                3. self.iterator()
+                   - Responsible for turning the rows into model objects.
+            """
+            self._fetch_all()
+            return iter(self._result_cache)
+
+        def iterator(self):
+            # 省略代码
+            pass
+
+
+将foreign key的控件换成datalist
+---------------------------------
+
+最直接的想法是在model定义的时候更换他的widget, 但是foreign key的控件不能通过__init__方法覆盖, 而是有一个hook:
+
+django.db.models.fields.related: 1754
+
+.. code-block:: python
+
+    def formfield(self, **kwargs):
+        db = kwargs.pop('using', None)
+        if isinstance(self.rel.to, six.string_types):
+            raise ValueError("Cannot create form field for %r yet, because "
+                             "its related model %r has not been loaded yet" %
+                             (self.name, self.rel.to))
+        defaults = {
+            'form_class': forms.ModelChoiceField,
+            'queryset': self.rel.to._default_manager.using(db),
+            'to_field_name': self.rel.field_name,
+        }
+        defaults.update(kwargs)
+        return super(ForeignKey, self).formfield(**defaults)
+
+
+admin 中自定义foreignkey和manytomany的queryset和widget
+
+admn中有两个方法:
+
+formfield_for_manytomany和formfield_for_foreignkey
+
+def formfield_for_foreignkey(self, db_field, request=None, **kwargs)
+
+def formfield_for_manytomany(self, db_field, request=None, **kwargs)
+
+kwargs中传入widget和queryset
+
+如在group admin中, 获取manytomany的permissions时, kwargs是这样的
+
+class GroupAdmin(admin.ModelAdmin):
+    search_fields = ('name',)
+    ordering = ('name',)
+    filter_horizontal = ('permissions',)
+
+    def formfield_for_manytomany(self, db_field, request=None, **kwargs):
+        if db_field.name == 'permissions':
+            qs = kwargs.get('queryset', db_field.rel.to.objects)
+            # Avoid a major performance hit resolving permission names which
+            # triggers a content_type load:
+            kwargs['queryset'] = qs.select_related('content_type')
+        return super(GroupAdmin, self).formfield_for_manytomany(
+            db_field, request=request, **kwargs)
+
+
+ForeignKey在form控件是forms.Modelchoicefield, 可以重载, 方法是在ForeignKey中的formfield方法中(django.db.models.fields.related:1754)
+
+    def formfield(self, **kwargs):
+        db = kwargs.pop('using', None)
+        if isinstance(self.rel.to, six.string_types):
+            raise ValueError("Cannot create form field for %r yet, because "
+                             "its related model %r has not been loaded yet" %
+                             (self.name, self.rel.to))
+        defaults = {
+            'form_class': forms.ModelChoiceField,
+            'queryset': self.rel.to._default_manager.using(db),
+            'to_field_name': self.rel.field_name,
+        }
+        defaults.update(kwargs)
+        return super(ForeignKey, self).formfield(**defaults)
+
+form中的changed_data是form来判断某个field是否有修改的方法, 主要是对比initial_data和post过来的data做对比(django.forms.forms:408)
+    def changed_data(self):
+        if self._changed_data is None:
+            self._changed_data = []
+            # XXX: For now we're asking the individual widgets whether or not the
+            # data has changed. It would probably be more efficient to hash the
+            # initial data, store it in a hidden field, and compare a hash of the
+            # submitted data, but we'd need a way to easily get the string value
+            # for a given field. Right now, that logic is embedded in the render
+            # method of each widget.
+            for name, field in self.fields.items():
+                prefixed_name = self.add_prefix(name)
+                data_value = field.widget.value_from_datadict(self.data, self.files, prefixed_name)
+                if not field.show_hidden_initial:
+                    initial_value = self.initial.get(name, field.initial)
+                    if callable(initial_value):
+                        initial_value = initial_value()
+                else:
+                    initial_prefixed_name = self.add_initial_prefix(name)
+                    hidden_widget = field.hidden_widget()
+                    try:
+                        initial_value = field.to_python(hidden_widget.value_from_datadict(
+                            self.data, self.files, initial_prefixed_name))
+                    except ValidationError:
+                        # Always assume data has changed if validation fails.
+                        self._changed_data.append(name)
+                        continue
+                if hasattr(field.widget, '_has_changed'):
+                    warnings.warn("The _has_changed method on widgets is deprecated,"
+                        " define it at field level instead.",
+                        RemovedInDjango18Warning, stacklevel=2)
+                    if field.widget._has_changed(initial_value, data_value):
+                        self._changed_data.append(name)
+                elif field._has_changed(initial_value, data_value):
+                    self._changed_data.append(name)
+        return self._changed_data
 

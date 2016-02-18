@@ -104,3 +104,44 @@ with 语句在PEP343中有论述, 一般使用就是with的开头调用__enter__
 3. contextlib.contextmanager指支持yield一次的生成器,　因为contextlib.contextmanager只在__enter__和__exit__方法各调用生成器的next方法一次，若生成器还未终止，引发异常.
 
 
+Generator send
+------------------
+
+yield 关键字既可以返回值给调用函数，也可以 **接收** 调用函数穿进来的数值
+
+.. code-block:: python
+
+    def coroutine():
+        for i in range(1, 5):
+            x = yield i
+            print("From Generator {}".format((x)))
+    c = coroutine()
+    c.send(None)
+    try:
+        while True:
+            print("From user {}".format(c.send(1)))
+    except StopIteration:
+        pass
+
+输出为
+
+From Generator 1
+
+From user 2
+
+From Generator 1
+
+From user 3
+
+From Generator 1
+
+From user 4
+
+From Generator 1
+
+执行流程为
+
+**第一次迭代生成器的时候，必须使用send(None)或者next()，不能send一个非None值**
+
+所以一开始，c.send(None)，启动生成器, 生成器执行到yield i的时候，返回1, 挂起，之后c.send(1), 则x等于send进来的值，为1，然后生成器继续执行，直到下一个yield, 这时打印出From Generator 1(x的值), 然后i=2, 再次执行到yield i, 返回i, 然后挂起．而上层语句或得返回值2，然后打印From user 2，然后继续send, 一次重复
+

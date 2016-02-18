@@ -57,3 +57,43 @@ from __future__ import unicode_literals
                 t.seek(0)
                 t.write(content)
                 t.truncate()
+
+context management
+------------------------
+
+with 语句在PEP343中有论述, 一般使用就是with的开头调用__enter__方法, 最后调用__exit__方法, 可以看成是try...finally语句.
+
+.. code-block:: python
+
+    with EXPR as VAR:
+        BLOCK
+
+相等于
+
+.. code-block:: python
+
+    mgr = (EXPR)
+    exit = type(mgr).__exit__  # Not calling it yet
+    value = type(mgr).__enter__(mgr)
+    exc = True
+    try:
+        try:
+            VAR = value  # Only if "as VAR" is present
+            BLOCK
+        except:
+            # The exceptional case is handled here
+            exc = False
+            if not exit(mgr, *sys.exc_info()):
+                raise
+            # The exception is swallowed if exit() returns true
+    finally:
+        # The normal and non-local-goto cases are handled here
+        if exc:
+            exit(mgr, None, None, None)
+
+注意的是
+1. __exit__方法不建议re-raise异常，应该是上层去处理异常
+2. 希望__exit__中不抛出(指定)异常，可以返回False, 返回True则是正常抛出异常. if arg[0] is Keyerror: return False
+3. contextlib.contextmanager指支持yield一次的生成器,　因为contextlib.contextmanager只在__enter__和__exit__方法各调用生成器的next方法一次，若生成器还未终止，引发异常.
+
+

@@ -1,3 +1,6 @@
+Python 2.7.x
+=================
+
 read xlrd datetime
 -------------------
 
@@ -82,6 +85,10 @@ with 语句在PEP343中有论述, 一般使用就是with的开头调用__enter__
             BLOCK
         except:
             # The exceptional case is handled here
+            # PEP343中是这样，其实感觉应该是这样
+            # if exit(mgr, *sys.exc_info()):
+            #     raise
+            # 因为exit返回False的时候，是不会抛出异常的
             exc = False
             if not exit(mgr, *sys.exc_info()):
                 raise

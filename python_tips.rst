@@ -104,8 +104,29 @@ with 语句在PEP343中有论述, 一般使用就是with的开头调用__enter__
 3. contextlib.contextmanager指支持yield一次的生成器,　因为contextlib.contextmanager只在__enter__和__exit__方法各调用生成器的next方法一次，若生成器还未终止，引发异常.
 
 
-Generator send
-------------------
+Generator and send
+-----------------------
+
+yield　返回值并挂起, 生成器产生斐波拉契数列
+
+.. code-block:: python
+
+    import itertool
+
+
+    def F():
+        a,b = 0,1
+        yield a
+        yield b
+        while True:
+            a, b = b, a + b
+            yield b
+
+    # 生成器实例
+    f = F()
+
+    # 迭代10次
+    list(itertools.islice(f, 10))
 
 yield 关键字既可以返回值给调用函数，也可以 **接收** 调用函数穿进来的数值
 

@@ -1,6 +1,9 @@
 Polymer
 =========
 
-1. Registration
-----------------
+version: 1.0
+
+
+vaadin combox box
+------------------
 

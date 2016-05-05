@@ -1,3 +1,35 @@
+DJANGO
+=======
+
+以下基于>=1.8,<1.9版本
+
+事务
+====
+
+django的事务控制在wsgi中
+
+django.core.handlers.wsgi.py(#158)
+
+.. code-block:: python
+
+    class WSGIHandler(base.BaseHandler):
+        def __call__(self, environ, start_response):
+            response = self.get_response(request)
+
+django.core.handlers.base(#132)
+
+.. code-block:: python
+
+    def get_response(self, request):
+        # 这里去wrap事务
+        wrapped_callback = self.make_view_atomic(callback)
+        try:
+            response = wrapped_callback(request, *callback_args, **callback_kwargs)
+        except Exception as e:
+            # 省略代码
+            pass
+
+
 ORM和测试
 ===========================
 

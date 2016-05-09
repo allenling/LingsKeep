@@ -80,7 +80,9 @@ pageAndSize: function (page, pageSize) {
      }
      this.$.collocationsTable.refreshItems();
    }
-8. 显示detail的时候, 外键还是用foreign-key-object-element来显示比较好
+8. 显示detail的时候, 外键还是用extras直接获取比较好
+  
+  也可以使用foreign-key-object-element来显示
 
   <shopowner-object-element pk="{{item.pk}}" on-value-changed="showShopowner"></shopowner-object-element>
 
@@ -90,6 +92,7 @@ pageAndSize: function (page, pageSize) {
     ...
     this.ShopownerName = e.detail.value['name'];
   }
+
 
   而像状态之类的只能获取list的属性, 只能两次渲染才能保证一定显示出来.因为不确定获取status的ajax是在获取item(如搭配)的ajax结束之前或者之后结束的
 

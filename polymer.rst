@@ -22,6 +22,19 @@ dom-if
 
 -----------------------------------------------------
 
+vaadin-grid
+-------------
+
+要想复制row和cell中的内容,要设置user-select的css为text,默认vaadin-grid中user-select的值为none.
+
+  vaadin-grid {
+    -moz-user-select: text;
+    -webkit-user-select: text;
+    -ms-user-select: text;
+  }
+
+
+
 1. polymer中,属性的顺序是重要的
 2. api的_i_get支持传入queryset
 3. changelist元素有两种情况, a. sku list b. 某个package的skus,在情况b中,会有两个请求,第一个是一开始获取所有sku,第二个是搜索具体某个pacakage的请求,能不能避免第一个请求?

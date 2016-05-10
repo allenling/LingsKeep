@@ -127,3 +127,14 @@ pageAndSize: function (page, pageSize) {
 
 
 
+6. psk中package changelist 会发送两次package list的请求, 在polymer element中不存在.
+------------------------------------------------------------------------------------
+   原因是query和page,pageSize传参问题. 在page-changelist-element中, query使用了observer,同时observers监听了page,pageSize,所以第一次初始化的时候, package-changelist-element中的page和pageSize
+   是默认值,则触发observers, 请求第一次,之后query从psk中传入{}(page.js中,若没有querystring,则data.query就是{}), 触发query的observer(query不给value,就是undefined). 若希望设置query的默认值为{},这样
+   psk传入{}的时候不触发query的observer这也不行,因为设置了value了必然会触发observer的.
+   
+   1. 解决方法就是设置一个中间值_query,package-lst-element的filterParams绑定到_query, 若query有oldValue == undefined && Object.keys(newValue).length == 0的时候,不赋值_query,否则_query=query.
+      但是若一开始query就有值,如一开始query={"shopowner": 1}的时候,依然会发送两个请求,第一个是不带querystring的请求, 第二个就是带有querystring的请求.所以, 我们希望page, pageSize和query一起考虑,而不是
+      分别对他们进行监听. 
+   2. 可以使用observers[pullRequest(page, pageSize, filterParams)], 这个时候polymer会将会在这三个参数都赋值完成之后触发observers方法, 关键是三个参数都赋值之后才触发该observers方法. 所以,针对1中最后还是
+      会发起两个请求在这里就只会一个带有querystring的请求了.

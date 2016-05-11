@@ -138,3 +138,4 @@ pageAndSize: function (page, pageSize) {
       分别对他们进行监听. 
    2. 可以使用observers[pullRequest(page, pageSize, filterParams)], 这个时候polymer会将会在这三个参数都赋值完成之后触发observers方法, 关键是三个参数都赋值之后才触发该observers方法. 所以,针对1中最后还是
       会发起两个请求在这里就只会一个带有querystring的请求了.
+  所以, observers主要是用在element属性传递的情况, 如<element a="{{a}}" b="{{b}}">. 这里polymer element在初始化,也就是是调用构造函数的时候,将参数一次传递进去.

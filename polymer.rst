@@ -19,8 +19,42 @@ dom-if
 
 需要用Polymer.dom(this.root).querySelector()来选择元素
 
+若dom-if为false, 则不会删除元素,只是设置元素的style为display: none.
 
------------------------------------------------------
+changed事件
+-------------
+
+polymer中的绑定对象的时候, 要注意绑定方法, 否则会失效.
+    
+最好是将对象先保存到一个中间变量, 如tmp, 然后直接赋值, 这样调用了polymer的set方法, 才会
+检测到绑定对象的update.
+
+let tmp = {}
+for (let c in bindData) {
+  tmp[c] = bindData[c];
+}
+this.data = bindData;
+(等效于this.set('data', bindData))
+
+23.2 或者直接绑定对象的属性, 但这样不灵活.
+
+<element data-name="{{data.name}}"></element>
+
+
+文档:
+Binding to structured data
+
+For a path binding to update, the path value must be updated in one of the following ways:
+
+1. Using a {{site.project_title}} property binding to another element. 
+
+2. Using the set API, which provides the required notification to elements with registered interest.
+
+
+所以, 一般一旦调用set, 则都会触发change事件的, 因为就算键名和键值都一样, 两个对象使用等于操作(==, ===, Object.is等等)都不一定是相等的.
+
+若监听某个属性的变化, 则必须调用属性的set方法, site.project_title = value.
+
 
 vaadin-grid
 -------------
@@ -33,109 +67,147 @@ vaadin-grid
     -ms-user-select: text;
   }
 
+page.js的一些bug
+------------------
+
+当hash=true, 并且直接访问地址为rootUrl/#!/path/to/somewhere会404, 这是因为在page.js中, 删除路径中的#!的时候, 有bug
+
+# line: 546
+function onclick(e) {
+  // 省略代码
+  # line:594
+  if (hashbang) path = path.replace('#!', ''); 
+
+# line:379
+function Context(path, state) {
+  // 省略代码
+  # line: 385
+  if (hashbang) path = path.replace('#!', ''); 
+
+比如一个链接路径为rootUrl/#!/path/to/somewhere
+
+删除#!之后, 为rootUrl//#!/path/to/somewhere(若rootUrl=/, 则得到//path/to/somewhere)
+
+最简单的方法就是删除掉最前面的/
 
 
-1. polymer中,属性的顺序是重要的
-2. api的_i_get支持传入queryset
-3. changelist元素有两种情况, a. sku list b. 某个package的skus,在情况b中,会有两个请求,第一个是一开始获取所有sku,第二个是搜索具体某个pacakage的请求,能不能避免第一个请求?
-   由于在sku-list-element中observers了page和pageSize, 则在package-sku-element中不传入page给sku-element,有sku-list-element自己去设置page, 根本原因是page到底是在list元素里面控制还是交给paginator来控制.
-4. 倾向与list元素只是接受query dict,然后generateReuqest,parseResponse, 而组织page,page_size等参数的行为在父元素中.
-5. 解决方式是用中间变量来限制数据绑定
-
-
-<sku-list-element page="{{_page}}" page-size="{{_pageSize}}"></sku-list-element>
-
-page: {
-  type: Number,
-  value: 1
-},
-pageSize: {
-  type: Number,
-  value: 100
-},
-_page: {
-  type: Number,
-},
-_pageSize: {
-  type: Number,
-},
-
-observers: ['pageAndSize(page, pageSize)]
-
-pageAndSize: function (page, pageSize) {
-  if (this.package) {
-    this._page = this.page;
-    this._pageSize = this.pageSize;
-  }
-}
-
-6. <element name="status"></element>, <element name="{{name}}"></element>, <element name$="{{status}}"></element>的区别
-7. 设置vaadin-grid的renderer的时候, 比如要显示状态的名称, 记得rerender一下vaadin-grid
-   
-   <collocation-status-filter-element on-items-changed="reRenderGrid"></collocation-status-filter-element>
-
-   var statusRenderer = function (cell) {
-     cell.element.innerHTML = cell.data; 
-     if (cell.data == null) {
-       return;
-     }
-     let items = self.$.statusFilter.items;
-     let index = self.$.statusFilter.$.collocationStatusFilter.$.vaadin._indexOfValue(String(cell.data));
-     if (index < 0) {
-       return;
-     }
-     cell.element.innerHTML = items[index][1];
-   }
-
-   reRenderGrid: function (e) {
-     if (!this.$.collocationsTable || !e.detail.value || e.detail.value.length == 0) {
-       return;
-     }
-     this.$.collocationsTable.refreshItems();
-   }
-8. 显示detail的时候, 外键还是用extras直接获取比较好
-  
-  也可以使用foreign-key-object-element来显示
-
-  <shopowner-object-element pk="{{item.pk}}" on-value-changed="showShopowner"></shopowner-object-element>
-
-  <paper-item >{{shopownerName}}</paper-item>
-
-  showShopowner: function (e) {
-    ...
-    this.ShopownerName = e.detail.value['name'];
+# line: 546
+function onclick(e) {
+  // 省略代码
+  # line:594
+  if (hashbang) {
+    path = path.replace('#!', '');
+    if (path[1] == '/' && path[0] == path[1]) {
+      path = path.substring(1);
+    }
   }
 
-
-  而像状态之类的只能获取list的属性, 只能两次渲染才能保证一定显示出来.因为不确定获取status的ajax是在获取item(如搭配)的ajax结束之前或者之后结束的
-
-  <collocation-status-list-element on-value-changed="showStatus"></collocation-status-list-element>
-
-  <paper-item >{{statusName}}</paper-item>
-
-  item: {
-    type: Object,
-    observer: '_itemChange'
-  }
-  _itemChange: function () {
-    this.showStatus();
-  }
-  showStatus: function () {
-    for () {
+# line:379
+function Context(path, state) {
+  // 省略代码
+  # line: 385
+  if (hashbang) {
+    this.path = this.path.replace('#!', '') || '/';
+    if (this.path[1] == '/' && this.path[0] == this.path[1]) {
+      this.path = this.path.substring(1);
     }
   }
 
 
+observer和observers
+--------------------------
 
-6. psk中package changelist 会发送两次package list的请求, 在polymer element中不存在.
-------------------------------------------------------------------------------------
-   原因是query和page,pageSize传参问题. 在page-changelist-element中, query使用了observer,同时observers监听了page,pageSize,所以第一次初始化的时候, package-changelist-element中的page和pageSize
-   是默认值,则触发observers, 请求第一次,之后query从psk中传入{}(page.js中,若没有querystring,则data.query就是{}), 触发query的observer(query不给value,就是undefined). 若希望设置query的默认值为{},这样
-   psk传入{}的时候不触发query的observer这也不行,因为设置了value了必然会触发observer的.
-   
-   1. 解决方法就是设置一个中间值_query,package-lst-element的filterParams绑定到_query, 若query有oldValue == undefined && Object.keys(newValue).length == 0的时候,不赋值_query,否则_query=query.
-      但是若一开始query就有值,如一开始query={"shopowner": 1}的时候,依然会发送两个请求,第一个是不带querystring的请求, 第二个就是带有querystring的请求.所以, 我们希望page, pageSize和query一起考虑,而不是
-      分别对他们进行监听. 
-   2. 可以使用observers[pullRequest(page, pageSize, filterParams)], 这个时候polymer会将会在这三个参数都赋值完成之后触发observers方法, 关键是三个参数都赋值之后才触发该observers方法. 所以,针对1中最后还是
-      会发起两个请求在这里就只会一个带有querystring的请求了.
-  所以, observers主要是用在element属性传递的情况, 如<element a="{{a}}" b="{{b}}">. 这里polymer element在初始化,也就是是调用构造函数的时候,将参数一次传递进去.
+在element中赋值属性的时候, 会调用observers
+
+<my-element property-one="{{a}}" property-two="{{b}}"></my-element>
+
+
+obervers: ["test(propertyOne, proertyTwon)"]
+
+在my-element初始化的时候, 会调用test, 并且propertyOne, proertyTwon的值分别为父元素的a和b. 之后一旦属性有修改, 都会调用test, 类似与observer.
+
+
+若需要监听很多属性, 可以使用observer, 但是这样在初始化的时候, 会调用每一个observer, 例如上面的例子, 会分别调用propertyOne和propertyTwo的observer, 若propertyOne和propertyTwo是共同影响方法的, 则使用observers.
+
+例如, my-element主要是发送api获取数据. 
+
+目标api传参中, page, page_size用于分页, extras用于获取额外的信息, query可以为空, 这样可以返回所有的记录. extras可以不传入, page, page_size必须传入.
+
+我们希望元素可以这样
+
+<my-element page="{{page}}" page-size="{{pageSize}}" extras="{{extras}}" query="{{query}}"></my-element>
+
+其中, query表示url中的querystring. 
+
+显然, 发送api的时候, 受到page, pageSize, extras, query的影响, 所以不能只是对每一个属性单独添加observer了. 可以使用observers.
+
+由于observers中的属性, 必须定义初始值, 所以, 一开始, 可以这么定义
+
+page: {
+  type: String,
+  value: 1
+}
+
+pageSize: {
+  type: String,
+  value: 100
+}
+
+extras: {
+  type: String,
+  value: ''
+}
+
+query: {
+  type: Object,
+  value: {}
+}
+
+observers: ["pullRequest(page, pageSize, extras, query)"]
+
+pullRequest: function(page, pageSize, extras, query) {
+  // 发送请求
+}
+
+这样, 父元素中可以这么使用:
+
+<my-element page="{{page}}" page-size="{{pageSize}}" extras="{{extras}}" query="{{query}}"></my-element>
+
+但是这样有个问题, api会发送两次, 因为一开始my-element初始化的时候, 会调用observers方法pullRequest. 其中的参数值都为属性的初始化值, 这个时候, query为{}, 则不管父元素的传入的参数, 直接发送了一次api请求.
+
+而在父元素中, 若传入的page, pageSize, extras, query有任一一个不同, 就又会发送第二次api请求. 明显, 这样是不合理的. 我们希望参数由父元素决定.
+
+我们可以明显区分query为null和{}所表达的意思, null表示没有querystring, 是不合理的, 而{}表示querystring为空, 是合理的. 这样, 我们在query的初始值设置为null, 在pullRequest中
+
+判断, 只有query!=null的时候才发送请求, 则上面第一次请求就被过滤掉, 不会发送了
+
+
+page: {
+  type: String,
+  value: 1
+}
+
+pageSize: {
+  type: String,
+  value: 100
+}
+
+extras: {
+  type: String,
+  value: ''
+}
+
+query: {
+  type: Object,
+  value: null
+}
+
+observers: ["pullRequest(page, pageSize, extras, query)"]
+
+pullRequest: function(page, pageSize, extras, query) {
+  if (query == null) {
+    return;  
+  }
+  // 发送请求
+}
+

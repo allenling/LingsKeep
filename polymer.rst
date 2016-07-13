@@ -211,3 +211,23 @@ pullRequest: function(page, pageSize, extras, query) {
   // 发送请求
 }
 
+dom-repeat update Array
+--------------------------
+
+
+dom-repeat绑定的Array, 更新的时候, 必须调用polymer自己的set方法才能使得dom-repeat刷新Array.
+
+<template is="dom-repeat" items="{{myArray}}" >
+  <p >{{item.name}}</p>
+</template>
+
+myMethod: function () {
+  // can not update dom-repeat Array
+  myArray[0].name = 'new name';
+
+  // must invoke this.set
+  this.set('myArray.0.name', 'new name'); 
+}
+
+Polymer提供了一系列array操作方法来帮助更新dom-repeat中的Array.
+文档 https://www.polymer-project.org/1.0/docs/devguide/properties#array-mutation

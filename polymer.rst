@@ -143,7 +143,7 @@ my-element主要是发送api获取数据.
 
 由于observers中的属性, 必须定义初始值, 所以, 一开始, 可以这么定义
 
-.. code-block:: javascript
+.. code-block::
 
     page: {
       type: String,
@@ -183,7 +183,7 @@ my-element主要是发送api获取数据.
 
 判断, 只有query!=null的时候才发送请求, 则上面第一次请求就被过滤掉, 不会发送了
 
-.. code-block:: javascript
+.. code-block::
 
     page: {
       type: String,
@@ -222,7 +222,7 @@ Polymer中property(polymer对象定义的properties)绑定的顺序是element上
 1. 例子
 ~~~~~~~~
 
-.. code-block:: javascript
+.. code-block::
 
     // my-element的定义
     Polymer({
@@ -299,7 +299,7 @@ Polymer中property(polymer对象定义的properties)绑定的顺序是element上
 
 这是因为polymer在建立绑定的时候, 就是根据attribute的倒序来绑定的, 也就是先绑定data-two, 再绑定data-one
 
-.. code-block:: javascript
+.. code-block::
 
     // polymer.html:179-228
     _parseNodeAttributeAnnotations: function (node, annotation) {

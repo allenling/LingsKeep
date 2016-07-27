@@ -72,16 +72,16 @@ page.js的一些bug
 
 当hash=true, 并且直接访问地址为rootUrl/#!/path/to/somewhere会404, 这是因为在page.js中, 删除路径中的#!的时候, 有bug
 
-# line: 546
+// line: 546
 function onclick(e) {
   // 省略代码
-  # line:594
+  // line:594
   if (hashbang) path = path.replace('#!', ''); 
 
-# line:379
+// line:379
 function Context(path, state) {
   // 省略代码
-  # line: 385
+  // line: 385
   if (hashbang) path = path.replace('#!', ''); 
 
 比如一个链接路径为rootUrl/#!/path/to/somewhere
@@ -91,10 +91,10 @@ function Context(path, state) {
 最简单的方法就是删除掉最前面的/
 
 
-# line: 546
+// line: 546
 function onclick(e) {
   // 省略代码
-  # line:594
+  // line:594
   if (hashbang) {
     path = path.replace('#!', '');
     if (path[1] == '/' && path[0] == path[1]) {
@@ -102,10 +102,10 @@ function onclick(e) {
     }
   }
 
-# line:379
+// line:379
 function Context(path, state) {
   // 省略代码
-  # line: 385
+  // line: 385
   if (hashbang) {
     this.path = this.path.replace('#!', '') || '/';
     if (this.path[1] == '/' && this.path[0] == this.path[1]) {
@@ -117,21 +117,21 @@ function Context(path, state) {
 observer和observers
 --------------------------
 
-在element中赋值属性的时候, 会调用observers
+调用顺序是先observer, 再observers.
 
-<my-element property-one="{{a}}" property-two="{{b}}"></my-element>
+observers和observer的区别是
 
+1. observers监听多个属性变动, 并且在初始化的时候只调用一次. 而observer会分别调用多个属性的observer.
 
-obervers: ["test(propertyOne, proertyTwon)"]
+2. 顺序上, 一定是先observer, 再到observers.
 
-在my-element初始化的时候, 会调用test, 并且propertyOne, proertyTwon的值分别为父元素的a和b. 之后一旦属性有修改, 都会调用test, 类似与observer.
+3. observers中, 必须是所有的参数都部位undefined, 才会调用, 所以polymer建议observers的每一个property都给一个value.
 
+4. 经过初始化之后, observers中任意一个property变化, 都会触发observers, 这个时候observers的行为就像observer一样.
 
-若需要监听很多属性, 可以使用observer, 但是这样在初始化的时候, 会调用每一个observer, 例如上面的例子, 会分别调用propertyOne和propertyTwo的observer, 若propertyOne和propertyTwo是共同影响方法的, 则使用observers.
+例子 
 
-例如, my-element主要是发送api获取数据. 
-
-目标api传参中, page, page_size用于分页, extras用于获取额外的信息, query可以为空, 这样可以返回所有的记录. extras可以不传入, page, page_size必须传入.
+my-element主要是发送api获取数据. 
 
 我们希望元素可以这样
 
@@ -143,73 +143,218 @@ obervers: ["test(propertyOne, proertyTwon)"]
 
 由于observers中的属性, 必须定义初始值, 所以, 一开始, 可以这么定义
 
-page: {
-  type: String,
-  value: 1
-}
+.. code-block:: javascript
 
-pageSize: {
-  type: String,
-  value: 100
-}
-
-extras: {
-  type: String,
-  value: ''
-}
-
-query: {
-  type: Object,
-  value: {}
-}
-
-observers: ["pullRequest(page, pageSize, extras, query)"]
-
-pullRequest: function(page, pageSize, extras, query) {
-  // 发送请求
-}
+    page: {
+      type: String,
+      value: 1
+    }
+    
+    pageSize: {
+      type: String,
+      value: 100
+    }
+    
+    extras: {
+      type: String,
+      value: ''
+    }
+    
+    query: {
+      type: Object,
+      value: {}
+    }
+    
+    observers: ["pullRequest(page, pageSize, extras, query)"]
+    
+    pullRequest: function(page, pageSize, extras, query) {
+      // 发送请求
+    }
 
 这样, 父元素中可以这么使用:
 
 <my-element page="{{page}}" page-size="{{pageSize}}" extras="{{extras}}" query="{{query}}"></my-element>
 
-但是这样有个问题, api会发送两次, 因为一开始my-element初始化的时候, 会调用observers方法pullRequest. 其中的参数值都为属性的初始化值, 这个时候, query为{}, 则不管父元素的传入的参数, 直接发送了一次api请求.
+但是这样有个问题, api会发送两次, 因为一开始my-element初始化的时候, 会调用observers方法pullRequest. 其中的参数值都为属性的初始化值, 直接发送了一次api请求.
 
-而在父元素中, 若传入的page, pageSize, extras, query有任一一个不同, 就又会发送第二次api请求. 明显, 这样是不合理的. 我们希望参数由父元素决定.
+而在父元素中, 若传入的page, pageSize, extras, query有任一一个不同, 比如pageSize=20, 则触发observers, 会发送第二次api请求. 明显, 这样是不合理的. 我们希望参数由父元素决定.
 
 我们可以明显区分query为null和{}所表达的意思, null表示没有querystring, 是不合理的, 而{}表示querystring为空, 是合理的. 这样, 我们在query的初始值设置为null, 在pullRequest中
 
 判断, 只有query!=null的时候才发送请求, 则上面第一次请求就被过滤掉, 不会发送了
 
+.. code-block:: javascript
 
-page: {
-  type: String,
-  value: 1
-}
+    page: {
+      type: String,
+      value: 1
+    }
+    
+    pageSize: {
+      type: String,
+      value: 100
+    }
+    
+    extras: {
+      type: String,
+      value: ''
+    }
+    
+    query: {
+      type: Object,
+      value: null
+    }
+    
+    observers: ["pullRequest(page, pageSize, extras, query)"]
+    
+    pullRequest: function(page, pageSize, extras, query) {
+      if (query == null) {
+        return;  
+      }
+      // 发送请求
+    }
 
-pageSize: {
-  type: String,
-  value: 100
-}
+Polymer property 绑定顺序
+---------------------------
 
-extras: {
-  type: String,
-  value: ''
-}
+Polymer中property(polymer对象定义的properties)绑定的顺序是element上attribute(dom上定义的attribute)的倒序.
 
-query: {
-  type: Object,
-  value: null
-}
+1. 例子
+~~~~~~~~
 
-observers: ["pullRequest(page, pageSize, extras, query)"]
+.. code-block:: javascript
 
-pullRequest: function(page, pageSize, extras, query) {
-  if (query == null) {
-    return;  
-  }
-  // 发送请求
-}
+    // my-element的定义
+    Polymer({
+      is: 'my-element',
+      properties: {
+        query: {
+          type: Object,
+          observer: 'queryChange',
+          value: null
+        },
+        pkg: {
+          type: String,
+          observer: 'pkgChange',
+          value: null
+        }
+      },
+      observers: ['pullRequest(query, pkg)'],
+      pkgChange: function (newP, oldP) {
+        console.log(newP);
+        console.log(oldP);
+        console.log('log pkg');
+      },
+      queryChange: function (newQ, oldQ) {
+        console.log(newQ);
+        console.log(oldQ);
+        console.log('log query');
+      }
+      pullRequest: function (query, pkg) {
+        
+      }
+    });
+
+    // 在psk的routing.html中
+
+    function setAppInfo(data) {
+      let tmp = {};
+      tmp['query'] = data.query;
+      tmp['params'] = {};
+      app.set(app.route, tmp);
+      // 调用Polymer.set方法去强制触发change event
+      // Polymer对象还提供了很多这种操作, 必须使用Polymer内置的方法才能触发数据更新
+      // 比如要更新dom-repeat中的items中的某个元素的key, 必须调用Polymer.set(), 直接array[0].key = newValue的话, dom-repeat并不会重现渲染items.
+      for (let key in data.params) {
+        //  这样是不行的 app[app.route]['params'][key] = data.params[key];
+        app.set(app.route + '.params.' + key, data.params[key]);
+      }
+    }
+
+    page('/packages', function(data) {
+      app.route = 'myRoute';
+      app.appName = 'myElement';
+      setAppInfo(data);
+      setFocus(app.route);
+    });
+
+在psk的index.html使用my-element
+
+1. <my-element pkg="{{myRoute.params.pkg}}" query="{{myRoute.query}}" ></my-element>
+   1.1 在app.set的时候, 先触发queryChange, 之后再触发pullRequest(由query change触发的), 这时因为pkg不为undefined 并且query为空字典, 发送第一次请求.
+   1.2 触发pkgChange(由params change触发), 这个时候new pkg = undefined, 则并不会触发pullRequest
+   1.3 之后循环set params, 触发pkg change, 这时候pkg不为undefined, 接着触发pullRequest, 发送第二次请求
+
+2. <my-element query="{{query}}" pkg="{{params.pkg}}" ></my-element>
+   2.1 app.set, 触发pkgChange(由params change触发), 这个时候new pkg = undefined, 则并不会触发pullRequest
+   2.2 接着触发queryChange, 之后再触发pullRequest(由query change触发的), 这时因为pkg=undefined, 不触发pullRequest.
+   2.3 之后循环set params, 触发pkg change, 这时候pkg不为undefined, 接着触发pullRequest, 发送一次请求
+
+2. 绑定过程
+~~~~~~~~~~~~
+
+<my-element data-one="{{dataOne}}" data-two="{{dataTwo}}" ></my-element>
+
+这里, 会先触发data-two的observer, 之后是跟data-two有关的observers, 之后是data-one的observer, 之后是跟data-one有关的observers.
+
+这是因为polymer在建立绑定的时候, 就是根据attribute的倒序来绑定的, 也就是先绑定data-two, 再绑定data-one
+
+.. code-block:: javascript
+
+    // polymer.html:179-228
+    _parseNodeAttributeAnnotations: function (node, annotation) {
+      // 这里获取element的attributes
+      var attrs = Array.prototype.slice.call(node.attributes);
+      //这里倒序去绑定
+      for (var i = attrs.length - 1, a; a = attrs[i]; i--) {
+        var n = a.name;
+        var v = a.value;
+        var b;
+        if (n.slice(0, 3) === 'on-') {
+        node.removeAttribute(n);
+        annotation.events.push({
+          name: n.slice(3),
+          value: v
+        });
+        } else if (b = this._parseNodeAttributeAnnotation(node, n, v)) {
+          annotation.bindings.push(b);
+        } else if (n === 'id') {
+          annotation.id = v;
+        }
+      }
+    },
+    // 这里是绑定的过程
+    _parseNodeAttributeAnnotation: function (node, name, value) {
+      var parts = this._parseBindings(value);
+      if (parts) {
+        var origName = name;
+        var kind = 'property';
+        if (name[name.length - 1] == '$') {
+          name = name.slice(0, -1);
+          kind = 'attribute';
+        }
+        var literal = this._literalFromParts(parts);
+        if (literal && kind == 'attribute') {
+          node.setAttribute(name, literal);
+        }
+        if (node.localName === 'input' && origName === 'value') {
+          node.setAttribute(origName, '');
+        }
+        node.removeAttribute(origName);
+        var propertyName = Polymer.CaseMap.dashToCamelCase(name);
+        if (kind === 'property') {
+          name = propertyName;
+        }
+        return {
+          kind: kind,
+          name: name,
+          propertyName: propertyName,
+          parts: parts,
+          literal: literal,
+          isCompound: parts.length !== 1
+        };
+      }
+    },
 
 dom-repeat update Array
 --------------------------

@@ -205,6 +205,84 @@ gunicorn中, 信号处理串行化而不是使用call back的形式, 把接收�
             self.kill_workers(signal.SIGKILL)
 
 
+worker初始化和启动
+-------------------
+
+gunicorn.worker.base.Worker用于初始化, 初始化signal的handler, 调用accept, 等待连接. 遇到TERM/QUIT等信号, 直接设置self.alive=True, 然后等待下一个循环判断self.alive, 为False, 则直接退出
+
+
+.. code-block:: python
+
+   # gunicorn.worker.base
+
+   class Worker(object):
+       def init_process(self):
+           # 初始化信号
+           self.init_signals()
+           # 加载wsgi app
+           self.load_wsgi()
+           # 调用具体worker的run方法, 启动worker
+           self.run()
+
+       def init_signals(self):
+           # reset signaling
+           [signal.signal(s, signal.SIG_DFL) for s in self.SIGNALS]
+           # init new signaling
+           signal.signal(signal.SIGQUIT, self.handle_quit)
+           signal.signal(signal.SIGTERM, self.handle_exit)
+           signal.signal(signal.SIGINT, self.handle_quit)
+           signal.signal(signal.SIGWINCH, self.handle_winch)
+           signal.signal(signal.SIGUSR1, self.handle_usr1)
+           signal.signal(signal.SIGABRT, self.handle_abort) 
+
+       # 处理TERM/QUIT/INT信号
+       def handle_exit(self, sig, frame):
+           self.alive = False
+
+       def handle_quit(self, sig, frame):
+           self.alive = False
+           # worker_int callback
+           self.cfg.worker_int(self)
+           time.sleep(0.1)
+           sys.exit(0)
+
+       def handle_abort(self, sig, frame):
+           self.alive = False
+           self.cfg.worker_abort(self)
+           sys.exit(1)
+
+
+在gunicorn.worker.sync.SyncWorker中, run直接等待连接, 判断是否alive, 是否需要return或者exit
+
+.. code-block:: python
+
+  # gunicorn.worker.sync.SyncWorker
+  class SyncWorker(object):
+
+      def run_for_one(self, timeout):
+          listener = self.sockets[0]
+          # 是否alive
+          while self.alive:
+              # 标注自己的update time, 便于master检查超时
+              self.notify()
+              try:
+                  # 等待连接
+                  self.accept(listener)
+                  continue
+
+              except EnvironmentError as e:
+                  if e.errno not in (errno.EAGAIN, errno.ECONNABORTED,
+                          errno.EWOULDBLOCK):
+                      raise
+
+              # 如果master已经改变(若master已经死掉, worker会被init进程接收, 也算master改变), 则退出
+              if not self.is_parent_alive():
+                  return
+
+              try:
+                  self.wait(timeout)
+              except StopWaiting:
+                  return
 
 
 当master被杀死之后, worker自己shutodown

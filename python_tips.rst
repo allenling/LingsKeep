@@ -166,3 +166,43 @@ From Generator 1
 
 所以一开始，c.send(None)，启动生成器, 生成器执行到yield i的时候，返回1, 挂起，之后c.send(1), 则x等于send进来的值，为1，然后生成器继续执行，直到下一个yield, 这时打印出From Generator 1(x的值), 然后i=2, 再次执行到yield i, 返回i, 然后挂起．而上层语句或得返回值2，然后打印From user 2，然后继续send, 一次重复
 
+读取一个py/pyc文件的变量, 使用内置函数execfile.
+------------------------------------------------
+
+..code-block:: python
+
+    cfg = {}
+    execfile(my_file, cfg, cfg)
+    execfile会把除cfg中的变量赋值到cfg中.
+    # 一般解析之后, cfg['__builtins__']会包含__builtins__的很多很多变量
+    cfg = {'__builtins__': {...}}
+    # 为了方便, 可以这样
+    cfg = {'__builtins__': __builtins__}把__builtins__排除在外.
+
+__name__和__main__
+----------------------
+
+在通常情况下, 若我们直接执行py文件, 在文件最后, 会写上
+
+.. code-block:: python
+
+  def main():
+      pass
+
+  if __name__ == '__main__':
+      main()
+
+但是__name__ is '__main__'为False. is是比对对象的identity, 在python中就是id返回的值, 也就是内存地址. ==只是比对值, 每个对象都可以有一个__eq__的方法, 当使用==的时候, 就是调用
+该方法.
+
+所以, __main__是一个常量, 而__name__是解释器在执行py文件(或者导入module)的时候赋值为'__main__', 两者id出来是不一样的.
+
+.. code-block:: python
+
+   >>> a = 'pub'
+   >>> b = ''.join(['p', 'u', 'b'])
+   >>> a == b
+   True
+   >>> a is b
+   False
+

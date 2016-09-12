@@ -680,6 +680,108 @@ django.db.models.query
             pass
 
 
+django.setup如何加载model
+--------------------------
+
+.. code-block:: python
+
+    # 在django.setup()中
+
+    for app_config in self.app_configs.values():
+        all_models = self.all_models[app_config.label]
+        # 这里导入models
+        app_config.import_models(all_models)
+
+找到models.py, 这里model的module名字是写死在代码中的
+
+.. code-block:: python
+
+    # 在django.apps.config.py中
+    # models的module名称是写死的
+    MODELS_MODULE_NAME = 'models'
+    def import_models(self, all_models):
+        # Dictionary of models for this app, primarily maintained in the
+        # 'all_models' attribute of the Apps this AppConfig is attached to.
+        # Injected as a parameter because it gets populated when models are
+        # imported, which might happen before populate() imports models.
+        self.models = all_models
+
+        if module_has_submodule(self.module, MODELS_MODULE_NAME):
+            # 这里导入models
+            models_module_name = '%s.%s' % (self.name, MODELS_MODULE_NAME)
+            self.models_module = import_module(models_module_name)
+
+
+对field进行复杂聚合
+--------------------
+
+比如, django搜索某个月之内的数据, 思路基本上是设置一个Function(即一个mysql的expression), 提取处月份, 然后annotate. django中的COUNT之类的也是这样一个思路, 提取除数据然后annotate.
+
+或者, 自定义一个field, 叫month_field
+
+auto_now_add/auto_now
+----------------------
+
+loaddata的时候,即使datetime设置为auto_add_now, fixture中datetime也必须给值, 因为auto_now_add/auto_now是在save的时候, django自己去设置的. 而loaddata
+
+不管是lodadata还是objects.create/save, 都是调用到django.db.models.base.Model.save_base, 区别在下面:
+
+.. code-block:: python
+
+   # django.db.models.sql.compiler
+
+   class SQLInsertCompiler(SQLCompiler):
+   
+       def as_sql(self):
+           
+           if has_fields:
+               params = values = [
+               [f.get_db_prep_save(
+                    getattr(obj, f.attname) if self.query.raw else f.pre_save(obj, True),
+                    connection=self.connection
+                ) for f in fields
+               ]
+               for obj in self.query.objs
+              ]
+
+其中, lodadata的时候, self.query.raw为True, 而getattr(obj, f.attname)=None, 但是DateField/DatetimeField是null=False, blank=Ture的, 并不允许为None, 所以报错.
+而objects.create/save的时候, self.query.raw=False, 则调用DateField/DatetimeField中的pre_save, 在pre_save中, 会对auto_now_add/auto_now判断, 将当前日期/时间赋值给object.
+
+而在lodadata中, 会调用django.core.serializers.deserialize获得一个django.core.serializers.base.Deserializer对象, 调用Deserializer.save()方法, 在save方法中, 手动设置了sql.raw=True
+
+.. code-block:: python
+
+   class DeserializedObject(object):
+       def save(self, save_m2m=True, using=None):
+           # 这里设置了raw=True
+           models.Model.save_base(self.object, using=using, raw=True)
+           if self.m2m_data and save_m2m:
+               for accessor_name, object_list in self.m2m_data.items():
+                   setattr(self.object, accessor_name, object_list)
+
+           # prevent a second (possibly accidental) call to save() from saving
+           # the m2m data twice.
+           self.m2m_data = None
+
+而关于raw参数, 在save_base的注释中有说明. raw表示在save之前, 不会对model的所有field有改动.
+
+.. code-block:: python
+
+  def save_base(self, raw=False, force_insert=False,
+                force_update=False, using=None, update_fields=None):
+      """
+      Handles the parts of saving which should be done only once per save,
+      yet need to be done in raw saves, too. This includes some sanity
+      checks and signal sending.
+  
+      The 'raw' argument is telling save_base not to save any parent
+      models and not to do any changes to the values before save. This
+      is used by fixture loading.
+      """
+      # 省略代码
+      pass
+
+
 将foreign key的控件换成datalist
 ---------------------------------
 

@@ -376,3 +376,35 @@ myMethod: function () {
 
 Polymer提供了一系列array操作方法来帮助更新dom-repeat中的Array.
 文档 https://www.polymer-project.org/1.0/docs/devguide/properties#array-mutation
+
+Object.assign
+---------------
+
+Object.assign之后并不是深copy, 如列表的子元素变化的话, 会影响之前object的子元素
+    
+a = Object.assign([], x=[{'name': 1}, {'name': 2}])
+a[0].checked = true;
+a[0].checked == x[0].checked;
+
+polymer element实例修改的类属性.
+------------------------------------
+    
+<my-element >
+  <my-sub-element data="[[data]]>
+    # 修改了my-element的data
+  </my-sub-element>
+
+  properties: {
+    data: {
+      type: Array,
+      value: [1,2,3]
+    }
+  }
+</my-element>
+
+<template is="dom-repeat" items='[一些元素]' >
+  <my-element ></my-element>
+</template>
+
+上面的repeat中, my-element的data被改变, 则新生成的my-element中的data也是修改过的. 比如, data被my-sub-element修改为[1]之后, 传入my-sub-element的data就是[1]
+

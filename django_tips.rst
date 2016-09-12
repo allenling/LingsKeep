@@ -812,30 +812,30 @@ admn中有两个方法:
 
 formfield_for_manytomany和formfield_for_foreignkey
 
-def formfield_for_foreignkey(self, db_field, request=None, **kwargs)
-
-def formfield_for_manytomany(self, db_field, request=None, **kwargs)
-
 kwargs中传入widget和queryset
 
 如在group admin中, 获取manytomany的permissions时, kwargs是这样的
 
-class GroupAdmin(admin.ModelAdmin):
-    search_fields = ('name',)
-    ordering = ('name',)
-    filter_horizontal = ('permissions',)
+.. code-block:: python
 
-    def formfield_for_manytomany(self, db_field, request=None, **kwargs):
-        if db_field.name == 'permissions':
-            qs = kwargs.get('queryset', db_field.rel.to.objects)
-            # Avoid a major performance hit resolving permission names which
-            # triggers a content_type load:
-            kwargs['queryset'] = qs.select_related('content_type')
-        return super(GroupAdmin, self).formfield_for_manytomany(
-            db_field, request=request, **kwargs)
+  class GroupAdmin(admin.ModelAdmin):
+      search_fields = ('name',)
+      ordering = ('name',)
+      filter_horizontal = ('permissions',)
+  
+      def formfield_for_manytomany(self, db_field, request=None, **kwargs):
+          if db_field.name == 'permissions':
+              qs = kwargs.get('queryset', db_field.rel.to.objects)
+              # Avoid a major performance hit resolving permission names which
+              # triggers a content_type load:
+              kwargs['queryset'] = qs.select_related('content_type')
+          return super(GroupAdmin, self).formfield_for_manytomany(
+              db_field, request=request, **kwargs)
 
 
 ForeignKey在form控件是forms.Modelchoicefield, 可以重载, 方法是在ForeignKey中的formfield方法中(django.db.models.fields.related:1754)
+
+.. code-block:: python
 
     def formfield(self, **kwargs):
         db = kwargs.pop('using', None)
@@ -852,6 +852,9 @@ ForeignKey在form控件是forms.Modelchoicefield, 可以重载, 方法是在Fore
         return super(ForeignKey, self).formfield(**defaults)
 
 form中的changed_data是form来判断某个field是否有修改的方法, 主要是对比initial_data和post过来的data做对比(django.forms.forms:408)
+
+.. code-block:: python
+
     def changed_data(self):
         if self._changed_data is None:
             self._changed_data = []

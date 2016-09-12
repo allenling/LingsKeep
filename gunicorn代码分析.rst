@@ -88,7 +88,7 @@ master.run的过程
 
            workers = self.WORKERS.items()
            workers = sorted(workers, key=lambda w: w[1].age)
-           # worker多了, 则删掉最近生成的worker
+           # worker多了, 则删掉最老的worker
            while len(workers) > self.num_workers:
                (pid, _) = workers.pop(0)
                self.kill_worker(pid, signal.SIGTERM)
@@ -105,7 +105,8 @@ master.run的过程
 
    class Arbiter(object):
        def spawn_worker(self):
-           # 记录worker的age, 删除worker的时候先删除age小的worker
+           # 记录worker的age, 每次有新的worker生成, 则age加1, 当reload的时候, 会先生成新的worker, 然后删除老的worker
+           # age越小越老
            self.worker_age += 1
            # worker类
            worker = self.worker_class(self.worker_age, self.pid, self.LISTENERS,
@@ -248,7 +249,9 @@ reload
 
 reload的过程就是很直接了
 
-重置环境变量, reload app, 启动(setup)app, 重新打开log文件, 重新孵化worker, 最后manager_workers
+重置环境变量, reload app, 启动(setup)app, 重新打开log文件, 孵化新的worker, 最后manager_workers.
+
+最后先孵化新的worker, 会有2x(x为worker的数量)的worker进程, 然后manager_workers的时候, 会把老的worker给删掉
 
 reload wsgi是在worker孵化的时候, 调用顺序为worker.spawn_worker->worker.init_process->base.Worker.load_wsgi->base.Worker.wsgi->wsgiapp.load->wsgiapp.load_wsgiapp->util.import_app
 

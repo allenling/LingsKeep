@@ -8,7 +8,9 @@ worker在Prefork模式下, 是gunicorn.workers.sync.SyncWorker类.
 信号处理以及关闭master
 ----------------------------
 
-gunicorn中, 信号处理串行化, 把接收到的信号放在一个列表中, 每次循环就去信号列表中pop出信号名称, 然后唤醒master, 唤醒master是用pipe, 然后select监听pipe.
+gunicorn中, 信号处理串行化而不是使用call back的形式, 把接收到的信号放在一个列表中, 每次循环就去信号列表中pop出信号名称, 然后唤醒master, 唤醒master是用pipe, 然后select监听pipe.
+
+而SIGCHLD信号必须要单独使用call back. 这是因为关闭master的时候, 必须同时调用waitpid去清理已经sys.exit的worker.
 
 
 .. code-block:: python

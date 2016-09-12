@@ -1,4 +1,4 @@
-Gunicorn Prefork modle
+Gunicorn Prefork
 =======================
 master是一个Arbiter类, 由它来孵化子进程, 管理子进程的.
 worker在Prefork模式下, 是gunicorn.workers.sync.SyncWorker类.

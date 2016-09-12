@@ -21,7 +21,7 @@ Fetch messages as needed ("pull API")
 
 With the "push API", applications have to indicate interest in consuming messages from a particular queue. When they do so, we say that they register a consumer or, simply put, subscribe to a queue. It is possible to have more than one consumer per queue or to register an exclusive consumer (excludes all other consumers from the queue while it is consuming).
 
-Each consumer (subscription) has an identifier called a consumer tag. It can be used to unsubscribe from messages. Consumer tags are just strings.`_
+Each consumer (subscription) has an identifier called a consumer tag. It can be used to unsubscribe from messages. Consumer tags are just strings.`
 
 push方式是发送一个consume的amqp frame向server声明了一个consumer, 则server会将message发送给这个consumer(确切的说是这个connection, socket方式), 但是client还是自己去socket拿数据(那是自然)
 
@@ -95,4 +95,119 @@ epoll拉取消息
                    return responses
            finally:
                chan.after_reply_message_received(queue.name)
+
+注册call back, 调用call back
+=============================
+
+amqp协议通信中是以frame为单位, 并且会有一个method声明, 类似与信号码, 下面类似与basic.xxx, 其中xxx就是方法名, basic表示该方法是basic方法.
+
+amqp中的methods可以在rabbitmq中查找到, 版本是0.9, http://www.rabbitmq.com/amqp-0-9-1-quickref.html
+
+建立连接之后, client发送一个basic.consume的frame, 请求开启一个consumer, 若成功了, server会返回一个basic.consum_ok的frame
+
+.. code-block:: python
+
+    # amqp.channel.Channel
+    
+    def basic_consume(...):
+ 
+        # 发送basic.consume
+        self._send_method((60, 20), args)
+
+        # 等待服务器返回basic.consume_ok
+        if not nowait:
+            consumer_tag = self.wait(allowed_methods=[
+                (60, 21),  # Channel.basic_consume_ok
+            ])
+
+        # 注册一个call_back, 当有message过来的时候调用call_back. 这里的call_back是kombu.messaging.Consumer._receive_callback
+        self.callbacks[consumer_tag] = callback
+
+rabbitmq文档
+
+basic.consume(short reserved-1, queue-name queue, consumer-tag consumer-tag, no-local no-local, no-ack no-ack, bit exclusive, no-wait no-wait, table arguments) ➔ consume-ok
+
+Support: partial
+Start a queue consumer.
+
+This method asks the server to start a "consumer", which is a transient request for messages from a specific queue. Consumers last as long as the channel they were declared on, or until the client cancels them.
+
+之后client不断epoll拉取amqp的frame, 解析看看server向自己发送了什么frame
+
+.. code-block:: python
+
+    # amqp.connection.Connection
+
+    class Connection(AbstractChannel):
+
+        def drain_events(self, timeout=None):
+            chanmap = self.channels
+            # 读取frame
+            chanid, method_sig, args, content = self._wait_multiple(
+                chanmap, None, timeout=timeout,
+            )
+
+            channel = chanmap[chanid]
+
+            if (content and
+                    channel.auto_decode and
+                    hasattr(content, 'content_encoding')):
+                try:
+                    content.body = content.body.decode(content.content_encoding)
+                except Exception:
+                    pass
+
+            # 解析出该frame中是上面amqp方法
+            amqp_method = (self._method_override.get(method_sig) or
+                           channel._METHOD_MAP.get(method_sig, None))
+
+            if amqp_method is None:
+                raise AMQPNotImplementedError(
+                    'Unknown AMQP method {0!r}'.format(method_sig))
+
+            # 调用自己已经接口的amqp方法
+            if content is None:
+                return amqp_method(channel, args)
+            else:
+                return amqp_method(channel, args, content)
+
+当frame中method为basic.deliver的时候, 证明server在发送message给client, 解包(decode), 然后调用channel中的call_back, 就是上面的kombu.messaging.Consumer._receive_callback
+    
+.. code-block:: python
+
+    # amqp.channel.Channel._basic_deliver
+    class Channel(AbstractChannel):
+        def _basic_deliver(self, args, msg):
+            consumer_tag = args.read_shortstr()
+            delivery_tag = args.read_longlong()
+            redelivered = args.read_bit()
+            exchange = args.read_shortstr()
+            routing_key = args.read_shortstr()
+
+            msg.channel = self
+            msg.delivery_info = {
+                'consumer_tag': consumer_tag,
+                'delivery_tag': delivery_tag,
+                'redelivered': redelivered,
+                'exchange': exchange,
+                'routing_key': routing_key,
+            }
+
+            # 获取consumer对应的call_back, 上面的例子就是kombu.messaging.Consumer._receive_callback
+            try:
+                fun = self.callbacks[consumer_tag]
+            except KeyError:
+                pass
+            else:
+                fun(msg)
+
+rabbitmq文档
+basic.deliver(consumer-tag consumer-tag, delivery-tag delivery-tag, redelivered redelivered, exchange-name exchange, shortstr routing-key)
+
+Support: full
+Notify the client of a consumer message.
+
+This method delivers a message to the client, via a consumer. In the asynchronous message delivery model, the client starts a consumer using the Consume method, then the server responds with Deliver methods as and when messages arrive for that consumer.
+
+最终, kombu.messaging.Consumer._receive_callback会decode数据, 调用receive方法, receive我们定义的on_message方法
 

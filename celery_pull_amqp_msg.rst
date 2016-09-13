@@ -136,7 +136,7 @@ This method asks the server to start a "consumer", which is a transient request 
 
 .. code-block:: python
 
-    # amqp.connection.Connection
+    # amqp.connection
 
     class Connection(AbstractChannel):
 
@@ -210,4 +210,268 @@ Notify the client of a consumer message.
 This method delivers a message to the client, via a consumer. In the asynchronous message delivery model, the client starts a consumer using the Consume method, then the server responds with Deliver methods as and when messages arrive for that consumer.
 
 最终, kombu.messaging.Consumer._receive_callback会decode数据, 调用receive方法, receive我们定义的on_message方法
+
+而对于task message, 则会调用到celery.worker.__init__.WorkController._process_task去将task分发到pool中
+
+
+.. code-block:: python
+
+  class WorkerController(object):
+
+      def _process_task(self, req):
+          """Process task by sending it to the pool of workers."""
+          try:
+              # req = celery.worker.job.Request
+              # 将任务分发到pool中
+              req.execute_using_pool(self.pool)
+          except TaskRevokedError:
+              try:
+                  self._quick_release()   # Issue 877
+              except AttributeError:
+                  pass
+          except Exception as exc:
+              logger.critical('Internal error: %r\n%s',
+                              exc, traceback.format_exc(), exc_info=True)
+
+
+而celery.worker.job.Reuqest.execute_using_pool之间简单地调用celery.concurrency.prefork.TaskPool的apply_async方法
+
+.. code-block:: python
+
+  # celery.worker.job.Request
+
+  class Request(object):
+
+      def execute_using_pool(self, pool, **kwargs):
+          # pool = celery.concurrency.prefork.TaskPool
+          # 将任务分发给workers
+          result = pool.apply_async(
+            trace_task_ret,
+            args=(self.name, uuid, self.args, kwargs, request),
+            accept_callback=self.on_accepted,
+            timeout_callback=self.on_timeout,
+            callback=self.on_success,
+            error_callback=self.on_failure,
+            soft_timeout=soft_timeout,
+            timeout=timeout,
+            correlation_id=uuid,
+        )
+
+
+而celery.concurrency.prefork.TaskPool.apply_async会调用celery.concurrency.asynpool.AsynPool.on_apply, 也就是billiard.pool.Pool.apply_async
+
+
+然后billiard.pool.Pool.apply_async将task添加到一个queue中,
+
+.. code-block:: python
+
+  # billiard.pool.Pool
+
+  class Pool(object):
+
+      def apply_async():
+          # 是否是线程模型
+          if self.threads:
+              self._taskqueue.put()
+          else:
+              # 这里self.quick_put就是celery.concurrency.asynpool.AsynPool.send_job
+              self._quick_put()
+
+
+celery.concurrency.asynpool.AsynPool.send_job将task加入到一个自己维护的deque中
+
+
+.. code-block:: python
+
+  # celery.concurrency.asynpool.AsynPool
+  class AsynPool(_pool.Pool):
+  
+      def __init__():
+          self.outbound_buffer = deque()
+  
+      def _create_write_handlers():
+          outbound = self.outbound_buffer
+          # append_message = deque.append
+          append_message = outbound.append
+          def send_job(tup):
+
+
+
+
+Worker Comsumer
+===============
+
+启动event loop的顺序
+
+.. code-block:: python
+
+  # celery.worker.components
+  # Hub功能是获取event loop, 若没有, 则设置当前event loop, 并赋值给worker
+  class Hub(bootsteps.StartStopStep):
+      def create(self, w):
+          # get_event_loop = kombu.async.get_event_loop
+          w.hub = get_event_loop()
+          # w.hub = None
+          if w.hub is None:
+              # _Hub = kombu.async.hub.Hub
+              # 这里基本上设置event loop就是epoll, 并赋值给worker
+              w.hub = set_event_loop(_Hub(w.timer))
+          self._patch_thread_primitives(w)
+          return self
+
+  # celery.worker.consumer
+  class Consumer(object):
+      # 初始化传入worker的hub和pool
+      def __init__(hub, pool):
+          # hub = kombu.async.hub.Hub
+          self.hub = hub
+          # pool = celery.concurrency.prefork.TaskPool
+          self.pool = pool
+          # hub = celery.worker.components.Hub
+          if not hasattr(self, 'loop'):
+              self.loop = loops.asynloop if hub else loops.synloop
+
+      def loop_args(self):
+          return (self, self.connection, self.task_consumer,
+                  self.blueprint, self.hub, self.qos, self.amqheartbeat,
+                  self.app.clock, self.amqheartbeat_rate)
+
+  class Evloop(bootsteps.StartStopStep):
+      label = 'event loop'
+      last = True
+  
+      def start(self, c):
+          self.patch_all(c)
+          # c = celery.worker.consumer.Consumer
+          # c.loop = celery.worker.loops.asynloop
+          c.loop(*c.loop_args())
+  
+      def patch_all(self, c):
+          c.qos._mutex = DummyLock()
+
+
+在celery.worker.loops.asynloop, 就是不断地去循环event loop
+
+.. code-block:: python
+
+   # celery.worker.loops.asynloop
+
+  def asynloop(obj, connection, consumer, blueprint, hub, qos,
+               heartbeat, clock, hbrate=2.0, RUN=RUN):
+  
+      # obj = celery.worker.consumer.Consumer
+      # on_task_received就是获取到task之后的handler
+      on_task_received = obj.create_task_handler()
+  
+      if heartbeat and connection.supports_heartbeats:
+          hub.call_repeatedly(heartbeat / hbrate, hbtick, hbrate)
+  
+      # 注册call back
+      consumer.callbacks = [on_task_received]
+      # consumer = celery.app.amqp.TaskConsumer, 代表一个amqp的consumer
+      # consumer.consume就是发送一个basic_consume的amqp frame
+      consumer.consume()
+      # 这里create_loop就是启动一次event loop
+      # 由于create_loop是一个生成器, 所以这里是先启动生成器
+      loop = hub.create_loop()
+  
+      try:
+          while blueprint.state == RUN and obj.connection:
+              if state.should_stop:
+                  raise WorkerShutdown()
+              elif state.should_terminate:
+                  raise WorkerTerminate()
+              if qos.prev != qos.value:
+                  update_qos()
+  
+              try:
+                  # 不断loop
+                  next(loop)
+              except StopIteration:
+                  loop = hub.create_loop()
+      finally:
+          try:
+              hub.reset()
+          except Exception as exc:
+              error(
+                  'Error cleaning up after event loop: %r', exc, exc_info=1,
+              )
+
+
+而kombu.async.hub.Hub是真正地去读取fd, 解析rabbitmq发送回来的frame, 然后调用fd对应的call back
+
+而task frame的call back就是之前的amqp.connection.Connection.drain_event
+
+
+.. code-block:: python
+   
+  # kombu.async.hub.Hub
+
+  class Hub(object):
+
+      def create_loop(self,
+                      generator=generator, sleep=sleep, min=min, next=next,
+                      Empty=Empty, StopIteration=StopIteration,
+                      KeyError=KeyError, READ=READ, WRITE=WRITE, ERR=ERR):
+          # readers和writers基本上监听的fd和call back的字典, 例如: {1: call_back}
+          readers, writers = self.readers, self.writers
+          # 基本上是epoll
+          poll = self.poller.poll
+      
+          while 1:
+              # poll超时时间
+              poll_timeout = fire_timers(propagate=propagate) if scheduled else 1
+              if readers or writers:
+                  to_consolidate = []
+                  try:
+                      events = poll(poll_timeout)
+                  except ValueError:  # Issue 882
+                      raise StopIteration()
+      
+                  for fd, event in events or ():
+                      cb = cbargs = None
+      
+                      if event & READ:
+                          try:
+                              # 拿到fd对应的call back
+                              cb, cbargs = readers[fd]
+                          except KeyError:
+                              self.remove_reader(fd)
+                              continue
+                      elif event & WRITE:
+                          try:
+                              cb, cbargs = writers[fd]
+                          except KeyError:
+                              self.remove_writer(fd)
+                              continue
+                      elif event & ERR:
+                          general_error = True
+                      else:
+                          logger.info(W_UNKNOWN_EVENT, event, fd)
+                          general_error = True
+                      
+                      if isinstance(cb, generator):
+                          try:
+                              # 若call back是生成器, 不断去loop
+                              next(cb)
+                          except OSError as exc:
+                              if get_errno(exc) != errno.EBADF:
+                                  raise
+                              hub_remove(fd)
+                          except StopIteration:
+                              pass
+                          except Exception:
+                              hub_remove(fd)
+                              raise
+                      else:
+                          try:
+                              # 调用call back
+                              cb(*cbargs)
+                          except Empty:
+                              pass
+              else:
+                  # no sockets yet, startup is probably not done.
+                  sleep(min(poll_timeout, 0.1))
+              yield
+
 

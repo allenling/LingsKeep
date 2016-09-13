@@ -52,7 +52,7 @@ celery.bin.worker的run方法最终会初始化一个celery.apps.worker.Worker, 
                 loglevel=None, logfile=None, pidfile=None, state_db=None,
                 **kwargs):
             # 省略了很多代码
-            # self.app.Worker = celery.app.worker.Worker
+            # self.app.Worker = celery.apps.worker.Worker
             return self.app.Worker(
                 hostname=hostname, pool_cls=pool_cls, loglevel=loglevel,
                 logfile=logfile,  # node format handled by celery.app.log.setup

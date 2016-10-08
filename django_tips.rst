@@ -891,3 +891,106 @@ form中的changed_data是form来判断某个field是否有修改的方法, 主�
                     self._changed_data.append(name)
         return self._changed_data
 
+Queryset缓存
+================
+
+queryset只有在求值之后才会缓存,比如len, 迭代,真假,但是打印和分片, 调用all, count, exist不会缓存.
+
+缓存值可在qs._result_cache看到.
+
+1. 通过源码可知,分片(qs[0])的时候, 若有缓存,则直接拿缓存,没有,就会去执行sql
+
+.. code-block:: python
+
+   # django.db.models.query
+
+   class QuerySet(object):
+       # 省略代码
+       def __getitem__(self, k):
+           """
+           Retrieves an item or slice from the set of results.
+           """
+           if not isinstance(k, (slice,) + six.integer_types):
+               raise TypeError
+           assert ((not isinstance(k, slice) and (k >= 0)) or
+                   (isinstance(k, slice) and (k.start is None or k.start >= 0) and
+                    (k.stop is None or k.stop >= 0))), \
+               "Negative indexing is not supported."
+
+           if self._result_cache is not None:
+               # 有缓存,取缓存分片
+               return self._result_cache[k]
+
+           # 没有缓存,则执行sql
+           if isinstance(k, slice):
+               qs = self._clone()
+               if k.start is not None:
+                   start = int(k.start)
+               else:
+                   start = None
+               if k.stop is not None:
+                   stop = int(k.stop)
+               else:
+                   stop = None
+               qs.query.set_limits(start, stop)
+               return list(qs)[::k.step] if k.step else qs
+
+           qs = self._clone()
+           qs.query.set_limits(k, k + 1)
+           return list(qs)[0]
+
+2. 通过源码可知,all只是clone除一个新的qs, 然后执行新的qs而已
+
+.. code-block:: python
+
+   # django.db.models.query
+
+   class QuerySet(object):
+       # 省略代码
+
+       
+
+       def all(self):
+        """
+        Returns a new QuerySet that is a copy of the current one. This allows a
+        QuerySet to proxy for a model manager in some cases.
+        """
+        return self._clone()
+
+select_related和prefetch_related区别
+=====================================
+
+django文档中说明:
+
+1. select_related是用来fetch外键或者一对一
+2. prefetch_related是用来fetch多对多的, 多对一(多对一不是外键么????)
+3. select_related是数据库层面上的inner join
+
+4. prefetch_related是python层面上的join.
+
+比如
+
+表a, 字段为manytomany到表b
+
+qs.objects.prefetch_related('manytomany').all()
+
+1. 先查出表a, 保存a的qs的id集合, 例如命名为aids
+
+select * from a;
+
+2. 再对中间表进行inner join
+
+select (a_b.a_id) as 'x', b.id from b inner join a_b on (b.id=a_b.b_id) where (a_b.a_id in aids)
+
+其中aids就是第一步查出来的a的id的集合
+
+prefetch_selected多次
+========================
+
+还是看源码吧:
+
+When prefetch_related() is called more than once, the list of lookups to
+prefetch is appended to. If prefetch_related(None) is called, the list
+is cleared.
+
+

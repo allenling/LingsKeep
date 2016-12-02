@@ -206,3 +206,30 @@ __name__和__main__
    >>> a is b
    False
 
+file.flush
+-------------
+
+文档中这么说明的:
+
+flush() does not necessarily write the file’s data to disk. Use flush() followed by os.fsync() to ensure this behavior.
+
+所以, 调用os.flush并不意味着会写数据到磁盘, 而是只是说数据已经从程序的维护的内存buffer, 被复制操作系统的内存buffer中, 在下一个操作系统的fsync操作会被写入到磁盘.
+
+http://stackoverflow.com/questions/7127075/what-exactly-the-pythons-file-flush-is-doing
+
+1. The first, flush, will simply write out any data that lingers in a program buffer to the actual file. Typically this means that the data will be copied from the program buffer to the operating system buffer.
+
+2. Specifically what this means is that if another process has that same file open for reading, it will be able to access the data you just flushed to the file. However, it does not necessarily mean it has been "permanently" stored on disk.
+
+3. To do that, you need to call the os.fsync method which ensures all operating system buffers are synchronized with the storage devices they're for, in other words, that method will copy data from the operating system buffers to the disk.
+
+**flush socket**
+
+在python的关于socket的文档中, 出现了关于flush socket的说明
+
+Now there are two sets of verbs to use for communication. You can use send and recv, or you can transform your client socket into a file-like beast and use read and write. The latter is the way Java presents its sockets. I’m not going to talk about it here, except to warn you that you need to use flush on sockets. These are buffered “files”, and a common mistake is to write something, and then read for a reply. Without a flush in there, you may wait forever for the reply, because the request may still be in your output buffer.
+
+其实是说, 若你把socket包装成一个file-like对象的话, 注意要flush而已. file-like对象中, write只是写入到程序维护buffer而已, flush才能把数据发送到操作系统维护的buffer, 就socket来说
+
+, flush才是send的效果. 如果只是使用send方法, 就没有flush的必要了.
+

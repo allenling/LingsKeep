@@ -177,9 +177,22 @@ get_user方法中, 直接去request.session中获取用户信息
 
 c18d7fcf2a1b493fe2ab8c057e80d98bb8716dfc:{"_auth_user_hash":"eda2f06ebfbafd4b0cfb743405d64413835717bf","_auth_user_backend":"django.contrib.auth.backends.ModelBackend","_auth_user_id":1}
 
-比较的过程是比较用户字典中的hash值和hash之后的用户字典的hash值. hash的过程是一个经过salt之后的hmac(hash message authentication code)值.
+比较的过程是比较用户字典中的hash值和hash之后的用户字典的hash值. hash值是hash用户密码之后的值, hash的过程是一个经过salt之后的hmac(hash message authentication code)值.
 
 salted_hmac方法在django.util.crypto中, 使用到了settings.SECRET_KEY作为sha1的key中的一个值. 
+
+
+.. code-block:: python
+
+
+   @python_2_unicode_compatible
+   class AbstractBaseUser(models.Model):
+
+       def get_session_auth_hash(self):
+           # 这里hash用户的密码
+           key_salt = "django.contrib.auth.models.AbstractBaseUser.get_session_auth_hash"
+           return salted_hmac(key_salt, self.password).hexdigest()
+   
 
 .. code-block:: python
 

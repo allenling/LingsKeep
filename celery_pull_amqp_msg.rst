@@ -294,7 +294,16 @@ celery.concurrency.asynpool.AsynPool.send_job将task加入到一个自己维护�
           # append_message = deque.append
           append_message = outbound.append
           def send_job(tup):
-
+              # Schedule writing job request for when one of the process
+              # inqueues are writable.
+              body = dumps(tup, protocol=protocol)
+              body_size = len(body)
+              header = pack('>I', body_size)
+              # index 1,0 is the job ID.
+              job = get_job(tup[1][0])
+              job._payload = buf_t(header), buf_t(body), body_size
+              # append_message(job) = deque.append(job)
+              append_message(job)
 
 
 
@@ -424,6 +433,7 @@ Worker Comsumer
               if readers or writers:
                   to_consolidate = []
                   try:
+                      # 这里拉取frame
                       events = poll(poll_timeout)
                   except ValueError:  # Issue 882
                       raise StopIteration()

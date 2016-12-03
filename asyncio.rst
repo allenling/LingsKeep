@@ -351,6 +351,46 @@ curio的最主要的优势还是在于我们写的代码直接明了, 是强制�
 Who needs causality, really?
 ------------------------------
 
+两个例子
+
+1. HTTP servers
+~~~~~~~~~~~~~~~~~
+
+例子是一个客户端, 其不断发起请求, 但是并不会读取返回. 当这个客户端向一个twisted的server发起这样一个压力测试的时候, 服务端会因为内存耗尽而崩溃.
+
+这个是因为twisted的server是不断将要发送的response保存到自己的发送缓存区里面, 接着继续处理请求.
+
+由于客户端并不读取返回值, server端的发送缓冲区就越来越大, 耗尽内存. twisted的内存使用增幅非常大, 基本上, 如果上一个response大小为100KB, 则客户端每请求1MB的数据, server会吃掉2GB的内存.
+
+关于twisted耗尽内存的issue: https://twistedmatrix.com/trac/ticket/8868
+
+这是一个典型的DOS攻击.
+
+
+如果把server换成aiohttp, 鲁棒性更好, aiohttp的server在处理request之后, 调用了StreamWriter.drain, 确保自己的发送缓冲区不会无限制增长.
+
+aiohttp最终也会崩溃, 这是asyncio会继续处理下一个请求, 即使当前请求还在处理中, 也就是asyncio会不断地获取请求, 生成response, 虽然aiohttp已经调用了StreamWriter.drain, 但是
+发送缓存区依然有无限增长的可能.
+
+https://github.com/KeepSafe/aiohttp/issues/1368中说明了期望的情况, 若还有一定数量的response没有被读取的时候(发送缓存区大小达到限制), 则停止处理下一个请求.
+
+aiohttp自己的一些关于发送缓冲区的实现, 把发送缓存去的增幅控制在一倍, 对比起来小很多. 若一个客户端想要dos一个aiohttp, 可能需要发送GB的数据, 但是发送GB可能需要上千个连接, 所以, 还是限制住的.
+
+
+aiohttp的graceful shutdown, 最后是调用StreamWriter.close, 依然会丢失数据, 这是asyncio机制决定的.
+
+
+2. Websocket servers
+~~~~~~~~~~~~~~~~~~~~~~
+
+websocket一旦建立连接, 服务端会一直发送msg给客户端.
+
+例子是一个客户端, 建立websocket连接, 然后就挂起了. 然后就像http servers例子中的服务端一样, 这里依然由于客户端没有真正的读取返回, 导致服务端的发送缓冲区膨胀.
+
+这种情况也很正常正常, 因为有可能客户端建立连接之后就崩溃或者离线了.
+
+
+
 
 
 Other challenges for hybrid APIs
@@ -358,4 +398,15 @@ Other challenges for hybrid APIs
 
 Timeouts and cancellation
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+超时和取消操作是很常见的, curio提供了curio.timeout_after函数, 并且可以使用context manager的形式使用它, 很方便.
+
+而在asyncio中, 由于asyncio是混合了callback和async/await, 设置超时的代价相对curio来说很大, 有很多不必要的操作.
+
+asyncio中并没有一个callback级别的timeout, 所以必须由我们自己实现.
+
+**没太看懂
+
+First, since we can't assume that everyone is using async/await, our hybrid system needs to have some alternative, redundant system for handling timeouts and cancellations in callback-using code – in asyncio this is the Future cancellation system, and there isn't really a callback-level timeout system so you have to roll your own. In curio, there are no callbacks, so there's no need for a second system. In fact, in curio there's only the one way to express timeouts – timeout= kwargs simply don't exist. So we can focus our energies on making this one system as awesome as possible.**
+
 

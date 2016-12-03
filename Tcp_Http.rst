@@ -18,7 +18,8 @@ body
 ~~~~~~~~~~~~~~~~~~
 
 METHOD PATH HTTP_VERSION
-HEADERS
+HEADERS(每一个头结束都是CRLF)
+CRLF(回车换行, 空一行表示分隔)
 BODY
 
 
@@ -26,16 +27,20 @@ BODY
 GET /path/ http/1.1
 Connection: keep-alive
 Content-type: application/json
+
 {'data': 1}
 
 3.2 返回报文格式
 ~~~~~~~~~~~~~~~~~~~
 
 HTTP_VERSION STATUS STATUS_NAME
+HEADERS(每一个头结束都是CRLF)
+CRLF(回车换行, 空一行表示分隔)
 BODY
 
 如
 http/1.1 200 OK
+
 {'data': 1}
 
 4. 请求头信息含义
@@ -54,7 +59,8 @@ http1.0协议头里可以设置Connection:Keep-Alive。在header里设置Keep-Al
 4.3 Accept*
 ~~~~~~~~~~~~~~~~
 
-Accept开头的头部含义是内容协商, 包括客户端接受说明形式的内容格式(如Accept: application/json), 什么样的编码(Accept-encoding: utf-t), 上面样的字符集(Accept-charset: gbk)
+Accept开头的头部含义是内容协商, 包括客户端接受说明形式的内容格式(如Accept: application/json), 什么样的编码(Accept-encoding: utf-t), 上面样的字符集(Accept-charset: gbk). 若server不能返回
+request要求的格式, 则报406
 
 在rest_framework中, request.accepted_media_type是由你定义的renderers和wsgi中的HTTP_ACCEPT来决定的.  简单来说就是, 如果Accept命中我们设置的renderer, 则返回. 所以一般Accept: \*/\*是application/json. 如renderer和accept不能命中,
 则报500, 不能满足客户端accept错误.
@@ -185,7 +191,7 @@ agent                                            server
             HTTP/1.1 304 Not Modified
        <----------------------------------------
 
-cache-control: no-cache可以等于cache-control: max-age=10; must-revalidate;
+cache-control: no-cache可以等于cache-control: max-age=0; must-revalidate;
 
 关于no-cache和max-age: http://stackoverflow.com/questions/1046966/whats-the-difference-between-cache-control-max-age-0-and-no-cache.
 
@@ -202,6 +208,8 @@ chrome中对于资源是否会发起请求重新获取资源: http://stackoverfl
 
 http2.0
 ========
+
+https://ye11ow.gitbooks.io/http2-explained/content/
 
 一般http2是在TLS上建立的, 也就是https的形式.
 
@@ -346,7 +354,7 @@ http/2中, 最重要的就是头压缩已经多路复用(多路复用有优先�
 
 1. 开发http2的其中一个主要原因就是修复HTTP pipelining。如果在你的应用场景里本来就不需要pipelining，那么确实很有可能http2对你没有太大帮助。虽然这并不是唯一的提升，但显然这是非常重要的一个。
 
-2. 多路复用
+2. 多路复用, 解决线头阻塞.
 
 3. 小规模的REST API和采用HTTP 1.x的简单程序可能并不会从迁移到http2中获得多大的收益。但至少，迁移至http2对绝大部分用户来讲几乎是没有坏处的。
 
@@ -507,9 +515,14 @@ TCP和UDP都是32位/4字节为单位
 2.2.1 Data Offset
 ~~~~~~~~~~~~~~~~
 
+长度为4位
+
 数据偏移位置, 单位是32位/4字节.
 
 因为Options的变长的, 但是会通过padding(填充)来使得头部是32位的整数倍. 而数据是Options和padding之后开始, 所以Data Offset就是表示data是从哪里开始.
+
+最大值是1111 = 15, 所以就是4*15 = 60字节, 60字节也是TCP header的最大字节数
+
 
 2.2.2 Checksum
 ~~~~~~~~~~~~~~

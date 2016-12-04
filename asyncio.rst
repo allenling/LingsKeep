@@ -164,13 +164,77 @@ bug3. 关闭event loop导致数据丢失
 
 这个bug也是因为存在write buffer, write操作并没有真正的去发送数据, 导致关闭event loop的时候, 若buffer中还有数据, 则会丢失这部分数据.
 
-可以调用drain, 但是由于高低水位配置,
+在关闭loop的时候，asyncio并没有等write操作完全完成才关闭loop，这导致会有一些数据未被发送。
+
+可以在关闭loop之前，调用transport中的drain方法，等待write尽可能的发送数据，之所以是尽可能而不是完全是因为drain方法会在数据达到高水位的时候，阻塞直到数据量低于低水位.
+
+所以，仍然有一些在低水位之下的数据未被发送而loop却关闭了
+
+我们可以调用transport.set_write_buffer_limits(0)把高低水位设置都设置位0，这样调用drain的时候就会阻塞到完全发送完毕。但是我们要访问transport对象，就必须把asyncio.open_connection的实现复制到我们代码中，
+才能调用set_write_buffer_limits方法.
+
+但是，文档说将高低水位设为0并不是最优的选择，因为高低水位的设置是不浪费带宽所设置的缓冲值.
 
 
-关于用户控件的缓冲区
--------------------------
 
 .. code-block:: python
+
+  # 例子中问题所在
+  async def proxy(loop, connect_event, server_closed_event,
+                  dest_host, dest_port,
+                  source_reader, source_writer):
+      connect_event.set()
+      try:
+          with closing(source_writer):
+              tmp = await asyncio.open_connection(dest_host, dest_port, loop=loop)
+              dest_reader, dest_writer = tmp
+              # 这里，当copy_all返回的时候，会调用dest_writer.close
+              # 但是，此时数据并没有发送完毕
+              with closing(dest_writer):
+                  await copy_all(source_reader, dest_writer)
+      finally:
+          await server_done_event.wait()
+          # 然后我们就直接关闭loop
+          loop.stop()
+
+  # 在关闭loop之前先调用drain方法
+  async def proxy(loop, connect_event, server_closed_event,
+                  dest_host, dest_port,
+                  source_reader, source_writer):
+      connect_event.set()
+      try:
+          with closing(source_writer):
+              tmp = await asyncio.open_connection(dest_host, dest_port, loop=loop)
+              dest_reader, dest_writer = tmp
+              try:
+                  await copy_all(source_reader, dest_writer)
+              finally:
+                  # 在关闭dest_writer之前，调用drain
+                  await dest_writer.drain()
+                  dest_writer.close()
+      finally:
+          await server_done_event.wait()
+          loop.stop()
+
+高低水位的默认值
+
+.. code-block:: python
+
+  # asyncio.transports._FlowControlMixin
+  class _FlowControlMixin(Transport):
+      def _set_write_buffer_limits(self, high=None, low=None):
+          if high is None:
+              if low is None:
+                  high = 64*1024
+              else:
+                  high = 4*low
+          if low is None:
+              low = high // 4
+          if not high >= low >= 0:
+              raise ValueError('high (%r) must be >= low (%r) must be >= 0' %
+                               (high, low))
+          self._high_water = high
+          self._low_water = low
 
 
 
@@ -183,7 +247,7 @@ bug3. 关闭event loop导致数据丢失
 
 
 关闭event loop前先关闭资源
-----------------------------
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 
 在文中asyncio例子中, 关闭event loop的时候, 有可能writer的socket并没有被关闭, 这对于示例程序来来说倒是无所谓, 但是在一般情况下, 这种情况并不好.
@@ -259,15 +323,36 @@ asyncio.stream.StreamWriter的代码
 
 
 最后, 作者给出了asyncio的async/await模式的完整代码, 主要是transport.set_write_buffer_limits(0)设置write buffer为0, 
-try:
-    await copy_all(source_reader, dest_writer)
-finally:
-    # 尽可能地发送数据
-    await dest_writer.drain()
-    dest_writer.close()
-    # yield 一个task到scheduled任务列表
-    # 这样下event loop也就会处理到_SelectorTransport._call_connection_lost任务
-    await asyncio.sleep(0, loop=loop)
+
+.. code-block:: python
+
+  # 下面主要是设置高低水位
+  @asyncio.coroutine
+  def fixed_open_connection(host=None, port=None, *,
+                            loop=None, limit=65536, **kwds):
+      if loop is None:
+          loop = asyncio.get_event_loop()
+      reader = asyncio.StreamReader(limit=limit, loop=loop)
+      protocol = asyncio.StreamReaderProtocol(reader, loop=loop)
+      transport, _ = yield from loop.create_connection(
+          lambda: protocol, host, port, **kwds)
+      ###### Following line added to fix buffering issues:
+      # 这里设置了高低水位都是0
+      transport.set_write_buffer_limits(0)
+      ######
+      writer = asyncio.StreamWriter(transport, protocol, reader, loop)
+      return reader, writer
+
+
+  try:
+      await copy_all(source_reader, dest_writer)
+  finally:
+      # 尽可能地发送数据
+      await dest_writer.drain()
+      dest_writer.close()
+      # yield 一个task到scheduled任务列表
+      # 这样下event loop也就会处理到_SelectorTransport._call_connection_lost任务
+      await asyncio.sleep(0, loop=loop)
 
 
 Causality
@@ -299,7 +384,9 @@ curio都遵循Causality, 包括curio.run_in_{thread,process,executor}, 因为cur
 
 
 * curio.spawn是一个asyn函数, 同步函数无法调用它, 所以保证了同步函数的Causality. 在callback模式下, 同步函数注册一个callback为f, 然后继续执行之后的代码g, 这样f和g的调用顺序并不会.
+
   而在curio中, 当你在main中调用await curio.spawn(coro)孵化一个协程的时候, curio.kernel将会把coro加入到curio.kernel自己的ready列表中, 然后再将main加入到curio.kernel的列表中, 所以coro一旦挂起,
+
   接下来就马上启动main, 这个时候再执行main之后的代码, 我们直到coro已经启动并且挂起了. 而在callback模式下, 执行到coro后面的代码的时候, 有可能coro并没有执行挂起.
 
   curio.spawn执行就是kernel调用kernel.run._trap_spawn
@@ -390,6 +477,19 @@ websocket一旦建立连接, 服务端会一直发送msg给客户端.
 这种情况也很正常正常, 因为有可能客户端建立连接之后就崩溃或者离线了.
 
 
+大多数websocket的项目都是使用类似与asyncio的方式取写数据，即将要发送的数据放在程序的发送缓存区， 所以，这很容易导致发送缓存区膨胀的问题.
+
+
+* aiohttp默认是没办法避免这个问题. 在aiohttp中使用await来接受数据，应该能将后压应用给发送太快的客户端. 这里的意思应该是一旦发送缓存区到达现在， 就await等待发送缓存区为空
+  在接受数据，await作用就是挂起接收操作知道发送缓存区为空.
+
+* autobahn默认也没办法避免这个问题. 当autobahn在twisted模式下，可以通过注册一个twisted producer来通知客户端发送太快了， 而在asyncio模式下， 没有实现这个注册producer的功能.
+
+* tornado默认也不能避免这个问题，但是它有一些api可以让开发者取自己实现解决后压.
+
+
+关于tornado，他们在4.3之后的WebSocketHandler.write_message将返回一个future对象，然后我们可以在这个future对象上使用await，例如: await websock.write_message(...)，强制等待future对象完成，也就是write_message完成，这样也可以
+将后压应用到客户端. 但是，在write_message之前不使用awiat也可以运行，这样就没办法将后压应用给客户端了. 
 
 
 
@@ -403,10 +503,13 @@ Timeouts and cancellation
 
 而在asyncio中, 由于asyncio是混合了callback和async/await, 设置超时的代价相对curio来说很大, 有很多不必要的操作.
 
-asyncio中并没有一个callback级别的timeout, 所以必须由我们自己实现.
+asyncio中超时是基于future的，并没有一个callback级别的timeout, 所以必须由我们自己实现. 在curio中，不需要取适应两个风格的timeou，所以更简单方便.
 
-**没太看懂
+在文中asyncio的超时例子中, 调用了task1.cancel()导致了task2也被cancel了. 
 
-First, since we can't assume that everyone is using async/await, our hybrid system needs to have some alternative, redundant system for handling timeouts and cancellations in callback-using code – in asyncio this is the Future cancellation system, and there isn't really a callback-level timeout system so you have to roll your own. In curio, there are no callbacks, so there's no need for a second system. In fact, in curio there's only the one way to express timeouts – timeout= kwargs simply don't exist. So we can focus our energies on making this one system as awesome as possible.**
+文中说注释调event1.wait会导致程序挂起，但是我实验了下，并没有挂起(ubuntu16, python3.5, asyncio3.3).
 
+所以
+**expected in the first place – but we might not have expected that line to affect the result). Note also also that if we move the cancellation to just after the call to event1.wait(), before spawning task2, then the program does not hang – so we can't avoid this by checking for multiple waiters when propagating cancellations from tasks->futures.)**
+这个没看懂
 

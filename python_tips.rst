@@ -233,3 +233,136 @@ Now there are two sets of verbs to use for communication. You can use send and r
 
 , flush才是send的效果. 如果只是使用send方法, 就没有flush的必要了.
 
+字符串打印
+----------
+
+一个例子:
+
+template = '''<iron-meta type="mainMenus" key="name" value=%s ></iron-meta>''', value后面跟一个js的列表.
+
+template中的value的值是一个list, 在polymer中, 若要在html中传入对象(如字典, 列表这些非字符串), 则必须是单引号开始, 接着对象开始符(字典就是{, 列表就是[), 然后里面的字符串都是用双引号来包含, 接着
+对象结束符(字典就是}, 列表是]), 然后一个单引号.
+
+所以template应该是这样的形式:
+
+若value=['v11', 'v12']
+
+<iron-meta type="mainMenus" key="name" value='["v11", "v12"]' ></iron-meta>
+
+
+  1. __str__和__repr__进行格式化
+  
+  
+     我们有:
+     str(value).__str__() == "['v11', 'v12']"
+     所以想法是直接单引号换成双引号
+  
+     .. code-block:: python
+  
+        In [1]: template % (str(value).replace("'", '"'))
+        Out[1]: <iron-meta type="mainMenus" key="myname" value=["v11", "v12"] ></iron-meta>
+  
+     我们发现单引号不见了. 对于str(value), 我们有
+  
+     .. code-block:: python
+  
+        In [2]: str(value)
+        Out[2]: "['v11', 'v12']"
+  
+        In [3]: str(value)[0]
+        Out[3]: '['
+  
+        In [4]: print str(value)[0]
+        Out[4]: ['v11', 'v12']
+     
+     所以, str(value)的第一个字符就是[, 但是打印出来的时候多了一个", 所以"应该表示字符串开始.
+     然后, 既然我们是用来__str__, 那么我们可以试试__repr__
+  
+  
+     .. code-block:: python
+  
+        In [5]: str(value).__repr__()
+        Out[5]: '"[\'v11\', \'v12\']"'
+  
+     带有转义符的字符串, 我们使用print打印出来
+  
+     .. code-block:: python
+  
+        In [6]: print str(value).__repr__()
+        Out[6]: "['v11', 'v12']"
+  
+        In [7]: str(value).__repr__()[0]
+        Out[7]: '"'
+     
+      __repr__输出的结果中, 第一个字符就是", 而不是[.
+      
+      而__str__返回的结果是"['v11', 'v12']", 但是第一个字符是[, 所以打印__str__的第一个的, 开始的双引号表示字符串的开始.
+      而__repr__返回的结果中, 第一个字符是单引号, 表示字符串开始, 然后接着双引号, 双引号才是第一个字符, 打印__repr__的第一个的, 开始的双引号其实是字符串的一部分.
+      也就是说__repr__的结果就是原生的字符串. 所以我们可以把单引号转成双引号, 双引号转成单引号就行
+  
+     .. code-block:: python
+  
+        In [8]: str(value).replace("'", '"').__repr__()
+        Out[8]: '\'["v11", "v12"]\''
+  
+        In [9]: print str(value).replace("'", '"').__repr__()
+        Out[9]: '["v11", "v12"]'
+   
+     这里, 就可以满足要求了.
+  
+     .. code-block:: python
+  
+        In [10]: template % str(value).replace("'", '"').__repr__()
+        Out[10]: '<iron-meta type="mainMenus" key="name" value=\'["v11", "v12"]\' ></iron-meta>'
+  
+        In [11]: print template % str(value).replace("'", '"').__repr__()
+        Out[11]: <iron-meta type="mainMenus" key="name" value='["v11", "v12"]' ></iron-meta>
+     
+     然后直接复制到html文件去就好了
+
+  2. StringIO
+
+  基本上StringIO.StringIO就是逐个字符串逐个字符串写进去就好, 让他们帮你格式化好的.
+
+  对于上面的value, 我们希望得到的字符串形式是第一个是单引号, 然后是列表开始符, 然后列表每个每个元素都用双引号包含, 然后列表结束符, 然后单引号的形式,
+  所以, 我们只要逐个字符写到StringIO去就好了.
+
+  .. code-block:: python
+
+     In [1]: container = StringIO.StringIO()
+
+     In [2]: container.write("'")
+
+     In [3]: for i in value:
+                 # 这里简单点就都转成双引号
+                 tmpi = i.replace("'", '"')
+                 container.write(tmpi)
+     
+     In [4]: container.write("'")
+
+     In [5]: container..getvalue()
+     Out[5]: '\'["v11", "v12"]\''
+
+     In [6]: print container.getvalue()
+     Out[6]: '["v11", "v12"]'
+
+     In [7]: template % (container.getvalue())
+     Out[7]: '<iron-meta type="mainMenus" key="name" value=\'["v11", "v12"]\' ></iron-meta>'
+
+     In [8]: print template % (container.getvalue())
+     Out[8]: <iron-meta type="mainMenus" key="name" value='["v11", "v12"]' ></iron-meta>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

@@ -408,3 +408,13 @@ polymer element实例修改的类属性.
 
 上面的repeat中, my-element的data被改变, 则新生成的my-element中的data也是修改过的. 比如, data被my-sub-element修改为[1]之后, 传入my-sub-element的data就是[1]
 
+传递一个对象(list, dictionary)给元素
+---------------------------------------
+
+一般, 我们要给某个元素的一个属性传入一个对象的时候, 都是这么写
+<my-element a='["d11", "d12"]' ></my-element>
+
+这个时候我们在my-element里面就获取到了列表["d11", "d12"].
+
+这里依赖于两个方面, 一个是a在polymer中的定义一定是Object, 还有一个是值的写法要满足json, 也就是可以被JSON.parse, 也就是里面的参数一定是双引号包起来, 而外面自然是用单引号包起来.
+

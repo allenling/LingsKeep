@@ -440,3 +440,15 @@ test(1)
 
 无论调用几次, test.func_defaults都是(1)
 
+
+python"定时任务"
+-----------------
+
+一般是100个字节码指令之后去检查信号或者切换线程等.
+https://docs.python.org/2/library/sys.html#sys.setcheckinterval
+
+sys.setcheckinterval(interval)
+Set the interpreter’s “check interval”. This integer value determines how often the interpreter checks for periodic things such as thread switches and signal handlers. The default is 100, meaning the check is performed every 100 Python virtual instructions. Setting it to a larger value may increase performance for programs using threads. Setting it to a value <= 0 checks every virtual instruction, maximizing responsiveness as well as overhead.
+
+
+

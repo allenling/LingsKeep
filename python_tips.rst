@@ -250,119 +250,193 @@ template中的value的值是一个list, 在polymer中, 若要在html中传入对
 <iron-meta type="mainMenus" key="name" value='["v11", "v12"]' ></iron-meta>
 
 
-  1. __str__和__repr__进行格式化
-  
-  
-     我们有:
-     str(value).__str__() == "['v11', 'v12']"
-     所以想法是直接单引号换成双引号
-  
-     .. code-block:: python
-  
-        In [1]: template % (str(value).replace("'", '"'))
-        Out[1]: <iron-meta type="mainMenus" key="myname" value=["v11", "v12"] ></iron-meta>
-  
-     我们发现单引号不见了. 对于str(value), 我们有
-  
-     .. code-block:: python
-  
-        In [2]: str(value)
-        Out[2]: "['v11', 'v12']"
-  
-        In [3]: str(value)[0]
-        Out[3]: '['
-  
-        In [4]: print str(value)[0]
-        Out[4]: ['v11', 'v12']
-     
-     所以, str(value)的第一个字符就是[, 但是打印出来的时候多了一个", 所以"应该表示字符串开始.
-     然后, 既然我们是用来__str__, 那么我们可以试试__repr__
-  
-  
-     .. code-block:: python
-  
-        In [5]: str(value).__repr__()
-        Out[5]: '"[\'v11\', \'v12\']"'
-  
-     带有转义符的字符串, 我们使用print打印出来
-  
-     .. code-block:: python
-  
-        In [6]: print str(value).__repr__()
-        Out[6]: "['v11', 'v12']"
-  
-        In [7]: str(value).__repr__()[0]
-        Out[7]: '"'
-     
-      __repr__输出的结果中, 第一个字符就是", 而不是[.
-      
-      而__str__返回的结果是"['v11', 'v12']", 但是第一个字符是[, 所以打印__str__的第一个的, 开始的双引号表示字符串的开始.
-      而__repr__返回的结果中, 第一个字符是单引号, 表示字符串开始, 然后接着双引号, 双引号才是第一个字符, 打印__repr__的第一个的, 开始的双引号其实是字符串的一部分.
-      也就是说__repr__的结果就是原生的字符串. 所以我们可以把单引号转成双引号, 双引号转成单引号就行
-  
-     .. code-block:: python
-  
-        In [8]: str(value).replace("'", '"').__repr__()
-        Out[8]: '\'["v11", "v12"]\''
-  
-        In [9]: print str(value).replace("'", '"').__repr__()
-        Out[9]: '["v11", "v12"]'
+1. __str__和__repr__进行格式化
+
+我们有:
+str(value).__str__() == "['v11', 'v12']"
+所以想法是直接单引号换成双引号
+
+.. code-block:: python
+
+   In [1]: template % (str(value).replace("'", '"'))
+   Out[1]: <iron-meta type="mainMenus" key="myname" value=["v11", "v12"] ></iron-meta>
+
+我们发现单引号不见了. 对于str(value), 我们有
+
+.. code-block:: python
+
+   In [2]: str(value)
+   Out[2]: "['v11', 'v12']"
+
+   In [3]: str(value)[0]
+   Out[3]: '['
+
+   In [4]: print str(value)[0]
+   Out[4]: ['v11', 'v12']
+
+所以, str(value)的第一个字符就是[, 但是打印出来的时候多了一个", 所以"应该表示字符串开始.
+然后, 既然我们是用来__str__, 那么我们可以试试__repr__
+
+
+.. code-block:: python
+
+   In [5]: str(value).__repr__()
+   Out[5]: '"[\'v11\', \'v12\']"'
+
+带有转义符的字符串, 我们使用print打印出来
+
+.. code-block:: python
+
+   In [6]: print str(value).__repr__()
+   Out[6]: "['v11', 'v12']"
+
+   In [7]: str(value).__repr__()[0]
+   Out[7]: '"'
+
+ __repr__输出的结果中, 第一个字符就是", 而不是[.
+ 
+而__str__返回的结果是"['v11', 'v12']", 但是第一个字符是[, 所以打印__str__的第一个的, 开始的双引号表示字符串的开始.
+而__repr__返回的结果中, 第一个字符是单引号, 表示字符串开始, 然后接着双引号, 双引号才是第一个字符, 打印__repr__的第一个的, 开始的双引号其实是字符串的一部分.
+也就是说__repr__的结果就是原生的字符串. 所以我们可以把单引号转成双引号, 双引号转成单引号就行
+
+.. code-block:: python
+
+   In [8]: str(value).replace("'", '"').__repr__()
+   Out[8]: '\'["v11", "v12"]\''
+
+   In [9]: print str(value).replace("'", '"').__repr__()
+   Out[9]: '["v11", "v12"]'
+
+这里, 就可以满足要求了.
+
+.. code-block:: python
+
+   In [10]: template % str(value).replace("'", '"').__repr__()
+   Out[10]: '<iron-meta type="mainMenus" key="name" value=\'["v11", "v12"]\' ></iron-meta>'
+
+   In [11]: print template % str(value).replace("'", '"').__repr__()
+   Out[11]: <iron-meta type="mainMenus" key="name" value='["v11", "v12"]' ></iron-meta>
+
+然后直接复制到html文件去就好了
+
+2. StringIO
+
+基本上StringIO.StringIO就是逐个字符串逐个字符串写进去就好, 让他们帮你格式化好的.
+
+对于上面的value, 我们希望得到的字符串形式是第一个是单引号, 然后是列表开始符, 然后列表每个每个元素都用双引号包含, 然后列表结束符, 然后单引号的形式,
+所以, 我们只要逐个字符写到StringIO去就好了.
+
+.. code-block:: python
+
+   In [1]: container = StringIO.StringIO()
+
+   In [2]: container.write("'")
+
+   In [3]: for i in value:
+               # 这里简单点就都转成双引号
+               tmpi = i.replace("'", '"')
+               container.write(tmpi)
    
-     这里, 就可以满足要求了.
-  
-     .. code-block:: python
-  
-        In [10]: template % str(value).replace("'", '"').__repr__()
-        Out[10]: '<iron-meta type="mainMenus" key="name" value=\'["v11", "v12"]\' ></iron-meta>'
-  
-        In [11]: print template % str(value).replace("'", '"').__repr__()
-        Out[11]: <iron-meta type="mainMenus" key="name" value='["v11", "v12"]' ></iron-meta>
-     
-     然后直接复制到html文件去就好了
+   In [4]: container.write("'")
 
-  2. StringIO
+   In [5]: container..getvalue()
+   Out[5]: '\'["v11", "v12"]\''
 
-  基本上StringIO.StringIO就是逐个字符串逐个字符串写进去就好, 让他们帮你格式化好的.
+   In [6]: print container.getvalue()
+   Out[6]: '["v11", "v12"]'
 
-  对于上面的value, 我们希望得到的字符串形式是第一个是单引号, 然后是列表开始符, 然后列表每个每个元素都用双引号包含, 然后列表结束符, 然后单引号的形式,
-  所以, 我们只要逐个字符写到StringIO去就好了.
+   In [7]: template % (container.getvalue())
+   Out[7]: '<iron-meta type="mainMenus" key="name" value=\'["v11", "v12"]\' ></iron-meta>'
 
-  .. code-block:: python
-
-     In [1]: container = StringIO.StringIO()
-
-     In [2]: container.write("'")
-
-     In [3]: for i in value:
-                 # 这里简单点就都转成双引号
-                 tmpi = i.replace("'", '"')
-                 container.write(tmpi)
-     
-     In [4]: container.write("'")
-
-     In [5]: container..getvalue()
-     Out[5]: '\'["v11", "v12"]\''
-
-     In [6]: print container.getvalue()
-     Out[6]: '["v11", "v12"]'
-
-     In [7]: template % (container.getvalue())
-     Out[7]: '<iron-meta type="mainMenus" key="name" value=\'["v11", "v12"]\' ></iron-meta>'
-
-     In [8]: print template % (container.getvalue())
-     Out[8]: <iron-meta type="mainMenus" key="name" value='["v11", "v12"]' ></iron-meta>
+   In [8]: print template % (container.getvalue())
+   Out[8]: <iron-meta type="mainMenus" key="name" value='["v11", "v12"]' ></iron-meta>
 
 
+变量赋值
+---------
+
+python的变量赋值其实是一个名字指向一个值, 也就是所谓的引用.
+
+比如a=1, 将a这个名字指向1, 然后a=1, 也是将a这个名字指向1, 在python中, 这个时候是复用了常量1, 所以id(x) == id(a)
+
+然后x=1, a=x的情况是, 名字x指向1, 然后a指向x所指向的值, 也就是1, 所以还是id(x) == id(a), 若x=2, 这个时候x就指向另外一个常量2, 所以x为2, a还是为1, 这个时候id(x)并不等于id(a)
+
+对于字符串和数字之类的不可变对象(包括tuple), 修改会rebind, reassign一个新的值, 比如
+
+x='a'
+v1 = id(x)
+x += 'b'
+v2 = id(x)
+
+这个时候v1和v2并不像等, 也就是其实是x这个名字被指向一个新的字符串了. 同理, x=1, x+=1的情况也一样.
+
+而对于可变对象, 也就是支持modify in place, 也就是可修改的对象, 修改并不会rebind, reassign, 是在原处修改, 除非手动rebind, reassign, 否则指向的值(也就是可变对象)不变.
+
+如
+
+x = [1]
+v1 = id(x)
+x.append(2)
+v2 = id(x)
+
+v1和v2是相等的, 只是原处修改了值, 名字x指向的值没有变.
+
+对于
+
+x = [1]
+a=x
+x.append(2)
+
+这种情况下, a先指向了x所指向的值, 是一个可变对象, 然后修改了该可变对象, 所以a的值也是[1,2], 所以id(a)等于id(x)
+
+然后对x重新赋值, 也就是rebind, reassign
+
+x=[1]
+
+这个时候x指向一个新的值, 但是a指向并没有变化, 所以id(a)并不等于id(x)
 
 
+所以在python中, 赋值都是指向一个值, 值分为可变和不可变对象, 可变对象支持modify in place, 然后一旦修改不可变对象, 其实是重新rebind, reassign, 也就是重新
+指向一个新的值, 而修改可变对象的话, 是原处修改, 所以指向的值仍然没有变化.
+
+这里可以拓展到使用可变对象作为函数默认值的情况, 由于python的函数默认值是在函数定义的时候就赋值了, 而不是每次执行的时候赋值(Python’s default arguments are evaluated once when the function is defined, not each time the function is called, http://docs.python-guide.org/en/latest/writing/gotchas/).
+
+其实可以这么理解, 一旦函数定义了, 函数对象自己就将默认值存起来, 存在func.func_defaults, 变量的名称存在func.func_code.co_varnames, 然后每次调用就记住了.
+
+例如:
+
+def test(a, b=[]):
+    b.append(1)
+    print a, b
+
+test(1)
+1, [1]
+test(1)
+1, [1, 1]
+test(1)
+1, [1, 1, 1]
+
+一开始,
+test.func_defaults为([],), test.func_code.co_varnames为('a', 'b')
+调用第一次之后, 
+test.func_defaults为([1],)
+调用第二次之后, 
+test.func_defaults为([1, 1],)
+以此类推
+
+若默认值不是可变对象, 则存在func.func_defaults的值是不会变的
 
 
+def test(a, b=1):
+    b += 1
+    print a, b
 
+test(1)
+1, 2
+test(1)
+1, 2
+test(1)
+1, 2
 
-
-
-
-
-
-
+无论调用几次, test.func_defaults都是(1)
 

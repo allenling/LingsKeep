@@ -440,8 +440,36 @@ test(1)
 
 无论调用几次, test.func_defaults都是(1)
 
+is或者==
+------------
 
-python"定时任务"
+https://docs.python.org/2/reference/datamodel.html
+
+Every object has an identity, a type and a value. An object’s identity never changes once it has been created; you may think of it as the object’s address in memory. The ‘is‘ operator compares the identity of two objects; the id() function returns an integer representing its identity (currently implemented as its address).
+
+python中一切都是对象, is是比较对象内存地址, ==是比较值的. id出来的就是对象的值. 
+
+对于不可变对象, 任何rebind, reassign都是创建一个新对象, 所以
+
+y = 'abc'
+
+x = 'a' + 'b' + 'c'
+
+a = ''.join(['a', 'b', 'c'])
+
+x == y == a
+
+x is y为True(可能是python内部把值, 也就是abc字符串, 复用了)
+
+x is a 为False
+
+
+另外, 关键字True和False的id是一定的, 在python2.7.6中True的id为9544944, False的id为9544496.
+
+但是在python2.x中, True和False都不是关键字, 所以可以随意赋值, python3.x中这两者都是关键字了.
+
+
+python"定时任务
 -----------------
 
 一般是100个字节码指令之后去检查信号或者切换线程等.

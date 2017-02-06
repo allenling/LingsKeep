@@ -479,4 +479,99 @@ sys.setcheckinterval(interval)
 Set the interpreter’s “check interval”. This integer value determines how often the interpreter checks for periodic things such as thread switches and signal handlers. The default is 100, meaning the check is performed every 100 Python virtual instructions. Setting it to a larger value may increase performance for programs using threads. Setting it to a value <= 0 checks every virtual instruction, maximizing responsiveness as well as overhead.
 
 
+global
+--------
+
+例子:
+.. code-block:: python
+
+    import dis
+    
+    d = {'a': 1}
+    
+    x = True
+    
+    
+    def test():
+        print x
+        print d
+    
+    
+    def test1():
+        print x
+        x = False
+        print x
+    
+    
+    def test_mutable():
+        print d
+        d['a'] = 2
+        print d
+    
+    test_mutable()
+    
+    dis.dis(test)
+    print '--------------------------------------------'
+    dis.dis(test1)
+    print '--------------------------------------------'
+    dis.dis(test_mutable)
+
+输出
+
+{u'a': 1}
+{u'a': 2}
+ 12           0 LOAD_GLOBAL              0 (x)
+              3 PRINT_ITEM          
+              4 PRINT_NEWLINE       
+
+ 13           5 LOAD_GLOBAL              1 (d)
+              8 PRINT_ITEM          
+              9 PRINT_NEWLINE       
+             10 LOAD_CONST               0 (None)
+             13 RETURN_VALUE        
+--------------------------------------------
+ 17           0 LOAD_FAST                0 (x)
+              3 PRINT_ITEM          
+              4 PRINT_NEWLINE       
+
+ 18           5 LOAD_GLOBAL              0 (False)
+              8 STORE_FAST               0 (x)
+
+ 19          11 LOAD_FAST                0 (x)
+             14 PRINT_ITEM          
+             15 PRINT_NEWLINE       
+             16 LOAD_CONST               0 (None)
+             19 RETURN_VALUE        
+--------------------------------------------
+ 23           0 LOAD_GLOBAL              0 (d)
+              3 PRINT_ITEM          
+              4 PRINT_NEWLINE       
+
+ 24           5 LOAD_CONST               1 (2)
+              8 LOAD_GLOBAL              0 (d)
+             11 LOAD_CONST               2 (u'a')
+             14 STORE_SUBSCR        
+
+ 25          15 LOAD_GLOBAL              0 (d)
+             18 PRINT_ITEM          
+             19 PRINT_NEWLINE       
+             20 LOAD_CONST               0 (None)
+             23 RETURN_VALUE        
+
+
+
+https://docs.python.org/2/faq/programming.html#what-are-the-rules-for-local-and-global-variables-in-python
+
+In Python, variables that are only referenced inside a function are implicitly global. If a variable is assigned a value anywhere within the function’s body, it’s assumed to be a local unless explicitly declared as global.
+
+Though a bit surprising at first, a moment’s consideration explains this. On one hand, requiring global for assigned variables provides a bar against unintended side-effects. On the other hand, if global was required for all global references, you’d be using global all the time. You’d have to declare as global every reference to a built-in function or to a component of an imported module. This clutter would defeat the usefulness of the global declaration for identifying side-effects.
+
+关键在于上面句子中的 If a variable is assigned a value anywhere within the function’s body, it’s assumed to be a local unless explicitly declared as global.这句话中的If a variable is assigned, 是assigned的时候
+才会当成局部变量.
+
+所以可以这么理解, 在函数里面, 修改字典的时候, 是modify in place, 不是reassign, rebinding, 所以解释器会直接根据LEGB原则加载到全局的字典, 然后修改.
+
+而其他不可变对象就不行, 不可变对象在函数里面若有修改操作, 也就是reassign, rebinding操作, 解释器就把它当成局部变量, 所以第一句打印语句就报没有定义的错误.
+
+有时候得抠字眼一下才能理解.
 

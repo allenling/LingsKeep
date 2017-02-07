@@ -538,11 +538,17 @@ TCP头部大小最大是60个字节, 包括Options之前的20个固定字节. �
 
 
 3. UDP面向无连接
+-------------------
 
 UDP的面向无连接是发送前不会发送syn建立连接, 只需要目标端口号, 然后就只管发送, 不保证数据到达, 不重发, 只管发送而已.
 
 4. ip选择路由
+----------------
 
 5. nagle算法和tcp_nodelay
+---------------------------
 
+http://blog.csdn.net/majianfei1023/article/details/51558941
+
+http://blog.csdn.net/dog250/article/details/21303679
 

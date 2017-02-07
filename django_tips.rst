@@ -719,6 +719,36 @@ django.setup如何加载model
 
 或者, 自定义一个field, 叫month_field
 
+loaddata的过程
+------------------
+
+先去掉外键约束, 然后save, 然后再检查外键约束
+
+.. code-block:: python
+
+    # 先去掉外键约束, 加载数据
+    with connection.constraint_checks_disabled():
+        for fixture_label in fixture_labels:
+            self.load_label(fixture_label)
+
+    table_names = [model._meta.db_table for model in self.models]
+    try:
+        # 检查外键约束
+        connection.check_constraints(table_names=table_names)
+    except Exception as e:
+        e.args = ("Problem installing fixtures: %s" % e,)
+        raise
+
+    if self.loaded_object_count > 0:
+        # 最后重置主键的顺序
+        sequence_sql = connection.ops.sequence_reset_sql(no_style(), self.models)
+        if sequence_sql:
+            if self.verbosity >= 2:
+                self.stdout.write("Resetting sequences\n")
+            with connection.cursor() as cursor:
+                for line in sequence_sql:
+                    cursor.execute(line)
+
 auto_now_add/auto_now
 ----------------------
 
@@ -767,6 +797,7 @@ loaddata的时候,即使datetime设置为auto_add_now, fixture中datetime也必�
 
 .. code-block:: python
 
+  # django.db.models.base.ModelBase.save_base
   def save_base(self, raw=False, force_insert=False,
                 force_update=False, using=None, update_fields=None):
       """
@@ -894,11 +925,11 @@ form中的changed_data是form来判断某个field是否有修改的方法, 主�
 Queryset缓存
 ================
 
-queryset只有在求值之后才会缓存,比如len, 迭代,真假,但是打印和分片, 调用all, count, exist不会缓存.
+queryset只有在求值之后才会缓存,比如len, 迭代,真假,但是打印和分片(分片不会执行qs, 只有分片的时候加入step参数, 比如qs[:5:2]这样, 才会执行qs, 并且分片之后不允许加更多的过滤条件), 调用all, count, exist不会缓存.
 
 缓存值可在qs._result_cache看到.
 
-1. 通过源码可知,分片(qs[0])的时候, 若有缓存,则直接拿缓存,没有,就会去执行sql
+1. 通过源码可知,分片的时候, 若有缓存,则直接拿缓存,没有, 若有step参数, 就会去执行sql,否则是clone一个新的qs, 若是去下标操作, 也就是qs[0]之类的, 执行qs, 返回对象.
 
 .. code-block:: python
 
@@ -933,8 +964,10 @@ queryset只有在求值之后才会缓存,比如len, 迭代,真假,但是打印�
                else:
                    stop = None
                qs.query.set_limits(start, stop)
+               # 这里没有分片操作没有setp的话, 返回qs, 若有, 则执行qs
                return list(qs)[::k.step] if k.step else qs
 
+           # 这里返回的是直接取第几个的操作,自然需要执行qs
            qs = self._clone()
            qs.query.set_limits(k, k + 1)
            return list(qs)[0]
@@ -992,5 +1025,140 @@ prefetch_selected多次
 When prefetch_related() is called more than once, the list of lookups to
 prefetch is appended to. If prefetch_related(None) is called, the list
 is cleared.
+
+bulk_create, get_or_create, update_or_create
+=============================================
+
+get_or_create和update_or_create都是try...except的形式
+
+bulk_create的注释
+Inserts each of the instances into the database. This does *not* call
+save() on each of the instances, does not send any pre/post save
+signals, and does not set the primary key attribute if it is an
+autoincrement field.
+
+所以, 是直接调用sql的insert去插入数据库, 然后有个batch_size, 指定每次insert语句的条数
+
+
+with transaction.atomic(using=self.db, savepoint=False):
+    if (connection.features.can_combine_inserts_with_and_without_auto_increment_pk
+            and self.model._meta.has_auto_field):
+        # self._batched_insert就是直接使用insert语句插入了
+        self._batched_insert(objs, fields, batch_size)
+
+.. code-block:: python
+
+   # django.db.model.query.QuerySet._batched_insert
+
+   def _batched_insert(self, objs, fields, batch_size):
+       """
+       A little helper method for bulk_insert to insert the bulk one batch
+       at a time. Inserts recursively a batch from the front of the bulk and
+       then _batched_insert() the remaining objects again.
+       """
+       if not objs:
+           return
+           ops = connections[self.db].ops
+           batch_size = (batch_size or max(ops.bulk_batch_size(fields, objs), 1))
+           # 这里就使用sql的insert来插入数据库
+           for batch in [objs[i:i + batch_size] for i in range(0, len(objs), batch_size)]:
+               self.model._base_manager._insert(batch, fields=fields,
+               using=self.db)
+
+ModelBackend.authenticate和user.is_active
+=========================================
+
+一般流程是一旦用户的is_active为False, 应该登陆失败的, 但是django还是能登陆, 只是在
+默认的ModelBackend.has_permission返回没有权限而已.这个问题直到1.10才修复.
+
+
+.. code-block:: python
+
+   # djagno1.10之前
+   # django.contrib.auth.backend.ModelBackend
+
+    def authenticate(self, username=None, password=None, **kwargs):
+        # 这里并没有检查user.is_active
+        UserModel = get_user_model()
+        if username is None:
+        username = kwargs.get(UserModel.USERNAME_FIELD)
+        try:
+            user = UserModel._default_manager.get_by_natural_key(username)
+            if user.check_password(password):
+            return user
+        except UserModel.DoesNotExist:
+            # Run the default password hasher once to reduce the timing
+            # difference between an existing and a non-existing user (#20760).
+            UserModel().set_password(password)
+
+    def _get_permissions(self, user_obj, obj, from_name):
+    """
+    Returns the permissions of `user_obj` from `from_name`. `from_name` can
+    be either "group" or "user" to return permissions from
+    `_get_group_permissions` or `_get_user_permissions` respectively.
+    """
+    # 这里返回permission为空
+    if not user_obj.is_active or user_obj.is_anonymous() or obj is not None:
+        return set()
+    perm_cache_name = '_%s_perm_cache' % from_name
+    if not hasattr(user_obj, perm_cache_name):
+        if user_obj.is_superuser:
+            perms = Permission.objects.all()
+        else:
+            perms = getattr(self, '_get_%s_permissions' % from_name)(user_obj)
+        perms = perms.values_list('content_type__app_label', 'codename').order_by()
+        setattr(user_obj, perm_cache_name, set("%s.%s" % (ct, name) for ct, name in perms))
+    return getattr(user_obj, perm_cache_name)
+
+但是在登陆admin的时候确实提示说无效的登陆, 其实这里是在form里面判断的.
+
+
+.. code-block:: python
+
+    class AdminAuthenticationForm(AuthenticationForm):
+    """
+    A custom authentication form used in the admin app.
+    """
+    error_messages = {'invalid_login': _("Please enter the correct %(username)s and password "
+                                         "for a staff account. Note that both fields may be "
+                                         "case-sensitive."),}
+    required_css_class = 'required'
+    
+    def confirm_login_allowed(self, user):
+        if not user.is_active or not user.is_staff:
+            raise forms.ValidationError(
+                self.error_messages['invalid_login'],
+                code='invalid_login',
+                params={'username': self.username_field.verbose_name}
+                )
+    
+
+在django1.10之后, 如果is_active是False, 登陆无效
+
+.. code-block:: python
+
+   # django.contrib.auth.backend.ModelBackend
+   def authenticate(self, username=None, password=None, **kwargs):
+       UserModel = get_user_model()
+       if username is None:
+           username = kwargs.get(UserModel.USERNAME_FIELD)
+       try:
+           user = UserModel._default_manager.get_by_natural_key(username)
+       except UserModel.DoesNotExist:
+           # Run the default password hasher once to reduce the timing
+           # difference between an existing and a non-existing user (#20760).
+           UserModel().set_password(password)
+       else:
+           # 这里检查了is_active
+           if user.check_password(password) and self.user_can_authenticate(user):
+               return user
+
+   def user_can_authenticate(self, user):
+       """
+       Reject users with is_active=False. Custom user models that don't have
+       that attribute are allowed.
+       """
+       is_active = getattr(user, 'is_active', None)
+       return is_active or is_active is None
 
 

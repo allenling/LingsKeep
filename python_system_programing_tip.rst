@@ -199,3 +199,230 @@ From implementation point of view, threads are created using functions exposed b
 Read more about fork() and clone() on their respective man pages.
 
 How to Create Threads in Linux explains more about threads.
+
+C10K问题
+=========
+http://www.kegel.com/c10k.html
+
+select,epoll
+=============
+
+一般了解
+---------
+
+  When descriptors are added to an epoll instance, they can be added in two modes: level triggered and edge triggered. When you use level triggered mode, and data is available for reading, epoll_wait(2) will always return with ready events. If you don't read the data completely, and call epoll_wait(2) on the epoll instance watching the descriptor again, it will return again with a ready event because data is available. In edge triggered mode, you will only get a readiness notfication once. If you don't read the data fully, and call epoll_wait(2) on the epoll instance watching the descriptor again, it will block because the readiness event was already delivered.
+  
+  epoll的两种模式, ET和LT的区别. LT是若你没有完全的读完数据, wait仍然会返回, RT是不管你读没读玩数据,wait只返回一次.
+  
+  所以,若我们在ET模式下,wait返回后只读了一半的数据,然后再次调用wait,则这时候会阻塞,而在LT模式下,再次调用wait,则会马上返回,因为还有数据没读完.
+  
+  ET模式下只要有数据到达就触发,但是只是触发一次.
+  
+  一道腾讯后台开发的面试题
+  使用Linuxepoll模型，水平触发模式；当socket可写时，会不停的触发socket可写的事件，如何处理？
+  
+  第一种最普遍的方式：
+  需要向socket写数据的时候才把socket加入epoll，等待可写事件。
+  接受到可写事件后，调用write或者send发送数据。
+  当所有数据都写完后，把socket移出epoll。
+  
+  这种方式的缺点是，即使发送很少的数据，也要把socket加入epoll，写完后在移出epoll，有一定操作代价。
+  
+  一种改进的方式：
+  开始不把socket加入epoll，需要向socket写数据的时候，直接调用write或者send发送数据。如果返回EAGAIN(缓冲区满)，把socket加入epoll，在epoll的驱动下写数据，全部数据发送完毕后，再移出epoll。
+  
+  这种方式的优点是：数据不多的时候可以避免epoll的事件处理，提高效率。
+  
+  https://segmentfault.com/a/1190000004597522
+  
+  LT的处理过程：
+  . accept一个连接，添加到epoll中监听EPOLLIN事件
+  . 当EPOLLIN事件到达时，read fd中的数据并处理
+  . 当需要写出数据时，把数据write到fd中；如果数据较大，无法一次性写出，那么在epoll中监听EPOLLOUT事件
+  . 当EPOLLOUT事件到达时，继续把数据write到fd中；如果数据写出完毕，那么在epoll中关闭EPOLLOUT事件
+  
+  ET的处理过程：
+  . accept一个一个连接，添加到epoll中监听EPOLLIN|EPOLLOUT事件
+  . 当EPOLLIN事件到达时，read fd中的数据并处理，read需要一直读，直到返回EAGAIN为止
+  . 当需要写出数据时，把数据write到fd中，直到数据全部写完，或者write返回EAGAIN
+  . 当EPOLLOUT事件到达时，继续把数据write到fd中，直到数据全部写完，或者write返回EAGAIN
+
+同步,异步,阻塞,非阻塞的区别
+--------------------------------
+
+http://www.cnblogs.com/Anker/p/5965654.html
+
+select, poll, epoll的区别
+------------------------------
+
+  http://www.cnblogs.com/Anker/p/3265058.html
+  http://blog.csdn.net/kai8wei/article/details/51233494
+  也就是
+  1. select的时候, 每次都要传递我们要监听的fd, 这个时候就是每次都要把fd列表从用户空间拷贝到内核控件, 而epoll一开始就把所以的fd都拷贝到内核了, 不用每次都拷贝一次, 然后当有新的fd需要监听的时候
+     epoll_ctl调用直接把新的fd加入到内核空间中. 并且, epoll在内核中的保存区是一个高速缓存(cache), 是一个红黑树来支持高速添加, 查找, 删除操作.
+  
+  2. 每次内核都是遍历一遍所有的fd, 然后返回哪些fd已经就绪. 而epoll在创建的时候, 就为每个fd添加了一个回调函数, 这个回调函数会在fd就绪的时候, 将就绪的fd加入到就绪列表(内核中是链表)中, epoll_wait就是遍历
+      这个列表而已.
+  
+  3. python版本的select和select系统调用有点区别
+     
+     3.1 select的系统调用中, 返回值是一个就绪fd的个数, 所以还是需要你自己去遍历三个列表, 哪个fd就绪了.
+     3.2 select会修改fd集合, 比如read_fds中监听了三个fd, fd1, fd2, fd3, 将read_fds传给select, 然后fd1受信, 则read_fds中就只有fd2,fd3都被置为0;
+  
+     摘自wiki中select条目的example:
+  
+      .. code-block::
+  
+        if (-1 == (nready = select(maxfd+1, &readfds, NULL, NULL, NULL)))
+            die("select()");
+        /*这里返回的就是个数, 可以看打印的内容*/
+        (void)printf("Number of ready descriptor: %d\n", nready);
+        /*然后必须遍历fd集合*/
+        for (i=0; i<=maxfd && nready>0; i++)
+        {
+            /*readfds中未受信的fd被设为0, 所以我们必须逐个判断哪些fd被受信了
+            if (FD_ISSET(i, &readfds))
+            {
+                nready--;
+        
+     而python版本的select.select会返回三个列表, 三个列表代表可读的fd列表, 可写的fd列表已经其他情况的fd的列表.
+     不需要你去遍历原fd列表去看看哪个fd就绪了, 并且不会修改传入的fd列表.
+  
+  4. python版本的epoll和epoll_wait系统调用有点区别.
+  
+     epoll_wait会返回就绪fd的个数, 跟select一样, 但是epoll_wait还会返回包含就绪fd构造体的的数组, 每一个元素都是epoll_event的结构.
+     epoll_event的构造体定义有data和event来拿过部分:
+  
+     .. code-block::
+  
+        typedef union epoll_data {
+            void        *ptr;
+            int          fd;
+            uint32_t     u32;
+            uint64_t     u64;
+        } epoll_data_t;
+  
+        struct epoll_event {
+            uint32_t     events;      /* Epoll events, 这里就是EPOLLIN等event类型 */
+            epoll_data_t data;        /* User data variable */
+        };
+
+     epoll_wait系统调用定义为:
+
+     .. code-block::
+  
+         int epoll_wait(int epfd, struct epoll_event *events, int maxevents, int timeout)
+  
+     第二个参数就是就绪数组.
+
+     下面摘抄man手册的例子:
+  
+     .. code-block::
+        struct epoll_event ev, events[MAX_EVENTS];
+        /*调用epoll_wait*/
+        nfds = epoll_wait(epollfd, events, MAX_EVENTS, -1);
+        /*遍历就绪数组*/ 
+        for (n = 0; n < nfds; ++n) {
+            /*直接拿就绪数组中的epoll_event结构, 判断events[n].events & EPOLLIN等可以知道event类型*/
+            if (events[n].data.fd == listen_sock) {
+     
+     python版本的epoll返回值就是[(fd1, event1), (fd2, event2), ...]的形式.
+          
+  所以epoll在大多数情况是空闲的时候, 比起select快很多, 若fd大多数都是就绪的时候, 跟select比起来, 差不多, 因为此时内核需要遍历的就绪列表跟全部fd就差不多了.
+  
+  如此，一颗红黑树，一张准备就绪fd链表，少量的内核cache，就帮我们解决了大并发下的fd（socket）处理问题。
+  
+    1 执行epoll_create时，创建了红黑树和就绪list链表。
+    
+    2 执行epoll_ctl时，如果增加fd（socket），则检查在红黑树中是否存在，存在立即返回，不存在则添加到红黑树上，然后向内核注册回调函数，用于当中断事件来临时向准备就绪list链表中插入数据。
+    
+    3 执行epoll_wait时立刻返回准备就绪链表里的数据即可。
+
+epoll的具体实现
+-----------------
+
+https://idndx.com/2015/07/08/the-implementation-of-epoll-4/
+
+named pipe and unnamed pipe
+============================
+
+根据http://www.cs.fredonia.edu/zubairi/s2k2/csit431/pipes.html
+
+named pip也称为fifo, 通常说的pipe是unnamed pipe
+
+1 可用性 
+
+ unnamed pipe只在父进程和其子进程中可用
+
+Each end of the pipe is closed individually using normal close() system call. Pipes are only available the process that creates the pipe and it’s descendants.
+
+named pipe在任意进程中可用
+
+Named pipes are also called FIFO’s (first in first out). They have “names” and exist as special files within a file system. (file type p) They exist until they are removed with rm or unlink() They can be used with unrelated process not just descendants of the pipe creator.
+
+并且, named pipe在fs中是存在的一个具体的文件, 在linux中, 文件类型是p, 你可以控制所属用户, 所属组, 权限等, 就像其他文件一样.
+
+2 创建方式
+
+  unnamed pipe是os.pipe创建, named pipe是os.mkfifo(os.mknod)
+
+
+所以, 若你的server和client使用pipe来通信, 你就不能用unnamed pipe, 因为server和client并不是父子进程的关系. named pipe在这种情况下可以使用, 当然, socket更好点.
+
+3. pipe file
+
+http://unix.stackexchange.com/questions/10050/proc-pid-fd-x-link-number
+
+ll /proc/pid/fd中会看到
+
+10 -> pipe:[5584722]这样的输出, 也就是该程序的fd 0被重定向到pipe中, pipe的inode数字就是5584722, 在子进程(unnamed pipe)或者其他进程(named pipe)中, 你会看到
+
+同样的输出
+
+10 -> pipe:[5584722]
+
+也就是两个进程使用了fd10(pipe)来通信
+
+
+4. fifo文档
+
+http://www.ece.eng.wayne.edu/~gchen/ece5650/lecture3.pdf
+
+5. os.dup/os.dup2是实现重定向的行为, 比如ls existing-file non-existing-file > tmp1  2>&1
+
+而pipe是管道的概念, 一个单向数据流, 从写入端流向读取端
+
+所以你也可以把某个pipe的输出重定向到另外一个pipe的输入
+
+process, thread, LWP
+==========================
+http://www.thegeekstuff.com/2013/11/linux-process-and-threads
+
+process是运行程序的抽象, 包含了一系列的资源, 而thread则是process的逻辑处理器, 也就是执行操作资源的对象.
+
+多个thread共享process的虚拟内存地址(但是要注意thread safe, sync).
+
+kernel thread, user thread的区别:
+Scheduling can be done at the kernel level or user level, and multitasking can be done preemptively or cooperatively.(来自wiki)
+
+thread有user-thread/kernel-thread两种, kernel-space的线程也叫LWP, python的Threading库产生的是原生的thread, 也就是kernel-space thread, 因为它是被OS(kernel)所调度的, 是抢占式的, 所以
+意味着并行是可以的, 也就是一个线程一个CPU, 但是由于GIL的问题, 所以就算一个线程一个CPU依然不能真正的并发.
+
+The term "light-weight process" variously refers to user threads or to kernel mechanisms for scheduling user threads onto kernel threads.
+
+https://en.wikipedia.org/wiki/Thread_%28computing%29#Processes.2C_kernel_threads.2C_user_threads.2C_and_fibers
+https://www.quora.com/How-does-thread-switching-differ-from-process-switching
+http://stackoverflow.com/questions/5440128/thread-context-switch-vs-process-context-switch
+http://stackoverflow.com/questions/12630214/context-switch-internals
+
+
+GIL以及GIL扑打(thrashing)效应
+================================
+
+都是David Beazley的文章
+https://bugs.python.org/issue7946
+http://www.dabeaz.com/python/UnderstandingGIL.pdf
+http://www.dabeaz.com/python/GIL.pdf
+http://www.dabeaz.com/python/NewGIL.pdf
+
+

@@ -6,6 +6,11 @@ http1.1
 0. 建立连接
 1. URI/URL/URN, fragment, 绝对/相对URL
 2. 方法
+--------
+
+常用四种方法的幂等性
+http://www.cnblogs.com/weidagang2046/archive/2011/06/04/idempotence.html
+
 3. 报文格式
 ---------------
 
@@ -55,6 +60,8 @@ http1.0协议头里可以设置Connection:Keep-Alive。在header里设置Keep-Al
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 若response的头中有Transfer Encoding: chunked, 则连接不关闭, 服务器继续使用该连接发送数据直到chuncked为0.
+
+chunked和keep-alive: http://www.cnblogs.com/skynet/archive/2010/12/11/1903347.html
 
 4.3 Accept*
 ~~~~~~~~~~~~~~~~
@@ -143,6 +150,9 @@ Origin和Host一般一起使用. 跨域的时候将自己请求的Host和自己�
 允许自己域名发起请求, 若不允许, 则返回502
 
 https://en.wikipedia.org/wiki/Cross-origin_resource_sharing
+https://blog.tonyseek.com/post/introduce-to-xss-and-csrf/
+XSS和CSRF
+http://www.cnblogs.com/hyddd/archive/2009/04/09/1432744.html?login=1
 
 
 5. 响应头
@@ -174,7 +184,7 @@ XSS, 跨站脚本攻击.也就是钓鱼, 发送一个链接, 你点击进入的�
 
 
 6. 缓存
-
+-----------
 概述: http://imweb.io/topic/5795dcb6fb312541492eda8c
 
 agent                                            server
@@ -204,7 +214,15 @@ chrome中对于资源是否会发起请求重新获取资源: http://stackoverfl
 
 比如, 开着F12, ctrl+shift+r也有可能不会发送请求, 而是200 (from cache)
 
-7. 各种中间角色intermediary, 包括gateway,agent,proxy,还有inbound和outbound的含义, upstream/downstream
+7. TLS握手
+-------------
+
+http://www.jianshu.com/p/7158568e4867
+
+http://www.ruanyifeng.com/blog/2014/02/ssl_tls.html
+
+https://imququ.com/post/optimize-tls-handshake.html
+
 
 http2.0
 ========

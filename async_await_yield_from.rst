@@ -1,150 +1,165 @@
+await/yield from的区别
+=========================
 
-asyncio.coroutine中用yield而不是yield from
-==============================================
+from https://snarky.ca/how-the-heck-does-async-await-work-in-python-3-5/
 
-这样在asyncio的evnt loop中会检查并报错
+1. types.coroutine/asyncio.coroutine
+----------------------------------------
 
+在3.5之前，根据PEP342的说明，通过为生成器加入send, throw, close方法来支持协程，也就是把生成器当做协程来看待，也就是所谓的基于生成器的协程.
 
-types.coroutine/yield from vs async/await
-===========================================
+所以，生成器和协程在一定程度上了同义的。
 
-Awaitable对象
------------------
+然后asyncio出现，要区别一个生成器到底是一个平凡的生成器(迭代用)，还是当做协程来使用(暂停重启)，就有了types.coroutine和asyncio.coroutine装饰器用来标识一个
+函数是不是用来当做协程作用的。
 
-定义了__await__方法的对象， 并且__await__返回一个可迭代对象(定义了__iter__)，不能是一个协程。比如asyncio.Future
+这两个装饰器是将CO_ITERABLE_COROUTINE这个flag加入到func.__code__.co_flags中, 下面是types.coroutine的源码
+
+0x180 == CO_COROUTINE | CO_ITERABLE_COROUTINE
+0x100 == CO_ITERABLE_COROUTINE
+Ox80 == CO_COROUTINE == 128
+
 
 .. code-block:: python
 
-    class Future:
+    def coroutine(func):
+        """Convert regular generator function to a coroutine."""
     
+        if not callable(func):
+            raise TypeError('types.coroutine() expects a callable')
     
-        def __iter__(self):
-            if not self.done():
-                self._blocking = True
-                yield self  # This tells Task to wait for completion.
-            assert self.done(), "yield from wasn't used with future"
-            return self.result()  # May raise too.
+        if (func.__class__ is FunctionType and
+            getattr(func, '__code__', None).__class__ is CodeType):
     
-        if compat.PY35:
-            __await__ = __iter__ # make compatible with 'await' expression
+            co_flags = func.__code__.co_flags
+    
+            # Check if 'func' is a coroutine function.
+            # (0x180 == CO_COROUTINE | CO_ITERABLE_COROUTINE)
+            # 这里是协程，就返回
+            if co_flags & 0x180:
+                return func
+    
+            # Check if 'func' is a generator function.
+            # (0x20 == CO_GENERATOR)
+            if co_flags & 0x20:
+                # TODO: Implement this in C.
+                co = func.__code__
+                func.__code__ = CodeType(
+                    co.co_argcount, co.co_kwonlyargcount, co.co_nlocals,
+                    co.co_stacksize,
+                    # 这里加入CO_ITERABLE_COROUTINE到CodeType中
+                    co.co_flags | 0x100,  # 0x100 == CO_ITERABLE_COROUTINE
+                    co.co_code,
+                    co.co_consts, co.co_names, co.co_varnames, co.co_filename,
+                    co.co_name, co.co_firstlineno, co.co_lnotab, co.co_freevars,
+                    co.co_cellvars)
+                return func
 
-这里__await__返回了自己， 因为自己也是一个可迭代对象(定义了__iter__).
 
 
-相同点
---------
-
-基本上, await和yield from功能差不多, 都是暂停， 然后返回一个awaitable对象(协程也是awaitable对象).
-
-基本上可以说await == yield from. 只是await更严格， 后面只能跟awaitable对象.
-
-async 定义的函数是一个Collections.abc.Coroutine实例
-
-
-opcode的区别
+2. async/await
 ----------------
 
-types.coroutine的装饰器装饰一个带有yield from语句的函数的时候， yield from接受一个生成器或者协程或者awaitable对象.
-
-types.coroutine的作用是将CO_ITERABLE_COROUTINE的code flag加入到func的codeobject中(也就是func.__code__), 然后VM在看到
-
-CO_ITERABLE_COROUTINE的flag， 就调用GET_YIELD_FROM_ITER， GET_YIELD_FROM_ITER检查yield from是否跟着参数arg是否是一个生成器或者协程， 如果不是， 则调用iter(arg)
+3.5之后有了async/await关键字，用来声明协程，让协程和生成器含义区分开。通过async声明的函数就是协程，并且await只能在async定义中出现。
 
 
-而await后面接的是awaitable对象的时候， VM的opcode就是GET_AWAITABLE, 由于__await__方法返回一个可迭代对象， 所以GET_AWAITABLE就是获取可迭代对象.
-
-
-types.coroutine/yield from和async/await的的目的是严格定义协程， 只有后者定义的才是原生协程， 前面那个定义的是基于生成器的协程, 确保一个生成器的使用目的.
-
-也就是说，使用types.coroutine装饰的生成器的目的就是用来作为协程. 由于Python不是静态编译语言， 所以在使用types.coroutine装饰的时候， Python不知道该生成器是用来作为协程的，
-所以要在opcode级别，也就是VM级别上加以区分.
-
-
-
-只有基于生成器的协程才能暂停，调用send发送数据回程序以便重新启动。比如asyncio.sleep
-
-.. code-block:: python
-
-    In [59]: x=asyncio.sleep(1)
-    
-    In [60]: q=x.send(None)
-    
-    In [61]: q
-    Out[61]: <Future pending>
-    
-    In [62]: q.done()
-    Out[62]: False
-    
-    In [63]: q.set_result({'a':1})
-    
-    In [64]: q.done()
-    Out[64]: True
-    
-    In [65]: q
-    Out[65]: <Future finished result={'a': 1}>
-
-
- asyncio.sleep启动之后， 返回一个Future对象，暂停，然后event loop就是对这个Future检查，检查其是否已经执行完io了(查看Future是否完成， 调用Future.done())
-
- 一般调用Future.set_result就能把Future的状态变成完成(Future.done()==True)
-
-
-async/await是API
+3. awaitable对象
 -------------------
 
-也就是说async/await是一种定义，定义一个函数的作用是用来作为协程。而协程的工作流如何实现，是需要自己取实现的，比如asyncio就是一种实现，一种官方实现。
-
-然后curio实现了自己的event loop.
+awaitable对象是实现了__await__方法的对象，协程是awaitable对象，特别的，基于生成器的协程也是awaitable对象，用inspect.isawatable来检查
 
 
-若asyncio.coroutine中yield from不是一个await对象呢
-===================================================
+4. code_flag的区别
+-------------------
+
+使用types.coroutine/asyncio.coroutine定义一个协程
 
 .. code-block:: python
 
-  @asyncio.coroutine
-  def my_coroutine_two():
-      yield from (i for i in range(3))
-  
-  loop = asyncio.get_event_loop()
-  tasks2 = [my_coroutine_two('task21')]
-  
-  loop.run_until_complete(asyncio.wait(tasks2))
-  loop.close()
+    # This also works in Python 3.5.
+    # py34_coro.__code__.co_flags & 0x180 == 256 == 0x100 == CO_ITERABLE_COROUTINE, 标识位基于生成器的协程
+    @asyncio.coroutine
+    def py34_coro():  
+        yield from stuff()
 
-由之前所说，asyncio.coroutine会将CO_ITERABLE_COROUTINE这样一个flag加入到函数的code object中， 这样
-VM的opcode就是GET_YIELD_FROM_ITER， 这样若yield from之后不是一个await对象
+使用async/await定义协程
 
-在asyncio中的event loop中， 若yield from得到的不是一个
+.. code-block:: python
 
-
-asyncio的真相
-=================
-
-至少在linux下，异步的基础是select/epoll.
+    # py35_coro.__code__.co_flags & 0x180 == 128 == 0x80 == CO_COROUTINE，标识为协程
+    async def py35_coro():  
+        await stuff()
 
 
-单进程使用epll， 然后注册多个fd， 每个fd的call back先拿到io数据，然后把数据设置到future中， 也就是future.set_result, 然后send(future)回对应的协程。
+5. opcode的区别
+--------------------
 
-就是这样！没什么很神秘的。
+用dis.dis处理4中出现的两个协程
 
-因为epoll可以监听的fd理论上是无限多个，并且每次io完之后会unregister某个fd，所以单进程下，还是以开很多很多个协程。
+.. code-block:: python
+
+    >>> dis.dis(py34_coro)
+      2           0 LOAD_GLOBAL              0 (stuff)
+                  3 CALL_FUNCTION            0 (0 positional, 0 keyword pair)
+                  6 GET_YIELD_FROM_ITER
+                  7 LOAD_CONST               0 (None)
+                 10 YIELD_FROM
+                 11 POP_TOP
+                 12 LOAD_CONST               0 (None)
+                 15 RETURN_VALUE
+
+-- code-block:: python
+
+    >>> dis.dis(py35_coro)
+      1           0 LOAD_GLOBAL              0 (stuff)
+                  3 CALL_FUNCTION            0 (0 positional, 0 keyword pair)
+                  6 GET_AWAITABLE
+                  7 LOAD_CONST               0 (None)
+                 10 YIELD_FROM
+                 11 POP_TOP
+                 12 LOAD_CONST               0 (None)
+                 15 RETURN_VALUE
 
 
-之前想到太复杂，以为除了epoll之外，还有其他方法取提醒loop，某个程序需要启动，或者单进程下，程序pending的IO如何同时运行，并且提醒loop。
+区别在于GET_YIELD_FROM_ITER和GET_AWAITABLE两个opcode上
 
 
-虽然Python之父在介绍asyncio的slides中声称不喜欢call back， 但是思路还是基于epoll模式的call back的。
+5.1 GET_YIELD_FROM_ITER
+++++++++++++++++++++++++++++++
+
+GET_YIELD_FROM_ITER是先检查其参数是不是一个协程或者生成器，如果不是，对参数调用iter来获取它的迭代器对象。
+
+并且yield from后面跟协程对象，必须是yield from出现在一个用types.coroutine/asyncio.coroutine装饰的函数上面，比如:
+
+.. code-block:: python
+
+    async def coro():
+        await asyncio.sleep(1)
+    
+    # 在一个不用types.coroutine/asyncio.coroutine装饰的协程中，yield from一个协程
+    def test():
+        yield from coro()
+
+    t = test()
+    # 这里报错: TypeError: cannot 'yield from' a coroutine object in a non-coroutine generator
+    t.send(None)
+
+    # 加上装饰器就可以了
+    @types.coroutine
+    def test():
+        yield from coro()
+
+5.2 GET_AWAITABLE
++++++++++++++++++++++
+
+GET_AWAITABLE限制就是只能跟awaitable对象, 也就是async定义的协程或者用types.coroutine/asyncio.coroutine装饰的协程
 
 
-简单的sleep异步的思路是，loop负责用heap以每一个程序下一次重新启动时间来排序，最快重新启动的程序排在最后，然后循环pop出该函数
 
-然后查看我们是否到了程序需要重新启动的时间，比如最快重新启动程序时间5秒，也就是一个程序5秒后启动，现在已经过了2秒，然后我们需要再次sleep 3秒，之后启动。
-
-所以，这个例子中，loop是启动下一个程序的时间的。
-
-
-但是，对于真正的IO，并不知道下一次启动程序的具体时间，怎么办。这就需要有人取提醒loop，某个程序需要重新启动，这个角色就是epoll。
+6. 最后
+---------
+You may be wondering why the difference between what an async-based coroutine and a generator-based coroutine will accept in their respective pausing expressions? The key reason for this is to make sure you don't mess up and accidentally mix and match objects that just happen to have the same API to the best of Python's abilities. Since generators inherently implement the API for coroutines then it would be easy to accidentally use a generator when you actually expected to be using a coroutine. And since not all generators are written to be used in a coroutine-based control flow, you need to avoid accidentally using a generator incorrectly. But since Python is not statically compiled, the best the language can offer is runtime checks when using a generator-defined coroutine. This means that when types.coroutine is used, Python's compiler can't tell if a generator is going to be used as a coroutine or just a plain generator (remember, just because the syntax says types.coroutine that doesn't mean someone hasn't earlier done types = spam earlier), and thus different opcodes that have different restrictions are emitted by the compiler based on the knowledge it has at the time.
 
 
+简单来说: 定义协程上，yield from和async/await目的希望你们不要被平凡的生成器和基于协程的生成器混淆，因为两者都有一样的API(send,throw,close)，又因为Python不是静态编译语言，所以要在定义上要区别开来。
 

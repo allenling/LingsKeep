@@ -440,6 +440,14 @@ test(1)
 
 无论调用几次, test.func_defaults都是(1)
 
+这是因为func.func_defaults是一个元组，不能改变元组的值，但是你可以改变元组里面可变对象的值.
+
+x = ('a', [])
+
+x[1].append('data')
+
+x == ('a', ['data'])
+
 is或者==
 ------------
 
@@ -574,4 +582,28 @@ Though a bit surprising at first, a moment’s consideration explains this. On o
 而其他不可变对象就不行, 不可变对象在函数里面若有修改操作, 也就是reassign, rebinding操作, 解释器就把它当成局部变量, 所以第一句打印语句就报没有定义的错误.
 
 有时候得抠字眼一下才能理解.
+
+**一个gotcha情况:**
+
+下面的代码运行会是什么情况(对象的__iadd__一般返回self)
+
+.. code-block:: python
+
+    In [1]: x=(1,2,[1])
+    
+    In [2]: x[2] += [2,3]
+
+http://www.dongwm.com/archives/Python%E5%85%83%E7%BB%84%E7%9A%84%E8%B5%8B%E5%80%BC%E8%B0%9C%E9%A2%98/
+
+但是
+    
+.. code-block:: python
+
+    In [1]: x=(1, 2, [1])
+
+    In [2]: a=x[2]
+    
+    In [2]: a += [2, 3]
+
+这样是不报错并且修改成功，所以对比起来就知道了，x[2] += [2,3]在报错在于x[2]的赋值，由于元组不能重新赋值才会报错，但是你拿到元祖中可变对象，然后修改可变对象，就是可以的了
 

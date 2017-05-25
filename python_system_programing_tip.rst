@@ -309,7 +309,7 @@ select, poll, epoll的区别
 
      epoll_wait系统调用定义为:
 
-     .. code-block:: 
+     .. code-block::  
   
          int epoll_wait(int epfd, struct epoll_event *events, int maxevents, int timeout)
   
@@ -459,7 +459,8 @@ GIL以及GIL扑打(thrashing)效应
 3.  http://www.dabeaz.com/python/UnderstandingGIL.pdf
     新GIL之后依然存在convoy effect。一个cpu密集型线程和一个io密集型线程同时在多核上运行，这样io密集的线程性能将严重下降，原因是，如果io密集型线程进行io操作的时候，会释放掉GIL，然后cpu密集型的线程拿到
     GIL，然后在下一个等待超时后将GIL还给io密集型的线程，但是若io密集型的线程的io操作是不需要挂起的呢，比如write数据情况下，由于os有读写缓冲区(假设空间足够)，所以write不会被阻塞，但是线程还是会释放掉
-    GIL，这样io密集型的线程性能就下降了。(一个额外的参考，curio和trio这两个Python异步框架，curio的思想是每一个io操作都会引发yield，而trio中，有些不需要阻塞的io操作，则不会yield, 类比GIL的例子，yield就像
+    GIL，然后cpu密集型线程就运行了，这样io密集型的线程必须等待下一个等待超时才能获取GIL，这样性能就下降了。
+    (一个额外的参考，curio和trio这两个Python异步框架，curio的思想是每一个io操作都会引发yield，而trio中，有些不需要阻塞的io操作，则不会yield, 类比GIL的例子，yield就像
     切换线程一样)
     3.1 A Possible Solution: 
         - If a thread is preempted by a timeout, it is penalized with lowered priority (bad thread)

@@ -392,3 +392,104 @@ cannot use x (type []string) as type []interface {} in argument
 [a b c]
 [a]
 
+
+:=和=
+---------
+
+:=仅限于未声明的变量，=仅限于声明了的变量，但是如果函数返回多个值，比如两个，可以同时使用一个已经定义的和未定义的变量来接收返回值.
+
+.. code-block:: 
+
+    package main
+    
+    import (
+        "fmt"
+    )
+    
+    type Test struct {
+        A, B string
+    }
+    
+    func create() (*Test, error){
+        tmp := new(Test)
+        return tmp, nil
+    }
+    
+    
+    func main() {
+        x := new(Test)
+        fmt.Println(&x)
+        x, err := create()
+        fmt.Println(&x, err)
+    }
+
+这里接收create的返回值的时候，x是已经定义过的，err是未定义过的，这时也可以使用:=来赋值，结果就是golang会复用x, 生成一个新的err
+
+
+go中作用域
+-----------
+
+http://studygolang.com/articles/9095
+
+
+也就是每一个花括号都是一个隔离的作用域, 任何在花括号里面进行:=赋值的都是创建一个新的变量，如果用的是=来重新赋值，则golang会根据
+作用域往上找
+
+.. code-block:: 
+
+    package main
+    
+    import (
+        "fmt"
+    )
+    
+    
+    func main() {
+    	x := 100
+    	fmt.Println(x, &x)
+    	for i := 0; i < 5; i++ {
+    		x := i
+    		fmt.Println(x, &x)
+    	}
+    	fmt.Println(x, &x)
+    }
+
+
+上面打印出来的结果是for中每一个x的地址都不一样，并且跟for外部的x也不一样.
+
+
+这里值得注意的是创建对象之后，对对象变量的重新赋值上:
+
+.. code-block:: 
+
+  package main
+  
+  import (
+      "fmt"
+  )
+  
+  type Test struct {
+      A, B string
+  }
+  
+  func create() (*Test, error){
+      tmp := new(Test)
+      return tmp, nil
+  }
+  
+  
+  func main() {
+      a := 1
+      x := new(Test)
+      if a == 2 {
+          fmt.Println(a)
+      }else{
+          x, err := create()
+          fmt.Println(err, &x)
+      }
+      fmt.Println(&x)
+  }
+
+
+这里在else打印出来的x和外部的x是不一样的，因为在else里面用了:=赋值，所以else里面就是新分配的变量, 如果else里面是用=, 则x都是一个变量(地址一样)
+

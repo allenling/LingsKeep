@@ -1,8 +1,13 @@
 RR和RC隔离级别加锁的区别
 =========================
 
+http://tech.meituan.com/innodb-lock.html
+http://hedengcheng.com/?p=771
+
 
 在RR隔离级别下，mysql会把扫描但是不满足where条件的row也给锁住， 而RC缺不会, RR会有gap锁，和行锁组成next-key锁, 而RC没有gap锁. 
+
+gap只会出现在RR级别下where条件是非唯一索引和没有索引的情况
 
 
 例子(来自最后mysql的文档), a,b两列, 事务均set autocommit=0, update语句是使用exclusive lock，互斥锁:

@@ -418,3 +418,22 @@ polymer element实例修改的类属性.
 
 这里依赖于两个方面, 一个是a在polymer中的定义一定是Object, 还有一个是值的写法要满足json, 也就是可以被JSON.parse, 也就是里面的参数一定是双引号包起来, 而外面自然是用单引号包起来.
 
+iron-overlay-behavior
+------------------------
+
+https://github.com/PolymerElements/paper-dialog/issues/7
+https://github.com/PolymerElements/iron-overlay-behavior/issues/3
+
+
+patchOverlay: function (e) {
+  if (e.target.withBackdrop) {
+    e.target.parentNode.insertBefore(e.target.backdropElement, e.target);
+  }
+},
+
+Then add on-iron-overlay-opened="patchOverlay" to all your <paper-dialog>'s
+
+在一个element内实现固定在右下角的css
+--------------------------------------
+
+sition: sticky; float: right; bottom: 0px; right: 0px;

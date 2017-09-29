@@ -1,0 +1,132 @@
+聚合io
+=========
+
+比如有article表和user表, article里面存储user_id, 需要根据article_id列表(比如20个)搜索(比如搜索mysql, 按更新时间排序)的article, 返回article的详细信息列表
+
+
+1. 最直接的方式也就是for一下id列表，一个一个去搜索
+
+.. code-block:: python
+
+    data = []
+
+    for aid in article_ids:
+	adata = query(aid)
+        user_data = query(adata['user_id'])
+        adata['user'] = user_data
+        data.append(adata)
+
+
+2. 程序里面判断是否需要io
+
+
+.. code-block:: python
+
+    data = []
+    user_data_dict = {}
+    for aid in article_ids:
+    	a = query(aid)
+        if a['user_id'] not in user_data_set:
+	    user_data_dict[a['user_id'] = query(a['user_id'])
+        a['user'] = user_data_dict[a['user_id']
+
+
+3. 可以聚合queryset
+
+.. code-block:: python
+
+    qs = query(article_ids)    	
+    data = []
+    user_ids = set()
+    for q in qs:
+        adata = serializer(q).data
+    	user_ids.add(adata['user'])
+    user_qs = query(user_ids)
+    user_dict = dict([(q.id, q) for q in user_qs])
+    for d in adata:
+        adata['user'] = user_dict[d['user_id'])
+    
+  
+
+
+linux/nginx惊群
+==================
+
+
+主进程listen, fork(pre fork)出多个进程/线程可以同时accept同一个socket的, 使用SO_REUSEADDR标识.
+
+bind是将一个socket绑定到一个地址上(一般是tcp这种), listen是把一个socket变为等待接收请求的状态, 然后accept是接受请求.
+
+listen(backlog)中参数backlog表示(很久以前是半连接/已连接状态的socket的列表的大小)已完成(ESTABLISHED)且未accept的队列大小., 然后accept中也有一个数量，这个是程序里面指定的最多能接收多少个连接，跟backlog是两个列表
+
+http://www.jianshu.com/p/fe2228a77429
+
+然后linux之前对于accept对惊群, 也就是同一个连接对唤醒多个子进程/子线程，但是只有一个
+子进程/子线程可以去处理连接，造成了惊群. 然后现在针对accept是没有惊群问题了, accept是互斥的, 然后内核会调度只有一个进程/线程会被唤醒
+
+但是现在epoll依然会惊醒, 因为epoll_wait不是互斥的, 然后nginx是在accept之前，子进程/子线程去拿锁(自旋锁), 保证只有一个进程/线程能把fd放入自己的监听队列
+
+
+https://hmgle.github.io/linux/select/poll/epoll/thundering/herd/2014/03/23/linux-poll-collision.html
+
+https://jin-yang.github.io/post/linux-details-of-thundering-herd.html
+
+
+
+python redis
+====================
+
+
+redis在操作次数少的时候, 用pipeline并不是一定合适.
+
+在redis这个库中, connection_pool会在pipeline.execute之后release, 但是其实不是真正的释放, 所以不用担心使用pipeline之后会断开然后重新连接
+所以，再一个request中，如果redis的操作数量比较少的话，pipeline并不算是一个好的选择.
+
+
+.. code-block:: python
+
+    # redis.client.BasePipeline
+
+    def execute(self, raise_on_error=True):
+        # 其他操作
+        try:
+            # 执行命令，把multi, cmds, exec组成二进制数据发给redis
+            return execute(conn, stack, raise_on_error)
+        except (ConnectionError, TimeoutError) as e:
+            # 下面是遇到断开连接和watch的情况
+            conn.disconnect()
+            if not conn.retry_on_timeout and isinstance(e, TimeoutError):
+                raise
+            if self.watching:
+                raise WatchError("A ConnectionError occured on while watching "
+                                 "one or more keys")
+            return execute(conn, stack, raise_on_error)
+        finally:
+            # 下面有一个release连接的操作
+            self.reset()
+
+
+    def reset(self):
+        # 其他操作
+        if self.connection:
+            # "释放"连接
+            self.connection_pool.release(self.connection)
+            self.connection = None
+
+
+    # redis.connection.ConnectionPool
+    # "释放"连接
+    def release(self, connection):
+        self._checkpid()
+        # 连接的进程号和当前进程好不一致，留给其他进程去release
+        if connection.pid != self.pid:
+            return
+        # 这里的_in_use_connections和_available_connections一个是set一个是list, 所以没有正在的断开连接
+        self._in_use_connections.remove(connection)
+        self._available_connections.append(connection)
+
+
+
+
+
+

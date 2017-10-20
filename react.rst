@@ -1,3 +1,5 @@
+react v15.6.1
+
 react ssr
 ==========
 
@@ -92,6 +94,21 @@ ssr的时候图方便，用了<StaticRouter>
 ----------
 
 一般性能都损失在react渲染上(别说api, api不会很慢的，相信我), 一般的解决办法只能加缓存咯~~~
+
+client是否会重新渲染
+---------------------
+
+react再ssr返回的文件里面会带有一个checksum的的属性
+
+<div data-reactroot="" data-reactid="1" data-react-checksum="46739197">
+
+通过chrome的sources来看能看到，然后再elements里面看(就是检查元素)是看不到的，被react删除掉了
+
+checksum的作用就是react自己对比ssr过来的dom和在client的dom是否是一致的，不一致就重新渲染，一致就更新其他的dom
+
+至于怎么通过checksum说明ssr出来的dom和client自己渲染的一致，不知道，有人说不报错就是对的，那好吧.
+
+
   
 
 

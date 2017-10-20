@@ -607,3 +607,42 @@ http://www.dongwm.com/archives/Python%E5%85%83%E7%BB%84%E7%9A%84%E8%B5%8B%E5%80%
 
 这样是不报错并且修改成功，所以对比起来就知道了，x[2] += [2,3]在报错在于x[2]的赋值，由于元组不能重新赋值才会报错，但是你拿到元祖中可变对象，然后修改可变对象，就是可以的了
 
+
+python 3.x
+============
+
+
+sorted(list.sort)
+--------------------
+
+1. key函数: 取消了cmp而使用key, 在python2.x之前, cmp会每遍历一个元素就调用一次, 而指定key函数之后, key函数只运行一次，然后根据key返回的值列表排序，很多数据的时候比起cmp, 性能会更好点
+   
+   https://www.zhihu.com/question/30389643 
+
+   The value of the key parameter should be a function that takes a single argument and returns a key to use for sorting purposes. This technique is fast because the key function is called exactly once for each input record.
+   (https://docs.python.org/3/howto/sorting.html)
+
+2. timsort算法: The Timsort algorithm used in Python does multiple sorts efficiently because it can take advantage of any ordering already present in a dataset.
+
+   https://bindog.github.io/blog/2015/03/30/use-formal-method-to-find-the-bug-in-timsort-and-lunar-rover/
+
+3. key中使用operation.itemgetter/attrgetter/methodcaller更快/更好/更清楚, why?
+
+1. python基本类型的比较都是C级别的, 而对象级别的(__eq__等方法)都是python基本的
+
+2. The operator module in python implements many functions of common use in C, making them faster.(http://bioinfoblog.it/2010/01/operator-itemgetter-rocks/), 但是有个operator.py, 你说是C实现的，表示怀疑
+
+3. 有些人说用itemgetter比起lamba, 能更清楚表示在干嘛
+
+4. 好吧，网上都说operator里面的函数比较快，但是为什么快呢，有些人说是C实现的，但是itemgetter的实现明显是python代码, 而且官方文档也没说明，就一句
+   The key-function patterns shown above are very common, so Python provides convenience functions to make accessor functions easier and faster. The operator module has itemgetter(), attrgetter(), and a methodcaller() function.
+   (https://docs.python.org/3/howto/sorting.html)
+
+
+django的qs和redis混排
+-------------------------
+
+
+qs.orderby之后搜索出来的就是有序的，然后使用timsort来排序redis中拿到的数据，刚刚好, 前提是qs出来的不是很大~~~
+
+

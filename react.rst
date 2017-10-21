@@ -108,6 +108,8 @@ checksum的作用就是react自己对比ssr过来的dom和在client的dom是否�
 
 至于怎么通过checksum说明ssr出来的dom和client自己渲染的一致，不知道，有人说不报错就是对的，那好吧.
 
+可以这样, 校验checksum的代码是在react-dom/lib/ReactMarkupChecksum.js:41:  canReuseMarkup: function (markup, element), 可以加一个console打印一下，
+
 
   
 

@@ -150,7 +150,7 @@ https://www.elastic.co/guide/cn/elasticsearch/guide/current/search-lite.html
 
 
 精确值/全文
-++++++++++++
+------------
 
 
 
@@ -207,7 +207,7 @@ es中有类型，并且类型有对应的搜索方法, 某个字段被归类与�
 
 
 复杂对象和数据建模
-++++++++++++++++++++++
+----------------------
 
 
 
@@ -229,7 +229,7 @@ https://www.elastic.co/guide/cn/elasticsearch/guide/current/relevance-intro.html
 
 
 docValues?
-+++++++++++
+-----------
 
 因此，搜索和聚合是相互紧密缠绕的。搜索使用倒排索引查找文档，聚合操作收集和聚合 doc values 里的数据。
 
@@ -391,7 +391,7 @@ https://www.elastic.co/guide/cn/elasticsearch/guide/current/nested-objects.html
 
 
 嵌套对象排序
-+++++++++++++++++
+-----------------
 
 nested_path, nested_filter
 
@@ -399,13 +399,13 @@ https://www.elastic.co/guide/cn/elasticsearch/guide/current/nested-sorting.html
 
 
 嵌套对象聚合
-+++++++++++++++
+---------------
 
 https://www.elastic.co/guide/cn/elasticsearch/guide/current/nested-aggregation.html#nested-aggregation
 
 
 嵌套对象的优势和劣势
-++++++++++++++++++++++++++++++++++
+----------------------------------
 
 嵌套对象 在只有一个主要实体时非常有用，这个主要实体包含有限个紧密关联但又不是很重要的实体，例如我们的 blogpost 对象包含评论对象。 在基于评论的内容查找博客文章时， nested 查询有很大的用处，并且可以提供更快的查询效率。
 
@@ -442,14 +442,14 @@ content:
 比如要查询用户名为john用户的的文档，可以
 
 应用层自己查
-++++++++++++++
+--------------
 
 https://www.elastic.co/guide/cn/elasticsearch/guide/current/application-joins.html
 
 先查询所有name带有john的用户的id, 然后通过id去查询content里面的user_id
 
 冗余数据
-++++++++++
+----------
 
 https://www.elastic.co/guide/cn/elasticsearch/guide/current/denormalization.html
 
@@ -467,7 +467,7 @@ https://www.elastic.co/guide/cn/elasticsearch/guide/current/denormalization-conc
 
 
 聚合
-+++++
+-----
 
 桶的概念
 
@@ -475,7 +475,7 @@ https://www.elastic.co/guide/cn/elasticsearch/guide/current/top-hits.html
 
 
 并发
-+++++
+-----
 
 各种锁
 

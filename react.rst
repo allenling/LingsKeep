@@ -1,5 +1,223 @@
 react v15.6.1
 
+**不用url hash(#!)算什么spa, 每次跳页面还要请求服务器获取html算什么spa**
+
+react and polymer
+====================
+
+react and web component
+https://reactjs.org/docs/web-components.html
+
+virtual dom and shadow dom
+https://stackoverflow.com/questions/36012239/is-shadow-dom-fast-like-virtual-dom-in-react-js
+
+在react中, 页面刷新是先destroy之前的node, 比如<div id="root" ><Node1 ></Node1></div>, re-render之后, 先删除node1然后渲染node2, <div id="root" ><Node2 ></Node2></div>.
+
+而polymer只是把Node1给设置为display: hidden
+
+如果hidden的话，事件还会被监听到的，比如Node1监听了scroll, 被hidden之后，依然还是会监听到scroll, 同样的react也会，react只是删掉dom而已, 对象还在，所以react也会出现这样的问题
+
+
+root element
+===============
+
+react只会在id=root里面渲染
+
+
+
+immutable(again!)
+===================
+
+React elements are immutable. Once you create an element, you can’t change its children or attributes. An element is like a single frame in a movie: it represents the UI at a certain point in time.
+With our knowledge so far, the only way to update the UI is to create a new element, and pass it to ReactDOM.render().
+
+https://reactjs.org/docs/rendering-elements.html
+
+
+react element是immutable的, 更新element的唯一方法就是创建一个新的元素然后render, 因为react只会在id=root的element里面渲染，所以新的
+element会替换掉原来的元素
+
+之所以说immutable, again!是因为看看elasticsearch, paxos, 都是immutable的~~~~
+
+
+virtual dom
+============
+
+更新元素只能重新rerender, 这样性能不行呀，所以virtual dom的作用就是比对新的element和之前的element, 只更新必要的部分~~在react中, 只会调用render一次啦
+
+
+jsx
+====
+
+一种js和html混写的语法, 进步或倒退(毕竟js, css, html拆分是这么多年来的方向), 还是挺好?
+
+componment
+===========
+
+componment是一个函数, 返回html代码的, 可以是类, 但是继承自react的componment(带有render方法), 或者是函数，返回html代码
+
+
+props and state
+================
+
+Whether you declare a component as a function or a class, it must never modify its own props
+
+State is similar to props, but it is private and fully controlled by the component.
+
+use state correctly
+---------------------
+
+Do Not Modify State Directly
+++++++++++++++++++++++++++++++++
+
+this.State.a = 1这样并不能更新compoment, 应该是this.SetState({'a': 1}), 这样像不像polymer的set.
+
+State Updates May Be Asynchronous
++++++++++++++++++++++++++++++++++++++++
+
+React may batch multiple setState() calls into a single update for performance.
+react会把多个setState的操作合起来一起执行的
+
+Because this.props and this.state may be updated asynchronously, you should not rely on their values for calculating the next state.
+就像上面说的, 不能依赖state里面的value
+
+State Updates are Merged
++++++++++++++++++++++++++
+
+没太看懂
+
+
+data flow(数据绑定,数据流)
+==============================
+
+例子:
+
+// 一个组件
+function FormattedDate(props) {
+  return <h2>It is {props.date.toLocaleTimeString()}.</h2>;
+}
+//传值
+//这里的this是当前element而不是指FormattedDate
+<FormattedDate date={this.state.date} />
+
+
+数据绑定是父->子, 上->下, 单向的不是双向的(双工的)
+
+
+ref
+====
+
+如果要执行子element的方法的话，可以使用ref.
+
+ref是element对应的实例， 比如<Child ref={(child) => {this.cd = child}}, 这里ref接收一个函数，函数参数就是Child这个element的实例，然后我们把this.cd赋值于child, 这样this.cd就是child实例了
+
+也可以暴露子element的dom给parent, 也还是通过ref的形式
+
+function CustomTextInput(props) {
+  return (
+    <div>
+      // 这里input会被ref到prop.inputRef, 这样父element就可以拿到了
+      <input ref={props.inputRef} />
+    </div>
+  );
+}
+
+class Parent extends React.Component {
+  render() {
+    return (
+      <CustomTextInput
+        // 父element将接收子element的inputRef这个prop
+        inputRef={el => this.inputElement = el}
+      />
+    );
+  }
+}
+
+https://reactjs.org/docs/refs-and-the-dom.html
+
+
+
+如果子element要改变父element的state的话, 可以这样https://ourcodeworld.com/articles/read/409/how-to-update-parent-state-from-child-component-in-react
+
+就是将一个函数fn, fn的作用是修改父element的state, function fn () {this.setState({'a': 1});}, 通过prop传入到子element中，然后在子element中调用this.prop.fn
+
+
+event
+==========
+
+驼峰命名去定义事件, 比如onClick, 后面接函数名，不能像html那样用字符串
+
+Another difference is that you cannot return false to prevent default behavior in React. You must call preventDefault explicitly.
+
+阻止事件冒泡不能返回false, 必须显示调用preventDefault
+
+**定义event handler需要绑定this**
+
+class Toggle extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = {isToggleOn: true};
+
+    // This binding is necessary to make `this` work in the callback
+    // 这里的bind可以类比与python中函数传入self, 成为跟实例绑定的方法
+    this.handleClick = this.handleClick.bind(this);
+  }
+
+  handleClick() {
+    this.setState(prevState => ({
+      isToggleOn: !prevState.isToggleOn
+    }));
+  }
+
+  render() {
+    return (
+      <button onClick={this.handleClick}>
+        {this.state.isToggleOn ? 'ON' : 'OFF'}
+      </button>
+    );
+  }
+}
+
+ReactDOM.render(
+  <Toggle />,
+  document.getElementById('root')
+);
+
+有个js的知识点:  In JavaScript, class methods are not bound by default. If you forget to bind this.handleClick and pass it to onClick, this will be undefined when the function is actually called.
+
+是不是很傻，我在类里面定义方法居然不是默认就绑定到实例的.
+
+关于js的bind: https://www.smashingmagazine.com/2014/01/understanding-javascript-function-prototype-bind/
+
+箭头函数定义法
+---------------
+
+class LoggingButton extends React.Component {
+  handleClick() {
+    console.log('this is:', this);
+  }
+
+  render() {
+    // This syntax ensures `this` is bound within handleClick
+    return (
+      <button onClick={(e) => this.handleClick(e)}>
+        Click me
+      </button>
+    );
+  }
+}
+
+但是不太好，有re-render的性能问题:
+
+The problem with this syntax is that a different callback is created each time the LoggingButton renders. In most cases, this is fine. However, if this callback is passed as a prop to lower components, those components might do an extra re-rendering. We generally recommend binding in the constructor or using the class fields syntax, to avoid this sort of performance problem.
+
+
+if...else render
+==================
+
+如果return null, 则组件不会显示
+
+
 react ssr
 ==========
 

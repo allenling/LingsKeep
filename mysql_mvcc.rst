@@ -5,7 +5,7 @@ http://tech.meituan.com/innodb-lock.html
 http://hedengcheng.com/?p=771
 
 
-在RR隔离级别下，mysql会把扫描但是不满足where条件的row也给锁住， 而RC缺不会, RR会有gap锁，和行锁组成next-key锁, 而RC没有gap锁. 
+在RR隔离级别下，mysql会把扫描但是不满足where条件的row也给锁住， 而RC不会, RR会有gap锁，和行锁组成next-key锁, 而RC没有gap锁. 
 
 gap只会出现在RR级别下where条件是非唯一索引和没有索引的情况
 
@@ -68,13 +68,15 @@ x-lock(5,2); update(5,2) to (5,4); retain x-lock
 semi-consistent read是read committed与consistent read两者的结合。一个update语句，如果读到一行已经加锁的记录，此时InnoDB返回记录最近提交的版本，由MySQL上层判断此版本是否满足update的where条件。若满足(需要更新)，则MySQL会重新发起一次读操作，此时会读取行的最新版本(并加锁)。
 semi-consistent read只会发生在read committed隔离级别下，或者是参数innodb_locks_unsafe_for_binlog被设置为true。
 
-(以上semi-consistent的句子来自:http://hedengcheng.com/?p=220)
-
-https://dev.mysql.com/doc/refman/5.7/en/innodb-transaction-isolation-levels.html
+(以上semi-consistent的句子来自:http://hedengcheng.com/?p=220, 关于semi-consistent: https://dev.mysql.com/doc/refman/5.7/en/innodb-transaction-isolation-levels.html
 
 
 read view
 ============
+
+http://www.ywnds.com/?p=10418
+
+https://liuzhengyang.github.io/2017/04/18/innodb-mvcc/
 
 MVCC都是基于version的.
 

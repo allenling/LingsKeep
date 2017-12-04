@@ -1162,3 +1162,29 @@ ModelBackend.authenticate和user.is_active
        return is_active or is_active is None
 
 
+https和proxy
+=================
+
+比如我们的api服务是在nginx后面，然后使用https, 这个时候默认的分页行为就是出现next和previous的url不是https的, 比如分页的地址是:
+
+https:/a.b.c/page=1&pagesize=1, 然后返回的结构中next(包括previous)的url就变成了http了{'next': 'http://a.b.c/page=2&pagesize=1'}
+
+这个需要配置nginx把客户端使用的scheme传给django, 同时需要在django中配置SESSION_COOKIE_SECURE, SECURE_PROXY_SSL_HEADER, CSRF_COOKIE_SECURE.
+
+nginx配置的话就是proxy_set_header   X-Forwarded-Proto $scheme;这个自定义头.
+
+然后django的配置中
+
+SESSION_COOKIE_SECURE:  If this is set to True, the cookie will be marked as “secure,” which means browsers may ensure that the cookie is only sent under an HTTPS connection.
+也就是说只有客户端的浏览器会只有在https连接的情况下才发送cookie.
+
+CSRF_COOKIE_SECURE :Whether to use a secure cookie for the CSRF cookie. If this is set to True, the cookie will be marked as “secure,” which means browsers may ensure that the cookie is only sent with an HTTPS connection.
+跟上一个一样，只是这里是csrf的cookie值
+
+
+SECURE_PROXY_SSL_HEADER: 从哪个header中获取客户端的scheme和值. 一般配置跟nginx一致, SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https'), 这个配置就是说只有HTTP_X_FORWARDED_PROTO这个
+头的值为https的时候, request才是安全的(request.is_secure), 这个值会影响
+
+
+然后有点小问题的是SESSION_COOKIE_SECURE这个值，如果你在测试环境下不是https的话，cookie就不会被发送，就比较迷茫了. 比如测试的admin中的message_user就不会有提示了
+

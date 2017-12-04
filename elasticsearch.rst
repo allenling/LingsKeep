@@ -66,6 +66,18 @@ plus: SLA?
 
 https://www.elastic.co/guide/cn/elasticsearch/guide/current/distrib-multi-doc.html
 
+mget/bulk
+-----------
+
+mget 和 bulk API 的 模式类似于单文档模式。区别在于协调节点知道每个文档存在于哪个分片中。 它将整个多文档请求分解成 每个分片 的多文档请求，并且将这些请求并行转发到每个参与节点。
+协调节点把所有的批量操作结果聚合起来然后返回.
+
+批量操作是一行一个json的形式, 具体文档.
+
+plus: SLA?
+
+https://www.elastic.co/guide/cn/elasticsearch/guide/current/distrib-multi-doc.html
+
 所以, 协调节点是怎么工作的?
 
 当一个搜索请求被发送到某个节点时，这个节点就变成了协调节点。 这个节点的任务是广播查询请求到所有相关分片并将它们的响应整合成全局排序后的结果集合，这个结果集合会返回给客户端。
@@ -259,6 +271,11 @@ https://www.elastic.co/guide/cn/elasticsearch/guide/current/scroll.html
 
 
 类比于mysql的cursor?
+
+http://www.cnblogs.com/zhuyp1015/p/3575823.html
+     
+    SELECT 返回的是一个结果集，可能含有多行数据，有时候需要在检索出来的行中前进或后退一行或多行。这就是使用游标的原因。游标（CURSOR） 是一个存储在MySQL服务器上的数据库查询，它不是一条SELECT语句，而是被语句检索出来的结果集。在存储了游标之后应用程序可以根据需要滚动或浏览其中的数据。
+     游标主要用于交互式应用，其中用户需要滚动屏幕上的数据，并对数据进行浏览或作出更改。
 
 
 水平扩容
@@ -470,21 +487,4 @@ https://www.elastic.co/guide/cn/elasticsearch/guide/current/denormalization-conc
 -----
 
 桶的概念
-
-https://www.elastic.co/guide/cn/elasticsearch/guide/current/top-hits.html
-
-
-并发
------
-
-各种锁
-
-https://www.elastic.co/guide/cn/elasticsearch/guide/current/concurrency-solutions.html
-
-
-父子文档
-==========
-
-https://www.elastic.co/guide/cn/elasticsearch/guide/current/parent-child.html
-
 

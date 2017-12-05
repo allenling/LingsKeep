@@ -366,10 +366,12 @@ python的变量赋值其实是一个名字指向一个值, 也就是所谓的引
 
 对于字符串和数字之类的不可变对象(包括tuple), 修改会rebind, reassign一个新的值, 比如
 
-x='a'
-v1 = id(x)
-x += 'b'
-v2 = id(x)
+.. code-block:: python
+
+    x='a'
+    v1 = id(x)
+    x += 'b'
+    v2 = id(x)
 
 这个时候v1和v2并不像等, 也就是其实是x这个名字被指向一个新的字符串了. 同理, x=1, x+=1的情况也一样.
 
@@ -377,18 +379,22 @@ v2 = id(x)
 
 如
 
-x = [1]
-v1 = id(x)
-x.append(2)
-v2 = id(x)
+.. code-block:: python
+
+    x = [1]
+    v1 = id(x)
+    x.append(2)
+    v2 = id(x)
 
 v1和v2是相等的, 只是原处修改了值, 名字x指向的值没有变.
 
 对于
 
-x = [1]
-a=x
-x.append(2)
+.. code-block:: python
+
+    x = [1]
+    a=x
+    x.append(2)
 
 这种情况下, a先指向了x所指向的值, 是一个可变对象, 然后修改了该可变对象, 所以a的值也是[1,2], 所以id(a)等于id(x)
 
@@ -416,19 +422,29 @@ x=[1]
 
 调用和输出:
 
-test(1)
-1, [1]
-test(1)
-1, [1, 1]
-test(1)
-1, [1, 1, 1]
+.. code-block:: 
+
+    test(1)
+    1, [1]
+    test(1)
+    1, [1, 1]
+    test(1)
+    1, [1, 1, 1]
 
 一开始,
-test.func_defaults为([],), test.func_code.co_varnames为('a', 'b')
+
+test.func_defaults为([],)
+
+test.func_code.co_varnames为('a', 'b')
+
 调用第一次之后, 
+
 test.func_defaults为([1],)
+
 调用第二次之后, 
+
 test.func_defaults为([1, 1],)
+
 以此类推
 
 若默认值不是可变对象, 则存在func.func_defaults的值是不会变的
@@ -441,12 +457,14 @@ test.func_defaults为([1, 1],)
 
 调用和输出:
 
-test(1)
-1, 2
-test(1)
-1, 2
-test(1)
-1, 2
+.. code-block:: 
+
+    test(1)
+    1, 2
+    test(1)
+    1, 2
+    test(1)
+    1, 2
 
 无论调用几次, test.func_defaults都是(1)
 
@@ -457,6 +475,31 @@ x = ('a', [])
 x[1].append('data')
 
 x == ('a', ['data'])
+
+关于tuple的一个小"问题"
+
+.. code-block:: python
+
+    In [27]: x = ([], 'a')
+    
+    In [28]: x[0].append('b')
+    
+    In [29]: x
+    Out[29]: (['b'], 'a')
+    
+    In [30]: x[0] += ['c']
+    ---------------------------------------------------------------------------
+    TypeError                                 Traceback (most recent call last)
+    <ipython-input-30-131b014e09ec> in <module>()
+    ----> 1 x[0] += ['c']
+    
+    TypeError: 'tuple' object does not support item assignment
+    
+    In [31]: x
+    Out[31]: (['b', 'c'], 'a')
+    
+
+tuple不可更改, 但是上面例子中的列表却可以更改，并且报了异常之后也能修改成功, 这是因为可变对象是in-place修改的原因.
 
 is或者==
 ============
@@ -501,6 +544,7 @@ global
 --------
 
 例子:
+
 .. code-block:: python
 
     import dis
@@ -529,58 +573,61 @@ global
     test_mutable()
     
     dis.dis(test)
-    print 'text'
+    print 'test'
     dis.dis(test1)
     print 'test1'
     dis.dis(test_mutable)
 
 输出
 
-{u'a': 1}
-{u'a': 2}
- 12           0 LOAD_GLOBAL              0 (x)
-              3 PRINT_ITEM          
-              4 PRINT_NEWLINE       
+.. code-block:: 
 
- 13           5 LOAD_GLOBAL              1 (d)
-              8 PRINT_ITEM          
-              9 PRINT_NEWLINE       
-             10 LOAD_CONST               0 (None)
-             13 RETURN_VALUE        
+    {u'a': 1}
+    {u'a': 2}
+    
+    12           0 LOAD_GLOBAL              0 (x)
+                 3 PRINT_ITEM          
+                 4 PRINT_NEWLINE       
+    
+    13           5 LOAD_GLOBAL              1 (d)
+                 8 PRINT_ITEM          
+                 9 PRINT_NEWLINE       
+                10 LOAD_CONST               0 (None)
+                13 RETURN_VALUE        
+    
+    test
+    
+    17           0 LOAD_FAST                0 (x)
+                 3 PRINT_ITEM          
+                 4 PRINT_NEWLINE       
+    
+    18           5 LOAD_GLOBAL              0 (False)
+                 8 STORE_FAST               0 (x)
+    
+    19          11 LOAD_FAST                0 (x)
+                14 PRINT_ITEM          
+                15 PRINT_NEWLINE       
+                16 LOAD_CONST               0 (None)
+                19 RETURN_VALUE        
+    
+    test1
+    
+    23           0 LOAD_GLOBAL              0 (d)
+                 3 PRINT_ITEM          
+                 4 PRINT_NEWLINE       
+    
+    24           5 LOAD_CONST               1 (2)
+                 8 LOAD_GLOBAL              0 (d)
+                11 LOAD_CONST               2 (u'a')
+                14 STORE_SUBSCR        
+    
+    25          15 LOAD_GLOBAL              0 (d)
+                18 PRINT_ITEM          
+                19 PRINT_NEWLINE       
+                20 LOAD_CONST               0 (None)
+                23 RETURN_VALUE        
 
-test
-
- 17           0 LOAD_FAST                0 (x)
-              3 PRINT_ITEM          
-              4 PRINT_NEWLINE       
-
- 18           5 LOAD_GLOBAL              0 (False)
-              8 STORE_FAST               0 (x)
-
- 19          11 LOAD_FAST                0 (x)
-             14 PRINT_ITEM          
-             15 PRINT_NEWLINE       
-             16 LOAD_CONST               0 (None)
-             19 RETURN_VALUE        
-
-test1
-
- 23           0 LOAD_GLOBAL              0 (d)
-              3 PRINT_ITEM          
-              4 PRINT_NEWLINE       
-
- 24           5 LOAD_CONST               1 (2)
-              8 LOAD_GLOBAL              0 (d)
-             11 LOAD_CONST               2 (u'a')
-             14 STORE_SUBSCR        
-
- 25          15 LOAD_GLOBAL              0 (d)
-             18 PRINT_ITEM          
-             19 PRINT_NEWLINE       
-             20 LOAD_CONST               0 (None)
-             23 RETURN_VALUE        
-
-
+上面test中, 字节码是LOAD_GLOBAL, 这是加载全局变量, 而test1是LOAD_FAST, 加载局部变量, 为什么有区别?
 
 https://docs.python.org/2/faq/programming.html#what-are-the-rules-for-local-and-global-variables-in-python
 
@@ -588,16 +635,38 @@ In Python, variables that are only referenced inside a function are implicitly g
 
 Though a bit surprising at first, a moment’s consideration explains this. On one hand, requiring global for assigned variables provides a bar against unintended side-effects. On the other hand, if global was required for all global references, you’d be using global all the time. You’d have to declare as global every reference to a built-in function or to a component of an imported module. This clutter would defeat the usefulness of the global declaration for identifying side-effects.
 
-关键在于上面句子中的 If a variable is assigned a value anywhere within the function’s body, it’s assumed to be a local unless explicitly declared as global.这句话中的If a variable is assigned, 是assigned的时候
-才会当成局部变量.
+关键在于上面句子中的 If a variable is assigned a value anywhere within the function’s body, it’s **assumed** to be a local unless explicitly declared as global.这句话中的If a variable is assigned, 是assigned的时候
+才会当(assumed)成局部变量.
 
 所以可以这么理解, 在函数里面, 修改字典的时候, 是modify in place, 不是reassign, rebinding, 所以解释器会直接根据LEGB原则加载到全局的字典, 然后修改.
 
-而其他不可变对象就不行, 不可变对象在函数里面若有修改操作, 也就是reassign, rebinding操作, 解释器就把它当成局部变量, 所以第一句打印语句就报没有定义的错误.
+而其他不可变对象就不行, 不可变对象在函数里面若有修改操作, 也就是reassign, rebinding操作, 解释器就把它当成局部变量, 因为test中只有打印语句就报没有定义的错误, 而test1中有reassign, 则
+解释器就把x当做局部遍历, 当你要操作一个局部变量的时候，必须先赋值
 
 有时候得抠字眼一下才能理解.
 
-**一个gotcha情况:**
+先赋值
+-------------
+
+.. code-block:: python
+
+    def test():
+        print(x)
+    
+    x = 1
+    
+    test()
+
+看起来print(x)是在x赋值之前就调用了，应该报未赋值的异常，但是其实是可以正常运行的
+
+这是因为先赋值是指 **操作之前** 必须赋值, 当解释器执行到test函数定义的时候，是执行了函数定义操作，但是并没有操作x, 然后我们赋值x, 然后调用test, test中操作了x
+
+所以这个情况就是操作之前赋值了
+
+如果把x的赋值移到test调用之后, 就会报未赋值异常了
+
+一个gotcha情况
+-------------------
 
 下面的代码运行会是什么情况(对象的__iadd__一般返回self)
 
@@ -841,9 +910,9 @@ yield from和await的例子实现的是同样一个功能
 
 **区别就是**:
   
-  1.yield from的对象, yield from语句基本上就是对后面的可迭代对象进行迭代, GET_YIELD_FROM_ITER就是拿到可迭代对象, 也就是调用__iter__方法
+1.yield from的对象, yield from语句基本上就是对后面的可迭代对象进行迭代, GET_YIELD_FROM_ITER就是拿到可迭代对象, 也就是调用__iter__方法
 
-  2. 而await呢, 则是有一个GET_AWAITABLE的指令，然后GET_AWAITABLE就是调用__await__方法,获取其返回的对象, 所以await是对__await__返回的对象进行yield from
+2. 而await呢, 则是有一个GET_AWAITABLE的指令，然后GET_AWAITABLE就是调用__await__方法,获取其返回的对象, 所以await是对__await__返回的对象进行yield from
 
 **所以await obj就是调用obj.__await__方法，得到返回的可迭代对象iter_obj, 然后对得到的可迭代对象进行yield from, yield from是yield的代理, 语句yield from iter_obj, 本质上会对yield from后面的对象iter_obj进行一个迭代
 (这里迭代有点小小的困惑, 一直调用iter_obj.send比较合适), 直到产生了StopIteration, 然后捕获StopIteration.value, 返回给调用者.**
@@ -1005,6 +1074,7 @@ ok, 用例子回顾一下iterator:
 输出是
 
 an is: <coroutine object ait.__anext__ at 0x7f216ebe80f8>
+
 0
 
 dis一下:
@@ -1040,43 +1110,43 @@ dis一下:
 
 输出是
 
-.. code-block:: python
+.. code-block:: 
 
-22           0 SETUP_LOOP              62 (to 64)
-             2 LOAD_GLOBAL              0 (ait)
-             4 LOAD_CONST               1 (2)
-             6 CALL_FUNCTION            1
-             8 GET_AITER
-            10 LOAD_CONST               0 (None)
-            12 YIELD_FROM
-       >>   14 SETUP_EXCEPT            12 (to 28)
-            16 GET_ANEXT
-            18 LOAD_CONST               0 (None)
-            20 YIELD_FROM
-            22 STORE_FAST               0 (i)
-            24 POP_BLOCK
-            26 JUMP_FORWARD            22 (to 50)
-       >>   28 DUP_TOP
-            30 LOAD_GLOBAL              1 (StopAsyncIteration)
-            32 COMPARE_OP              10 (exception match)
-            34 POP_JUMP_IF_FALSE       48
-            36 POP_TOP
-            38 POP_TOP
-            40 POP_TOP
-            42 POP_EXCEPT
-            44 POP_BLOCK
-            46 JUMP_ABSOLUTE           64
-       >>   48 END_FINALLY
-
-23     >>   50 LOAD_GLOBAL              2 (print)
-            52 LOAD_FAST                0 (i)
-            54 CALL_FUNCTION            1
-            56 POP_TOP
-            58 JUMP_ABSOLUTE           14
-            60 POP_BLOCK
-            62 JUMP_ABSOLUTE           64
-       >>   64 LOAD_CONST               0 (None)
-            66 RETURN_VALUE
+ 22           0 SETUP_LOOP              62 (to 64)
+              2 LOAD_GLOBAL              0 (ait)
+              4 LOAD_CONST               1 (2)
+              6 CALL_FUNCTION            1
+              8 GET_AITER
+             10 LOAD_CONST               0 (None)
+             12 YIELD_FROM
+        >>   14 SETUP_EXCEPT            12 (to 28)
+             16 GET_ANEXT
+             18 LOAD_CONST               0 (None)
+             20 YIELD_FROM
+             22 STORE_FAST               0 (i)
+             24 POP_BLOCK
+             26 JUMP_FORWARD            22 (to 50)
+        >>   28 DUP_TOP
+             30 LOAD_GLOBAL              1 (StopAsyncIteration)
+             32 COMPARE_OP              10 (exception match)
+             34 POP_JUMP_IF_FALSE       48
+             36 POP_TOP
+             38 POP_TOP
+             40 POP_TOP
+             42 POP_EXCEPT
+             44 POP_BLOCK
+             46 JUMP_ABSOLUTE           64
+        >>   48 END_FINALLY
+ 
+ 23     >>   50 LOAD_GLOBAL              2 (print)
+             52 LOAD_FAST                0 (i)
+             54 CALL_FUNCTION            1
+             56 POP_TOP
+             58 JUMP_ABSOLUTE           14
+             60 POP_BLOCK
+             62 JUMP_ABSOLUTE           64
+        >>   64 LOAD_CONST               0 (None)
+             66 RETURN_VALUE
 
 注意的是, GET_AITER就是调用__aiter__方法, 然后GET_ANEXT就是调用__anext__方法, 然后接着有一个YIELD_FROM, 也就是对__anext__返回的对象进行yield from, 然后跳到print那里打印, 然后
 LOAD_GLOBAL StopAsyncIteration, 然后COMPARE_OP比对异常是否符合, 如果符合就是END_FINALLY

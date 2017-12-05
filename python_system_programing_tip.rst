@@ -443,7 +443,16 @@ http://stackoverflow.com/questions/12630214/context-switch-internals
 GIL以及GIL扑打(thrashing)效应
 ================================
 
-都是David Beazley的文章
+由于python的线程都是lwp, 所以是可以并发的，只是没拿到gil的线程是不能运行的啦
+
+
+thread1 -----running---> release gil　-----wait gil---->
+
+thread2 -----wait gil--> got gil      ------running----->
+
+thread3 -----wait gil--> still wait   ------wait gil---->
+
+**以下都是David Beazley的文章**
 
 1.  http://www.dabeaz.com/python/GIL.pdf
 ----------------------------------------------
@@ -452,7 +461,7 @@ GIL以及GIL扑打(thrashing)效应
 
 1.1  py3.2之前 GIL，两个cpu密集型的线程，两核比单核慢很多。
 
-1.2  有时候ctrl+c不能杀死进程，这是因为如果解释器接收到信号之后，是每一个tick就切换线程直到切换到主线程为止. 若主线程被不可中断的thread join或者lock给阻塞了，然后主线程就不会被OS给唤醒，也就是不会重新启动.
+1.2  有时候ctrl+c不能杀死进程，这是因为如果解释器接收到信号之后，是每一个tick就释放gil让其他线程执行, 直到当前执行的线程为主线程为止. 若主线程被不可中断的thread join或者lock给阻塞了，然后主线程就不会被OS给唤醒，也就是不会重新启动.
 
      这个时候程序由于check很频繁，运行就很慢!
 
@@ -489,7 +498,7 @@ Py3.2之后GIL被重写了，cpu密集型的线程释放GIL不再是基于tick�
 
 由于python的thread是kernel lwp, 那么这个函数应该是调用了sched_setscheduler或者sched_rr_get_interval了.
 
-2.1  一个线程会一直运行，知道一个全局变量gil_drop_request被设置为1，线程检查到该变量被设置为1之后，说明有其他线程需要GIL，然后当前线程会主动释放掉GIL。
+2.1  一个线程会一直运行，直到一个全局变量gil_drop_request被设置为1，线程检查到该变量被设置为1之后，说明有其他线程需要GIL，然后当前线程会主动释放掉GIL。
 
 2.2  线程1一直运行，线程2先等待一段时间，在等待时间内，若线程1还没有主动释放掉GIL(陷入IO什么的)，则线程2设置全局变量gil_drop_request=1，然后再次等待，线程1检查到gil_drop_request=1，则主动释放掉GIL，
 

@@ -530,7 +530,19 @@ GIL，然后cpu密集型线程就运行了，这样io密集型的线程必须等
 (一个额外的参考，curio和trio这两个Python异步框架，curio的思想是每一个io操作都会引发yield，而trio中，有些不需要阻塞的io操作，则不会yield, 类比GIL的例子，yield就像
 切换线程一样)
 
-3.1 A Possible Solution: 
+新的GIL消除了gil battle, 但是引入了timeout这样一个时间消耗, 所以对于高负载的io应用来说, gil timeout有可能会影响响应时间.
+
+3.1 t2中某个fd可读, 然后t2先等待gil timeout, 然后t1是cpu绑定的,
+   
+    自然不会释放(假设在5毫秒内), 然后t2强制t1释放gil, 然后t1释放, t2拿到gil, 然后运行, 整个过程中t2第一次等待timeout很有可能是失败的，只能强制让t1让出gil
+
+3.2 接3.1的例子, t3是另外一个线程, 然后os唤醒的不是t2而是t3, 那t2只能再继续竞争
+
+3.3 接3.1的例子, 如果t2的io操作可以立即执行完成, 比如发送缓存区的大小大于发送的数据, 则write可以很快完成, 但是io必须释放gil, 所以t1又拿到了, 如果t2有很多io, 但是
+    
+    大多数都可以几乎立即执行完成的情况下, 释放gil, 再重新获取gil的timeout就变得很多了 
+
+3.4 A Possible Solution: 
 
     - If a thread is preempted by a timeout, it is penalized with lowered priority (bad thread)
 

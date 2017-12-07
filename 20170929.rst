@@ -71,6 +71,8 @@ https://hmgle.github.io/linux/select/poll/epoll/thundering/herd/2014/03/23/linux
 
 https://jin-yang.github.io/post/linux-details-of-thundering-herd.html
 
+http://www.cnblogs.com/jintianfree/p/3861609.html
+
 
 
 python redis

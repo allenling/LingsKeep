@@ -379,6 +379,7 @@ https://idndx.com/2014/09/02/the-implementation-of-epoll-2/
     };
 
 下面是初始化poll_table的_qproc
+
 .. code-block:: c
 
     // epq是struct ep_pqueue
@@ -477,7 +478,7 @@ pwq->wait might be the most important thing in the whole epoll implementation be
 这里如果epoll_wait是处于sleep状态, 那么ep_poll_callback被调用的时候会唤醒epoll_wait的, 也就是调用epoll_wait的进程了.
 
 
-**关于kerbel vfs poll实现:**
+**关于kernel vfs poll实现:**
 
 绑定的ep_poll_callback是在某个fd有事件的时候所调用的回调, 对某个fd进行监视是否有数据是kernel vfs的poll实现, 简单来说就是
 

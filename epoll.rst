@@ -103,7 +103,7 @@ epoll_event的构造体定义有data和event来拿过部分:
 .. code-block:: c
 
     typedef union epoll_data {
-        void        \*ptr;
+        void        *ptr;
         int          fd;
         uint32_t     u32;
         uint64_t     u64;
@@ -118,7 +118,7 @@ epoll_wait系统调用定义为:
 
 .. code-block:: c
 
-    int epoll_wait(int epfd, struct epoll_event \*events, int maxevents, int timeout)
+    int epoll_wait(int epfd, struct epoll_event *events, int maxevents, int timeout)
 
 第二个参数就是就绪数组.
 
@@ -169,7 +169,7 @@ linux v4.15-rc2 https://github.com/torvalds/linux/blob/master/fs/eventpoll.c, li
 epoll_ctl
 ---------------
 
-SYSCALL_DEFINE4(epoll_ctl, int, epfd, int, op, int, fd, struct epoll_event __user \*, event)
+SYSCALL_DEFINE4(epoll_ctl, int, epfd, int, op, int, fd, struct epoll_event __user *, event)
 
 https://idndx.com/2015/07/08/the-implementation-of-epoll-1/
 
@@ -347,7 +347,7 @@ https://idndx.com/2014/09/02/the-implementation-of-epoll-2/
 
 .. code-block:: c
 
-    static int ep_insert(struct eventpoll \*ep, struct epoll_event \*event, struct file \*tfile, int fd, int full_check)
+    static int ep_insert(struct eventpoll *ep, struct epoll_event *event, struct file *tfile, int fd, int full_check)
     {
         
     }

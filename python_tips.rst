@@ -534,10 +534,17 @@ python"定时任务"
 =================
 
 一般是100个字节码指令之后去检查信号或者切换线程等.
+
 https://docs.python.org/2/library/sys.html#sys.setcheckinterval
 
 sys.setcheckinterval(interval)
-Set the interpreter’s “check interval”. This integer value determines how often the interpreter checks for periodic things such as thread switches and signal handlers. The default is 100, meaning the check is performed every 100 Python virtual instructions. Setting it to a larger value may increase performance for programs using threads. Setting it to a value <= 0 checks every virtual instruction, maximizing responsiveness as well as overhead.
+
+Set the interpreter’s “check interval”. This integer value determines how often the interpreter checks for periodic things such as thread switches and signal handlers.
+
+The default is 100, meaning the check is performed every 100 Python virtual instructions. Setting it to a larger value may increase performance for programs using threads.
+
+Setting it to a value <= 0 checks every virtual instruction, maximizing responsiveness as well as overhead.
+
 
 
 global
@@ -633,14 +640,20 @@ https://docs.python.org/2/faq/programming.html#what-are-the-rules-for-local-and-
 
 In Python, variables that are only referenced inside a function are implicitly global. If a variable is assigned a value anywhere within the function’s body, it’s assumed to be a local unless explicitly declared as global.
 
-Though a bit surprising at first, a moment’s consideration explains this. On one hand, requiring global for assigned variables provides a bar against unintended side-effects. On the other hand, if global was required for all global references, you’d be using global all the time. You’d have to declare as global every reference to a built-in function or to a component of an imported module. This clutter would defeat the usefulness of the global declaration for identifying side-effects.
+Though a bit surprising at first, a moment’s consideration explains this. On one hand, requiring global for assigned variables provides a bar against unintended side-effects.
+
+On the other hand, if global was required for all global references, you’d be using global all the time. You’d have to declare as global every reference to a built-in function or to a component of an imported module.
+
+This clutter would defeat the usefulness of the global declaration for identifying side-effects.
 
 关键在于上面句子中的 If a variable is assigned a value anywhere within the function’s body, it’s **assumed** to be a local unless explicitly declared as global.这句话中的If a variable is assigned, 是assigned的时候
+
 才会当(assumed)成局部变量.
 
 所以可以这么理解, 在函数里面, 修改字典的时候, 是modify in place, 不是reassign, rebinding, 所以解释器会直接根据LEGB原则加载到全局的字典, 然后修改.
 
 而其他不可变对象就不行, 不可变对象在函数里面若有修改操作, 也就是reassign, rebinding操作, 解释器就把它当成局部变量, 因为test中只有打印语句就报没有定义的错误, 而test1中有reassign, 则
+
 解释器就把x当做局部遍历, 当你要操作一个局部变量的时候，必须先赋值
 
 有时候得抠字眼一下才能理解.
@@ -690,6 +703,12 @@ http://www.dongwm.com/archives/Python%E5%85%83%E7%BB%84%E7%9A%84%E8%B5%8B%E5%80%
 
 这样是不报错并且修改成功，所以对比起来就知道了，x[2] += [2,3]在报错在于x[2]的赋值，由于元组不能重新赋值才会报错，但是你拿到元祖中可变对象，然后修改可变对象，就是可以的了
 
+python3 Design and History FAQ
+==================================
+
+
+https://docs.python.org/3/faq/design.html
+
 
 sorted(list.sort)
 ====================
@@ -721,17 +740,47 @@ sorted(list.sort)
    The key-function patterns shown above are very common, so Python provides convenience functions to make accessor functions easier and faster. The operator module has itemgetter(), attrgetter(), and a methodcaller() function.
    (https://docs.python.org/3/howto/sorting.html)
 
+浮点数运算
+=============
 
-python dict
-==============
+直接的浮点数运算一定会有偏差值的, 因为依赖于底层, 如果想用精确值, 那么建议用decimal模块
 
-使用开放地址法的hash map.
+https://docs.python.org/3/faq/design.html#why-are-floating-point-calculations-so-inaccurate
+
+http://python3-cookbook.readthedocs.io/zh_CN/latest/c03/p02_accurate_decimal_calculations.html
+
+.. code-block:: python
+
+    >>> a = 4.2
+    >>> b = 2.1
+    >>> a + b
+    6.300000000000001
+    >>> (a + b) == 6.3
+    False
+    >>>
+
+
+python dict/list/tuple
+==========================
+
+
+dict
+---------
+
+https://docs.python.org/3/faq/design.html#how-are-dictionaries-implemented
+
+使用开放地址法的变长的hash map
+
+Python’s dictionaries are implemented as resizable hash tables. Compared to B-trees, this gives better performance for lookup (the most common operation by far) under most circumstances, and the implementation is simpler.
+
+插入一个key,value之后的hash map的长度大于总长度的2/3, 则hash map会扩容, 并且把老的hash map的元素使用新的掩码(新的hash map的长度)复制到新的hash map上
 
 hash key的算法参考: http://effbot.org/zone/python-hash.htm
 
 https://stackoverflow.com/questions/327311/how-are-pythons-built-in-dictionaries-implemented
 
 3.6已经重新实现了一个结构更紧凑的dict, 参考了pypy的实现: https://docs.python.org/3/whatsnew/3.6.html#new-dict-implementation, https://morepypy.blogspot.com/2015/01/faster-more-memory-efficient-and-more.html
+
 比起3.5, 节省了20%-25%的内存, 并且现在keys返回是有序的，和key插入的顺序一样, 而3.6之前是ascii顺序, 但是ipython中你回车出来看到的依然是ascii顺序的:
 
 .. code-block:: python
@@ -745,7 +794,86 @@ https://stackoverflow.com/questions/327311/how-are-pythons-built-in-dictionaries
     Out[46]: ['b', 'a']
 
 dict的key是由对象的hash值决定的, 然后所有的不可变类型都是可以hash的, 然后用户定义的类型的默认hash值是其的id, 比如类T, t=T(), t的hash值就是id(t), 你可以定义一个__hash__方法来决定对象的hash值
+
 https://docs.python.org/3/glossary.html#term-hashable
+
+list
+-------
+
+https://www.laurentluce.com/posts/python-list-implementation/
+
+列表也就是一个数组, 然后当添加或者删除一个元素的时候, 列表的长度会变化的, 下面是代码摘抄:
+
+.. code-block:: c
+
+    // https://github.com/python/cpython/blob/v3.6.3/Objects/listobject.c
+
+    static int list_resize(PyListObject *self, Py_ssize_t newsize)
+    {
+        PyObject **items;
+        size_t new_allocated;
+        Py_ssize_t allocated = self->allocated;
+    
+        /* Bypass realloc() when a previous overallocation is large enough
+           to accommodate the newsize.  If the newsize falls lower than half
+           the allocated size, then proceed with the realloc() to shrink the list.
+        */
+        // allocated >> 1这个是allocated / 2, 这样计算二分之一, 可以可以
+        // 这里的判断条件中前一个是如果是append, 并且列表本身已经分配的内存足够, 则不需要额外分配内存
+        // 第二个判断条件是新的大小, 有可能是长度变小了, 如果还是大于已分配内存的一半, 也不需要缩减内存
+        // 所以, 换句话说, 需要扩展内存大小的情况是, newsize大于已分配的内存, 需要缩减内存的情况是
+        // newsize的大小小于已分配的一半
+        if (allocated >= newsize && newsize >= (allocated >> 1)) {
+            assert(self->ob_item != NULL || newsize == 0);
+            Py_SIZE(self) = newsize;
+            return 0;
+        }
+    
+        /* This over-allocates proportional to the list size, making room
+         * for additional growth.  The over-allocation is mild, but is
+         * enough to give linear-time amortized behavior over a long
+         * sequence of appends() in the presence of a poorly-performing
+         * system realloc().
+         * The growth pattern is:  0, 4, 8, 16, 25, 35, 46, 58, 72, 88, ...
+         */
+        // newsize >> 3是newsize往右移３位, 也就是newsize / 8, 毕竟往右移一位等于除以2
+        // new_allocated是多分配的大小, new_allocated加上newsize才是上面注释写的步长
+        // 比如newsize = 1, 然后 1 >> 3 = 0, 1 < 9, 所以是new_allocated = 0 + 3 =3, newsize = 1
+        // 所以是allocated = new_allocated + newsize = 3 +1 = 4
+        // 如果是pop等操作的话, allocated会减少, 比如allocated = 8, newsize = 3
+        // 则new_allocated = 0 + 3 = 3, 所以最后allocated = new_allocated + newsize = 3 + 3 = 6
+        new_allocated = (newsize >> 3) + (newsize < 9 ? 3 : 6);
+    
+        /* check for integer overflow */
+        if (new_allocated > SIZE_MAX - newsize) {
+            PyErr_NoMemory();
+            return -1;
+        } else {
+            new_allocated += newsize;
+        }
+    
+        if (newsize == 0)
+            new_allocated = 0;
+        items = self->ob_item;
+        // 这里的PyMem_RESIZE才是真正的去改变内存大小
+        if (new_allocated <= (SIZE_MAX / sizeof(PyObject *)))
+            PyMem_RESIZE(items, PyObject *, new_allocated);
+        else
+            items = NULL;
+        if (items == NULL) {
+            PyErr_NoMemory();
+            return -1;
+        }
+        self->ob_item = items;
+        // 这里self是列表对象, PySIZE(self)是self的长度, 然后这里就赋值为newsize
+        Py_SIZE(self) = newsize;
+        // 这里赋值列表对象的已分配内存为new_allocated
+        self->allocated = new_allocated;
+        return 0;
+    }
+
+跟位置无关的操作, 比如append, pop的复杂度都是O(1), 其他跟位置有关的都是O(n), 比如insert, pop(index), remove(value)
+
 
 
 python interpreter(vm)
@@ -759,13 +887,178 @@ vs java vm: https://stackoverflow.com/questions/441824/java-virtual-machine-vs-p
 python gc
 ============
 
-https://www.quora.com/How-does-garbage-collection-in-Python-work-What-are-the-pros-and-cons
+http://www.wklken.me/posts/2015/09/29/python-source-gc.html
 
-https://www.holger-peters.de/an-interesting-fact-about-the-python-garbage-collector.html
+https://docs.python.org/3/faq/design.html#how-does-python-manage-memory
+
+The standard implementation of Python, CPython, uses reference counting to detect inaccessible objects, and another mechanism to collect reference cycles, periodically
+
+executing a cycle detection algorithm which looks for inaccessible cycles and deletes the objects involved
+
+CPython是引用计数为主, 然后定期去检测循环引用
 
 https://pymotw.com/3/gc/
 
 http://patshaughnessy.net/2013/10/24/visualizing-garbage-collection-in-ruby-and-python
+
+这个文章对比了ruby和python的gc, 里面提到了python还使用了分代回收的机制
+
+https://docs.python.org/3/library/gc.html
+
+上面的gc模块文档中, gc.collect(generation=2)中的generation表示几代, 也就是说python确实也使用了分代回收的gc机制
+
+总结起来就是python中gc是引用计数为主, 然后辅以分代回收, 然后在分代各个代上定时循环检测引用, 包括循环引用. 
+
+
+循环引用的问题和__del__
+--------------------------
+
+https://www.holger-peters.de/an-interesting-fact-about-the-python-garbage-collector.html
+
+如果定义了__del__方法, 那么循环引用则不会被gc掉
+
+python2.7中
+
+.. code-block:: python
+
+    In [1]: import gc
+    
+    In [2]: class T:
+       ...:     def __del__(self):
+       ...:         print('in T __del__')
+       ...:         
+    
+    In [3]: a=T()
+    
+    In [4]: b=T()
+    
+    In [5]: a.other = b
+    
+    In [6]: b.other = a
+    
+    In [7]: a=None
+    
+    In [8]: b=None
+    
+    In [9]: gc.collect()
+    Out[9]: 67
+    
+    In [10]: gc.garbage
+    Out[10]: 
+    [<__main__.T instance at 0x7f80798a3518>,
+     <__main__.T instance at 0x7f80798ff8c0>]
+
+gc不能回收a和b之前指向的对象, 因为__del__方法被定义了, 如果没有定义__del__方法呢
+
+.. code-block:: python
+
+    In [1]: import gc
+    
+    In [2]: class T:
+       ...:     pass
+       ...: 
+    
+    In [3]: a=T()
+    
+    In [4]: b=None
+    
+    In [5]: b=T()
+    
+    In [6]: a.other = b
+    
+    In [7]: b.other = a
+    
+    In [8]: a=None
+    
+    In [9]: b=None
+    
+    In [10]: gc.collect()
+    Out[10]: 53
+    
+    In [11]: gc.garbage
+    Out[11]: []
+
+gc.garbage为空表示即使出现循环引用, 对象也会被回收掉了
+
+大概的原因是当出现循环引用的时候, 比如上面的a, b, python并不知道应该先调用谁的__del__, 如果调用顺序错了怎么办, 所以决定上面都不做(do nothing)~~
+
+
+python3.4之后这个问题就解决了, 下面的代码是python3.6
+
+.. code-block:: python
+
+    In [2]: import gc
+    
+    In [3]: class T:
+       ...:     def __del__(self):
+       ...:         print('in T __del__%s' % self.name)
+       ...:         
+    
+    In [4]: a=T()
+    
+    In [5]: b=T()
+    
+    In [6]: a.name='a'
+    
+    In [7]: b.name='b'
+    
+    In [8]: a.other = b
+    
+    In [9]: b.other = a
+    
+    In [10]: a=b=None
+    
+    In [11]: gc.collect()
+    in T __del__a
+    in T __del__b
+    Out[11]: 60
+
+https://www.python.org/dev/peps/pep-0442/ 中有具体细节
+
+python weakref
+===============
+
+https://docs.python.org/3/library/weakref.html
+
+https://segmentfault.com/a/1190000005729873
+
+In the following, the term referent means the object which is referred to by a weak reference.
+
+下面提到的 **引用对象** 是指的是一个 **被弱引用对象引用** 的对象
+
+A weak reference to an object is not enough to keep the object alive: when the only remaining references to a referent are weak references, garbage collection is free to destroy the referent and reuse its memory for something else.
+
+However, until the object is actually destroyed the weak reference may return the object even if there are no strong references to it.
+
+一旦一个对象只有弱引用指向它, 那么它随时可以被回收
+
+weakref是创建一个到目标对象的弱引用, 创建的弱引用不会增加对象的引用计数:
+
+.. code-block:: python
+
+    In [5]: import weakref
+    
+    In [6]: class M:
+       ...:     def __init__(self, name):
+       ...:         self.name = name
+       ...:         
+    
+    In [7]: x=M('x')
+    
+    In [8]: import sys
+    
+    In [9]: sys.getrefcount(x)
+    Out[9]: 2
+    
+    In [10]: r=weakref.ref(x)
+    
+    In [11]: r
+    Out[11]: <weakref at 0x7fc279f1ad08; to 'instance' at 0x7fc279e9d7e8>
+    
+    In [12]: sys.getrefcount(x)
+    Out[12]: 2
+
+
 
 asynchronous api
 =====================

@@ -807,6 +807,7 @@ https://docs.python.org/3/glossary.html#term-hashable
 
 .. code-block:: python
 
+    '''
     +---------------+
     | dk_refcnt     |
     | dk_size       |
@@ -820,6 +821,7 @@ https://docs.python.org/3/glossary.html#term-hashable
     | dk_entries    |
     |               |
     +---------------+
+    '''
 
 并且dk_indices是哈希表, 然后dk_entries是key对象的数组, 从dk_indices里面存储的是dk_entries的下标, 然后在3.6的dict实现的建议里面, 有:
 
@@ -918,10 +920,32 @@ https://github.com/python/cpython/blob/v3.6.3/Objects/dictobject.c#L2179
 
 这个数组, 而这个数组是insert的时候append only的, 也就是保持了插入的顺序
 
+hash table rbt(map)
+~~~~~~~~~~~~~~~~~~~~~
+
+http://blog.csdn.net/ljlstart/article/details/51335687
+
+https://www.zhihu.com/question/24506208
+
+大概就是:
+
+1. hash table内存比较大, map的话内存比较小
+
+2. hash table是无序的, map的话是有序的
+
+3. map比较稳定, 最差也就是logN, hash table好的时候可以说常数级, 但是这个常数级可能比logN大, 然后最坏的时候搜索要遍历整个hash table, 也就是O(N)
+   
+  也就是hash table搜索效率依赖于冲突, hash table冲突很大的话, 搜索就慢了, 可以打到O(N)
+
+
+
 set
 ------
 
 https://fanchao01.github.io/blog/2016/10/24/python-setobject/
+
+
+一个hash table实现的, 然后遍历的时候就是遍历hash table, 所以看起来才是"无序"的
 
 
 list

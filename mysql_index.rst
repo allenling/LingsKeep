@@ -75,6 +75,7 @@ type为const表示该表只可能有0或者1个满足条件(most one match row)�
     
 https://www.percona.com/blog/2010/06/15/explain-extended-can-tell-you-all-kinds-of-interesting-things/
 You might notice a few odd things about this EXPLAIN. First, there are no tables listed. Taking a look at the Extra column we see that MySQL mentions ‘const’ tables. A ‘const’ table is a table that contains 0 or 1 rows, or a table on which all parts of a primary key or unique key lookup are satisfied in the where clause. If a ‘const’ table contains no rows, and it is not used in an OUTER JOIN, then MySQL can immediately return an empty set because it infers that there is no way that rows could be returned. MySQL does this by adding the WHERE clause in the query with ‘where 0’.
+
 所以说一个查询中, 如果where使用了主键或者唯一索引，并且记录不存在或者空表, 那么mysql可以立即(immediately)推断(infers)记录不存在, 并且返回不存在 
 
 可以看到有个warning, 输入show warnings, 输出的最后一列会带有where 0的标识，表示肯定没有满足的数据，所以where 0, 如果表只有一行(不是只有一行满足条件), 那么mysql会直接读取该

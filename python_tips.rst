@@ -760,8 +760,8 @@ http://python3-cookbook.readthedocs.io/zh_CN/latest/c03/p02_accurate_decimal_cal
     >>>
 
 
-python dict/list/tuple
-==========================
+python dict/list/tuple/set
+============================
 
 
 dict
@@ -796,6 +796,133 @@ https://stackoverflow.com/questions/327311/how-are-pythons-built-in-dictionaries
 dict的key是由对象的hash值决定的, 然后所有的不可变类型都是可以hash的, 然后用户定义的类型的默认hash值是其的id, 比如类T, t=T(), t的hash值就是id(t), 你可以定义一个__hash__方法来决定对象的hash值
 
 https://docs.python.org/3/glossary.html#term-hashable
+
+
+如何压缩
+~~~~~~~~~~~~~~~~~~~~
+
+源码在: https://github.com/python/cpython/blob/v3.6.3/Objects/dictobject.c
+
+首先源码注释中说明了新的dict的结构
+
+.. code-block:: python
+
+    +---------------+
+    | dk_refcnt     |
+    | dk_size       |
+    | dk_lookup     |
+    | dk_usable     |
+    | dk_nentries   |
+    +---------------+
+    | dk_indices    |
+    |               |
+    +---------------+
+    | dk_entries    |
+    |               |
+    +---------------+
+
+并且dk_indices是哈希表, 然后dk_entries是key对象的数组, 从dk_indices里面存储的是dk_entries的下标, 然后在3.6的dict实现的建议里面, 有:
+
+For example, the dictionary:
+
+    d = {'timmy': 'red', 'barry': 'green', 'guido': 'blue'}
+
+is currently stored as:
+
+.. code-block:: python
+
+    entries = [['--', '--', '--'],
+               [-8522787127447073495, 'barry', 'green'],
+               ['--', '--', '--'],
+               ['--', '--', '--'],
+               ['--', '--', '--'],
+               [-9092791511155847987, 'timmy', 'red'],
+               ['--', '--', '--'],
+               [-6480567542315338377, 'guido', 'blue']]
+
+Instead, the data should be organized as follows:
+
+.. code-block:: python
+
+    indices =  [None, 1, None, None, None, 0, None, 2]
+    entries =  [[-9092791511155847987, 'timmy', 'red'],
+                [-8522787127447073495, 'barry', 'green'],
+                [-6480567542315338377, 'guido', 'blue']]
+
+之前的dict和3.6的dict各种接口操作是一样的, 比如都是计算了hash之后, 拿到hash再经过mod运算, 得到hash表的下标, 比如某个key的hash=-8522787127447073495, 这个hash % 8 = 1, 就去entries这个hash表的下标1的数组
+
+去比对hash值, 然后比对相等, 则返回, 如果不相等, 则二次探测. 区别的是3.6的dict中, hash表被单独提出来为indices, 然后原来的hash, key, value这个组合依然存储在entries这个数组内, 然后indices存储的是
+
+entries的下标, 所以3.6的dict是先在计算hash表的下标, 比如hash=-8522787127447073495, 然后hash mod 8 = 1, 然后去查询indices数组下标为1元素, 里面是1, 表示应该去查询entries数组下标为1的元素, 然后去
+
+查找entries数组下标为1的元素, 是一个hash, key, value对, 然后比对hash值, 相等则返回, 不相等, 则继续二次探测. 二次探测为: (next_j = ((5*j) + 1) mod (perturb >> PERTURB_SHIFT), 其中perturb=hash, PERTURB_SHIFT=5.
+
+
+可以看到, 原来的dict是一个entries就是一个hash表, 然后下标对应存储的是hash值和key, value, 然后存储的空间就很浪费, 64位机器下是24 bit一个hash表的row, 所以之前存储
+
+的话就要花费24 * 8 = 192 bit. 而3.6的dict则是hash数组是int数组, 元素为1 bit来, 表示entries数组的下标, 而 **entries表是一个插入的时候append only的数组**, 是紧凑的数组, 而花费的空间
+
+为: 8(hash数组) + 24 * 3 = 80, 所以空间大幅度减少了.
+
+
+排序的区别
+~~~~~~~~~~~~~
+
+之前的dict是"无序"的, 其实应该说是按hash值排序的, 在之前的dict中, keys的代码为:
+
+https://hg.python.org/cpython/file/52f68c95e025/Objects/dictobject.c#l1180
+
+.. code-block:: c
+
+    static PyObject *
+    dict_keys(register PyDictObject *mp) {
+        ep = mp->ma_table;
+        mask = mp->ma_mask;
+        for (i = 0, j = 0; i <= mask; i++) {
+            if (ep[i].me_value != NULL) {
+                PyObject *key = ep[i].me_key;
+                Py_INCREF(key);
+                PyList_SET_ITEM(v, j, key);
+                j++;
+            }
+        }
+    }
+
+
+可以看到, 遍历的时候的终止条件是i<=mask, 而mask则是hash表的长度-1, 也就是会遍历hash表, 所以得到的key就是hash排序的key
+
+
+而3.6的keys函数为:
+
+https://github.com/python/cpython/blob/v3.6.3/Objects/dictobject.c#L2179
+
+.. code-block:: c
+
+    static PyObject *
+    dict_keys(PyDictObject *mp)
+    {
+        ep = DK_ENTRIES(mp->ma_keys);
+        size = mp->ma_keys->dk_nentries;
+        for (i = 0, j = 0; i < size; i++) {
+            if (*value_ptr != NULL) {
+                PyObject *key = ep[i].me_key;
+                Py_INCREF(key);
+                PyList_SET_ITEM(v, j, key);
+                j++;
+            }
+            value_ptr = (PyObject **)(((char *)value_ptr) + offset);
+        }
+    }
+
+可以看到, size是dk_nentries的大小, 也就是dk_entries的大小, 然后遍历的时候会从ep直接拿key对象的指针, 而ep就是dk_entries, 所以也就是直接遍历dk_entries
+
+这个数组, 而这个数组是insert的时候append only的, 也就是保持了插入的顺序
+
+set
+------
+
+https://fanchao01.github.io/blog/2016/10/24/python-setobject/
+
 
 list
 -------

@@ -1046,19 +1046,27 @@ The standard implementation of Python, CPython, uses reference counting to detec
 
 executing a cycle detection algorithm which looks for inaccessible cycles and deletes the objects involved
 
-CPython是引用计数为主, 然后定期去检测循环引用
+CPython是引用计数为主, 当引用计数为0的时候, 触发回收(这个回收是不是真正的回收, 看情况, 有可能只是放到内存池里面)
 
-https://pymotw.com/3/gc/
+如果确定程序没有循环引用的情况或者不在乎, 那么可以关掉gc, gc.disbale, 即使禁用了gc, 引用计数也是可以正常工作的, 因为引用计数是数字减少到0的时候触发, 而不是周期性的运行.
 
-http://patshaughnessy.net/2013/10/24/visualizing-garbage-collection-in-ruby-and-python
+减少副本的引用计数实现的:
 
-这个文章对比了ruby和python的gc, 里面提到了python还使用了分代回收的机制
+http://www.wklken.me/posts/2015/09/29/python-source-gc.html
 
-https://docs.python.org/3/library/gc.html
+检测:
 
-上面的gc模块文档中, gc.collect(generation=2)中的generation表示几代, 也就是说python确实也使用了分代回收的gc机制
+每个容器对象创建的时候会加入到0代链表, 然后如果容器引用计数减少为0, 把容器对象从0代链表中移除, 触发引用计数回收, 如果引用计数没有减少到0, 继续待着
 
-总结起来就是python中gc是引用计数为主, 然后辅以分代回收, 然后在分代各个代上定时循环检测引用, 包括循环引用. 
+然后0代链表上对象数量打到阀值, gc开始, stop the world, 拷贝一份0代链表的对象的副本, 然后遍历一下(遍历函数是各个容器对象自己有定义的, 比如字典就是遍历每一个key和value的对象),
+
+引用计数减少1(比如字典, 就是key和value的对象的引用计数都减少1)
+
+然后开始标记:
+
+那些引用计数为0的对象称为不可达对象, 其他引用计数大于0的称为可达对象,移动到1代链表，继续
+
+然后回收不可达对象
 
 
 循环引用的问题和__del__
@@ -1165,6 +1173,21 @@ python3.4之后这个问题就解决了, 下面的代码是python3.6
     Out[11]: 60
 
 https://www.python.org/dev/peps/pep-0442/ 中有具体细节
+
+
+内存分配
+~~~~~~~~~~~
+
+http://www.wklken.me/posts/2014/08/06/python-source-int.html
+
+http://deeplearning.net/software/theano/tutorial/python-memory-management.html
+
+http://www.wklken.me/posts/2015/09/29/python-source-gc.html
+
+关于整数回收, python是不会把整数的内存放回os的, 是放回自己维护的几个整数池的, 只有python解释器终止了才会释放.
+
+
+
 
 python weakref
 ===============

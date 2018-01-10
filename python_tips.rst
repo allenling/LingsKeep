@@ -1034,9 +1034,8 @@ https://docs.python.org/3/howto/descriptor.html
 
 property返回一个property对象, property对象是属于data descriptor的数据模型, data descriptor是这样一个定义了__get__, __set__, __delete__方法的对象
 
+.. code-block:: python
 
-    .. code-block:: python
-    
     In [1]: import inspect
     
     In [2]: def my_getter(self): return 'in my_getter'
@@ -1076,8 +1075,8 @@ data descriptor的特点呢, 就是如果一个 **某个类的属性是data desc
 要注意的是, **property(data descriptor)只有定义在类中才有用!!**
 
 
-    .. code-block:: python
-    
+.. code-block:: python
+
     In [17]: def my_getter(self): return 'in my_getter'
     
     In [18]: prop = property(my_getter)

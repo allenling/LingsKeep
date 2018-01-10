@@ -4,7 +4,9 @@ http1.1
 
 
 0. 建立连接
+
 1. URI/URL/URN, fragment, 绝对/相对URL
+
 2. 方法
 --------
 
@@ -54,14 +56,18 @@ http/1.1 200 OK
 4.1 Cconnection: Keep-Alive/Close
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-http1.0协议头里可以设置Connection:Keep-Alive。在header里设置Keep-Alive可以在一定时间内复用连接，具体复用时间的长短可以由服务器控制，一般在15s左右。到http1.1之后Connection的默认值就是Keep-Alive，如果要关闭连接复用需要显式的设置Connection:Close。一段时间内的连接复用对PC端浏览器的体验帮助很大，因为大部分的请求在集中在一小段时间以内。但对移动app来说，成效不大，app端的请求比较分散且时间跨度相对较大。所以移动端app一般会从应用层寻求其它解决方案，长连接方案或者伪长连接方案：
+http1.0协议头里可以设置Connection:Keep-Alive。在header里设置Keep-Alive可以在一定时间内复用连接，具体复用时间的长短可以由服务器控制，一般在15s左右。到http1.1之后Connection的默认值就是Keep-Alive,
+
+如果要关闭连接复用需要显式的设置Connection:Close。一段时间内的连接复用对PC端浏览器的体验帮助很大，因为大部分的请求在集中在一小段时间以内。但对移动app来说，成效不大，app端的请求比较分散且时间跨度相对较大.
+
+所以移动端app一般会从应用层寻求其它解决方案，长连接方案或者伪长连接方案
 
 4.2 Transfer Encoding: chunked
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 若response的头中有Transfer Encoding: chunked, 则连接不关闭, 服务器继续使用该连接发送数据直到chuncked为0.
 
-chunked和keep-alive: http://www.cnblogs.com/skynet/archive/2010/12/11/1903347.html
+chunked和keep-alive: https://foofish.net/http-transfer-encoding.html
 
 4.3 Accept*
 ~~~~~~~~~~~~~~~~
@@ -176,10 +182,14 @@ XSS, 跨站脚本攻击.也就是钓鱼, 发送一个链接, 你点击进入的�
 
 解决是转义用户输入.
 
-顾名思义，这个响应头是用来防范XSS的。最早我是在介绍IE8的文章里看到这个，现在主流浏览器都支持，并且默认都开启了XSS保护，用这个header可以关闭它。它有几种配置：
+顾名思义, 这个响应头是用来防范XSS的, 它有几种配置：
+
 0：禁用XSS保护；
+
 1：启用XSS保护；
+
 1; mode=block：启用XSS保护，并在检查到XSS攻击时，停止渲染页面（例如IE8中，检查到攻击时，整个页面会被一个#替换）；
+
 浏览器提供的XSS保护机制并不完美，但是开启后仍然可以提升攻击难度，总之没有特别的理由，不要关闭它。
 
 
@@ -210,12 +220,15 @@ cache-control: no-cache可以等于cache-control: max-age=0; must-revalidate;
 chrome中对于资源是否会发起请求重新获取资源: http://stackoverflow.com/questions/11245767/is-chrome-ignoring-control-cache-max-age
 
 其实都不一定, 在不开F12的情况下, 在开启wireshark来查看chrome是否发送请求获取资源(像img), 都没有一定的规律, 比如, 第一次请求之后, 服务器返回304, 我下一次刷新(不管是点击url回车, 或者reload), 都不一定
+
 发起请求, 也就是有可能发起请求, 也有可能是chrome伪造的response, 如200 (from cache), 304 (from cache), 这些response的的Date头的时间都是上一次response时间.
 
 比如, 开着F12, ctrl+shift+r也有可能不会发送请求, 而是200 (from cache)
 
 7. TLS握手
 -------------
+
+https://segmentfault.com/a/1190000002554673
 
 1. http://www.jianshu.com/p/7158568e4867
 
@@ -224,9 +237,13 @@ chrome中对于资源是否会发起请求重新获取资源: http://stackoverfl
 3. https://imququ.com/post/optimize-tls-handshake.html
 
 4. 数字证书验证: http://www.cnblogs.com/JeffreySun/archive/2010/06/24/1627247.html
+
    4.1 总结一下，RSA加密算法在这个通信过程中所起到的作用主要有两个：
+
        - 因为私钥只有“服务器”拥有，因此“客户”可以通过判断对方是否有私钥来判断对方是否是“服务器”。
+
        - 客户端通过RSA的掩护，安全的和服务器商量好一个对称加密算法和密钥来保证后面通信过程内容的安全。
+
    4.2 数字证书可以保证数字证书里的公钥确实是这个证书的所有者(Subject)的，或者证书可以用来确认对方的身份
 
 

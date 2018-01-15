@@ -166,13 +166,195 @@ yield from和await的例子实现的是同样一个功能
 之所以上面说迭代有小小的困惑，是因为你可以await coroutine, 但是coroutine是不可以迭代的, 但是同时, coroutine终止的时候却是StopIteration, 就很迷~~~, 所以说还是用send方法表示合适，
 因为send对coroutine和可迭代对象都适用.
 
+
 **所以，也就是说不管是yield from还是await也只是一个语法而已, 要实现coroutine, 关键是如何实现停止，重新执行, pytho中是遇到yield, 然后停止, send重新执行. 所以核心的还是yield**
 
-coroutine也是awaitable对象，也有__await__, coroutine.__await__返回的是一个叫coroutine_wrapper的对象, 这个对象实现了send, close, throw这些方法, 看名字就知道
+coroutine也是awaitable对象，也有\_\_await\_\_, coroutine.__await__返回的是一个叫coroutine_wrapper的对象, 这个对象实现了send, close, throw这些方法, 看名字就知道
 这个coroutine_wrapper只是对coroutine加了一个包装而已
 
 所以说async/await只是个api, 定义了使用范围等等规范, async定义coroutine, await会暂停，同时await后面的awaitable对象, 至于awaitable对象是什么, 你怎么处理awaitable对象(比如丢弃), 就可以具体发挥了, 比如curio中是一些
 自己定义的协程(curio.sleep), 而asyncio是Future对象
+
+非常具体的例子
+----------------
+
+上面说到, 只有yield才是协程的关键, yield from, async/await都是一些关键字而已, 那么协程和yield如何工作的?
+
+首先, 协程对象遇到await就暂停, 然后返回了await后面的await对象的\_\_await\_\_的返回值, 称为aobj, 然后对返回值进行yield from.
+
+也就是对aobj进行迭代然后yield.
+
+所以Counter的例子:
+
+.. code-block:: python
+
+    class CounterAwait:
+        def __await__(self):
+            c = Counter()
+            return c
+
+    async def await_test():
+        counter_await = CounterAwait()
+        data = await counter_await
+        return data
+ 
+
+    c = await_test()
+    c.send(None)
+
+
+其中c.send这一步可以分解为:
+
+.. code-block:: python
+
+    tmp = CounterAwait.__await__()
+    tmp = Counter()
+    for t in tmp:
+        yield t
+
+也就是说对CounterAwait.\_\_await\_\_返回的值, 也就是Counter进行yield from, 也就是迭代Counter, 也就是先调用Counter.\_\_iter\_\_获取迭代器对象, 这里也是Counter自己,
+
+然后调用迭代器对象的__next__方法, 也就是Counter对象的__next__方法, 得到了return回来的值, 然后yield出去, 直到遇到StopIteration才停止.
+
+这样有个问题就是: 如法接收外部传入的值, 因为Counter里面是return的. 如果要接收外部的值, 那么必须是yield, 如果把Counter中的return换成yield, 那也不行:
+
+
+.. code-block:: python
+
+    class YieldCounter:
+    
+        def __init__(self):
+            self.start = 0
+            return
+    
+        def __iter__(self):
+            return self
+    
+        def __next__(self):
+            if self.start < 10:
+                tmp = self.start
+                self.start += 1
+                q = yield tmp
+                if q == -1:
+                    raise StopIteration
+            raise StopIteration
+    
+    
+    class YieldAwait:
+        def __await__(self):
+            yc = YieldCounter()
+            return yc
+    
+    
+    async def await_yield():
+        ay = YieldAwait()
+        data = await ay
+        return data
+    
+    ay = await_yield()
+    print(ay.send(None))
+
+结果会输出生成器对象, 而不是期待的0. 这是因为迭代器对象被迭代的时候, 调用的是__next__这个方法, 而这里__next__是带有yield, 也就是说__next__()返回的是一个迭代器对象!
+
+所以, 我们的YieldAwait可以返回一个生成器对象就好了呀, 既能暂停又能接收数据:
+
+.. code-block:: python
+
+    def yield_def(start):
+        while start < 10:
+            done = yield start
+            start += 1
+            print('done: %s' % done)
+            if done == -1:
+                break
+        return 'i amd done'
+    
+    
+    class YieldAwait:
+        def __await__(self):
+            return yield_def(0)
+    
+    
+    async def await_yield():
+        ay = YieldAwait()
+        data = await ay
+        print('resume!!!, data is %s' % data)
+        return data
+    
+    ay = await_yield()
+    print(ay.send(None))
+    print(ay.send(None))
+    ay.send(-1)
+
+我们的YieldAwait返回一个生成器对象, 作用和Counter一样, 数到10, 但是接收一个-1来终止.
+
+
+所以调用ay.send(None)的时候, 启动协程, 对await后面的对象调用__await__方法, 然后对返回值进行yield from.
+
+所以也就是对yield_def这个生成器对象进行yield from, 所以继续ay.send(None), 还是对生成器对象进行yield from, 所以一直返回数字.
+
+当我们ay.send(-1)的时候, 生成器对象收到了-1, 然后return, return的时候是引发StopIteration, 并且把return的值放在StopIteration里面, 然后await捕获了这个异常,
+
+赋值给data. StopIteration表示await对象终止了, 然后await_yield继续往下走, 打印出resume那句话, 然后return, 此时return也会引发StopIteration, 这个时候说明协程终止了.
+
+输出为:
+
+.. code-block::
+
+    <coroutine object await_yield at 0x7f7f8104b620>
+    0
+    done: None
+    1
+    done: -1
+    resume!!!, data is i amd done
+    Traceback (most recent call last):
+      File "/home/allenling/eclipse-workspace/local36/d20171204.py", line 87, in <module>
+        ay.send(-1)
+    StopIteration: i amd done
+
+但是能不能不要那么麻烦, 直接await一个生成器不可以吗? 当然不可以, 生成器不是awaitable对象, 所以我们用需要一个对象, 包装, 然后__await__方法返回生成器对象.
+
+但是, 还有一种方法更简单, 那么就是用types.coroutine来装饰生成器, 说明它是一个生成器定义的协程, 也就是它是一个协程, 并且带有yield关键字, 所以它是一个awaitable对象,当然可以
+
+直接放在await后面. types.coroutine只是加了一个code_flag而已. 但是注意的是, types.coroutine装饰会检验装饰的函数是否是生成器, 不是的话就没有装饰效果了!!
+
+所以, 我们可以这样:
+
+.. code-block:: python
+
+    @types.coroutine
+    def yield_def(start):
+        while start < 10:
+            done = yield start
+            start += 1
+            print('done: %s' % done)
+            if done == -1:
+                break
+        return 'i amd done'
+    
+    
+    async def await_yield():
+        data = await yield_def(0)
+        print('resume!!!, data is %s' % data)
+        return data
+
+await后面接一个生成器协程!!!! 效果也是一样的了, 解释器遇到生成器定义的协程, 准确的说是遇到CO_ITERABLE_COROUTINE这个code flag, 会把生成器给await出去的~~`
+
+最后, 看看curio是怎么定义sleep的:
+
+
+.. code-block:: python
+
+    # curio.task.sleep
+    async def sleep(seconds):
+        # 这里await后面是一个_sleep
+        return await _sleep(seconds, False)
+
+    # curio.traps._sleep
+    # 这里就是用coroutine来装饰一个生成器, 达到await yield的效果了
+    @coroutine
+    def _sleep(clock, absolute):
+        return (yield (_trap_sleep, clock, absolute))
 
 
 StopIteration history

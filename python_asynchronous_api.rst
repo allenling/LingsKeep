@@ -138,17 +138,18 @@ yield from和await的例子实现的是同样一个功能
 
 .. code-block::
 
-    28           0 LOAD_GLOBAL              0 (CounterAwait)
-                 2 STORE_FAST               0 (counter_await)
-    
-    29           4 LOAD_FAST                0 (counter_await)
-                 6 GET_AWAITABLE
-                 8 LOAD_CONST               0 (None)
-                10 YIELD_FROM
-                12 STORE_FAST               1 (data)
-    
-    30          14 LOAD_FAST                1 (data)
-                16 RETURN_VALUE
+ 28           0 LOAD_GLOBAL              0 (CounterAwait)
+              2 CALL_FUNCTION            0
+              4 STORE_FAST               0 (counter_await)
+
+ 29           6 LOAD_FAST                0 (counter_await)
+              8 GET_AWAITABLE
+             10 LOAD_CONST               0 (None)
+             12 YIELD_FROM
+             14 STORE_FAST               1 (data)
+
+ 30          16 LOAD_FAST                1 (data)
+             18 RETURN_VALUE
 
 
 **共同点**: 就是都会有YIELD_FROM

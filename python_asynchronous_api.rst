@@ -87,10 +87,24 @@ calling __await__() and iterating over the result这句话解释了协程的工�
 
 .. code-block:: python
 
+    class CounterAwait:
+        def __await__(self):
+            c = Counter()
+            return c
+
     async def await_test():
-        counter_await = CounterAwait
+        counter_await = CounterAwait()
         data = await counter_await
         return data
+ 
+然后我们迭代它:
+
+.. code-block:: python
+
+    c = await_test()
+    
+    for i in range(10):
+        print(c.send(None))
 
 yield from和await的例子实现的是同样一个功能
 

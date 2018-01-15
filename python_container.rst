@@ -1,7 +1,9 @@
 python的容器对象
 ====================
 
-容器, 指dict/list/tuple/set/queue
+容器, 指dict/list/tuple/set
+
+加一个queue
 
 dict
 =========

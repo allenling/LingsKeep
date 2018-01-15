@@ -1,5 +1,8 @@
-这里是threading这个库的同步对象的实现
-=========================================
+#####################################
+这里是threading这个库的同步原语的实现
+#####################################
+
+一个锁就支持了所有原语的实现!
 
 Lock
 ======
@@ -142,12 +145,6 @@ acquire_timed
 
 cpython/Modules/_threadmodule.c
 
-这里的Py_BEGIN_ALLOW_THREADS和Py_END_ALLOW_THREADS这两个宏呢得一起使用, 把中间的代码给包起来的, 目的是中间代码执行之前
-
-保存当前进程的状态, 执行后加载线程状态, 参考 `这里 <https://docs.python.org/3/c-api/init.html#c.Py_BEGIN_ALLOW_THREADS`_
-
-释放GIL也有用到 `这里 <https://docs.python.org/3/c-api/init.html#releasing-the-gil-from-extension-code>`_ 
-
 
 .. code-block:: c
 
@@ -167,9 +164,38 @@ cpython/Modules/_threadmodule.c
                 Py_BEGIN_ALLOW_THREADS
                 r = PyThread_acquire_lock_timed(lock, microseconds, 1);
                 Py_END_ALLOW_THREADS
-    	}
+    	    }
         }
     }
+
+这里的Py_BEGIN_ALLOW_THREADS和Py_END_ALLOW_THREADS这两个宏呢得一起使用, 把中间的代码给包起来的, 目的是中间代码执行之前
+
+保存当前进程的状态, 释放gil, 执行后加载线程状态, 获取gil, 参考 `这里 <https://docs.python.org/3/c-api/init.html#c.Py_BEGIN_ALLOW_THREADS`_
+
+Py_BEGIN_ALLOW_THREADS是定义了这样一个代码块:
+
+.. code-block:: c
+
+    { PyThreadState *_save; _save = PyEval_SaveThread();
+
+注意是没有}花括号的, 需要Py_END_ALLOW_THREADS来关闭花括号, 然后PyEval_SaveThread是保存状态然后释放gil的:
+
+cpython/Python/ceval.c
+
+.. code-block:: c
+
+    PyEval_SaveThread(void)
+    {
+        PyThreadState *tstate = PyThreadState_Swap(NULL);
+        if (tstate == NULL)
+            Py_FatalError("PyEval_SaveThread: NULL tstate");
+        if (gil_created())
+            // 这里会释放掉gil
+            drop_gil(tstate);
+        return tstate;
+    }
+
+
 
 PyThread_acquire_lock_timed
 -----------------------------
@@ -206,10 +232,21 @@ cpython/Python/thread_pthread.h
            if (microseconds > 0) {
               // 这里就省略了吧
            }
+ 
+           /* Retry if interrupted by a signal, unless the caller wants to be
+              notified.  */
+           // 这里如果status==EINTR, 也就是收到中断, 直接继续
+           if (intr_flag || status != EINTR) {
+               break;
+           }
+  
+           // 下面是计算超时的, 省略了
+           if (microseconds > 0) {
+           }
        }
     
        /* Don't check the status if we're stopping because of an interrupt.  */
-       // 这里的注释说, while循环被打破了, 如果是因为一个中断被打破的, 不管它, 为什么?不清楚
+       // 这里的注释说, while循环被打破了, 如果是因为一个中断被打破的, why?或许是如果是被中断打断, 必然是没拿到锁吧
        // 如果不是中断, 那么检查下：
        // 是否是sem_timedwait超时了还是拿到了锁
        // 是否是调用sem_trywait, sem_trywait是立即返回的, 拿到了锁
@@ -368,7 +405,14 @@ cpython/Modules/_threadmodule.c
         PyObject *in_weakreflist;
     } rlockobject;
 
-    // acquired的实现
+acquire
+------------
+
+
+cpython/Modules/_threadmodule.c
+
+.. code-block:: c
+
     static PyObject *
     rlock_acquire(rlockobject *self, PyObject *args, PyObject *kwds)
     {
@@ -409,5 +453,211 @@ cpython/Modules/_threadmodule.c
         return PyBool_FromLong(r == PY_LOCK_ACQUIRED);
     }
 
+release
+---------
 
+cpython/Modules/_threadmodule.c
+
+.. code-block:: c
+
+    static PyObject *
+    rlock_release(rlockobject *self)
+    {
+        unsigned long tid = PyThread_get_thread_ident();
+    
+        // 如果自己没有拿锁, raise
+        if (self->rlock_count == 0 || self->rlock_owner != tid) {
+            PyErr_SetString(PyExc_RuntimeError,
+                            "cannot release un-acquired lock");
+            return NULL;
+        }
+        // 减少一下计数, 然后设置owner=0
+        if (--self->rlock_count == 0) {
+            self->rlock_owner = 0;
+            PyThread_release_lock(self->rlock_lock);
+        }
+        Py_RETURN_NONE;
+    }
+
+
+Condition
+===========
+
+控制访问, 基本上是存储子锁, self.waiters, 然后释放self.waiters里面的锁来通知其他线程的
+
+notify就是释放一个(semaphore), notify_all就是就是释放全部(event)
+
+这里需要借助其他同步变量来理解
+
+Event
+======
+
+**Event也是用Condition来实现**, set的是就是notifiy_all来唤醒所有的线程
+
+
+初始化
+--------
+
+event是由带一个互斥锁的condition, 和一个flag来实现的
+
+
+.. code-block:: python
+
+    # threading.Event
+    class Event:
+        def __init__(self):
+            # 这里有带了一个互斥锁的Condition
+            self._cond = Condition(Lock())
+            self._flag = False
+
+所以每次set/wait的时候, 必然要调用Condition的notify_all/wait, 那么此时必然会锁住condition._lock
+
+那么两个线程一个掉set, 一个调wait的时候, 应该是互斥的, 但是事实不太一样, 一个线程wait的是, 另外一个还是可以set
+
+也就是说Condition看起来又不是互斥的, 但是Condition带的锁确实互斥锁, 怎么理解?
+
+condtion在哪里互斥?
+---------------------------
+
+set和wait都会调用Condition.\_\_enter\_\_, 那么会互斥吗?
+
+.. code-block:: python
+
+    # threading.Event.wait
+    def wait(self, timeout=None):
+        # 你看, 这里会调用with self._cond
+        with self._cond:
+            # flag如果是True的话, 立马返回
+            signaled = self._flag
+            if not signaled:
+                signaled = self._cond.wait(timeout)
+            return signaled
+
+    # threading.Event.set
+    def set(self):
+        # 这里也会调用with self._cond
+        with self._cond:
+            self._flag = True
+            self._cond.notify_all()
+
+所以看起来, 对于同一个event变量event, t1线程调用event.set, 会阻塞另外一个线程的set(包括wait), 但是事实看起来"没有阻塞".
+
+如果debug进去的话，可以看到当一个线程调用set, 然后阻塞的时候, 另外一个线程调用set, 可以看到, **此时的self._cond的lock却是unlocked的~~说明wait的时候, 必然释放了锁!!!**
+
+wait释放锁互斥锁
+--------------------
+
+
+event.wait会调用condtion.wait, Condition.wait里面就释放了互斥锁了.
+
+
+下面的Condition._is_owned和Condition._release_save这两个方法只有在Condition._lock不存在这两个方法的时候, 才会调用到,
+
+否则Condition._is_owned和Condition._release_save会调用到Condition._lock._is_owned和Condition._lock._release_save
+
+而互斥锁没有这两个方法, RLock有这两个方法, event中的Condition是带互斥锁的
+
+
+.. code-block:: python
+
+    # threading.Condition._release_save
+    def _release_save(self):
+        # -------------这里释放了锁!!!!!!
+        self._lock.release()   
+
+    # threading.Condition._is_owned
+    def _is_owned(self):
+        if self._lock.acquire(0):
+            self._lock.release()
+            return False
+        else:
+            return True
+
+    # threading.Condition.wait
+    def wait(self, timeout=None):
+        # 校验自己是否拿了锁
+        if not self._is_owned():
+            raise RuntimeError("cannot wait on un-acquired lock")
+        # 分配一个子锁
+        waiter = _allocate_lock()
+        # 拿到这个子锁
+        waiter.acquire()
+        # 保存这个子锁
+        self._waiters.append(waiter)
+        # ---------这里就是释放Condition._lock的地方!!!
+        saved_state = self._release_save()
+        gotit = False
+        # 下面的过程就是在子锁上等待重新上锁了
+        # 但是要记得最后一定重新拿Condition._lock锁, 否则会影响到外层的with self._cond这个语句的释放
+        try:
+            if timeout is None:
+                waiter.acquire()
+                gotit = True
+            else:
+                if timeout > 0:
+                    gotit = waiter.acquire(True, timeout)
+                else:
+                    gotit = waiter.acquire(False)
+            return gotit
+        finally:
+            # 最后记得重新拿锁, 和外层的with self._cond保持一致
+            self._acquire_restore(saved_state)
+            if not gotit:
+                try:
+                    self._waiters.remove(waiter)
+                except ValueError:
+                    pass
+
+set会一直互斥
+---------------
+
+set的调用的话, 知道condtion.notify_all调用完成, 才会释放锁, 然后把flag置为True, 其他wait看到True直接返回, 接着一个个去通知等待的线程(确切的说是等待释放的锁)
+
+这也合理, 不然我已经notify所有的waiter了, 然后你又重新wait, 这样就漏掉了一个没有notify了
+
+所以notify_all会检查自己是否拿了锁, 没拿报错
+
+
+
+
+.. code-block:: python
+
+    # threading.Event.set
+    def set(self):
+        with self._cond:
+            # flag为True, 这样set完毕之后的线程如果再wait的话, 立马返回
+            self._flag = True
+            # 调用Condition.notify_all()
+            self._cond.notify_all()
+            # 这里最后执行完毕才解锁
+
+**Condition.notify_all中对锁没有操作, 所以如果Condition._lock锁上了的话, 半途是不会解锁的**
+
+.. code-block:: python
+
+    def notify(self, n=1):
+        # 这里校验自己是不是拿了锁, 没拿就报错
+        if not self._is_owned():
+            raise RuntimeError("cannot notify on un-acquired lock")
+        # 所有的waiters
+        all_waiters = self._waiters
+        waiters_to_notify = _deque(_islice(all_waiters, n))
+        if not waiters_to_notify:
+            return
+        for waiter in waiters_to_notify:
+            # 一个个去release, 那么其他线程的acquired就返回了
+            waiter.release()
+            try:
+                all_waiters.remove(waiter)
+            except ValueError:
+                pass
+
+    def notify_all(self):
+        # 调用Condition.notify
+        self.notify(len(self._waiters))
+
+Semaphore
+===========
+
+**Semaphore也是用Condition来实现**
 

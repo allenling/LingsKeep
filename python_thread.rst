@@ -17,8 +17,6 @@ threading中的_active_limbo_lock是一个模块级别的变量, 也就是说每
 
    1.1.3 那么把thread对象从_limbo字典移除, 然后加入到_active字典中
 
-3. 字面上的意思一个是活动的/活跃的thread, 一个是在地狱中的thread? 活动的可以理解, 那么地狱呢?
-
 self._tstate_lock
 ------------------
 
@@ -400,6 +398,8 @@ cpython/Modules/_threadmodule.c
         Py_INCREF(func);
         Py_INCREF(args);
         Py_XINCREF(keyw);
+ 
+        // py初始化线程, 这里如果是主线程, 那么是去创建gil
         PyEval_InitThreads(); /* Start the interpreter's thread-awareness */
    
         // 去创建一个线程, 并返回ident
@@ -419,10 +419,39 @@ cpython/Modules/_threadmodule.c
     }
 
 
+PyEval_InitThreads
+-----------------------
+
+cpython/Python/ceval.c
+
+功能主要是: 如果当前是主线程的初始化, 那么创建gil, 并且获取gil
+
+如果不是主线程的初始化, 那么会在调用t_bootstrap的时候去获取gil
+
+.. code-block:: c
+
+    void
+    PyEval_InitThreads(void)
+    {
+        // 如果已经创建了gil, 退出
+        if (gil_created())
+            return;
+        // 创建gil, 并且抢gil
+        create_gil();
+        take_gil(PyThreadState_GET());
+        _PyRuntime.ceval.pending.main_thread = PyThread_get_thread_ident();
+        if (!_PyRuntime.ceval.pending.lock)
+            _PyRuntime.ceval.pending.lock = PyThread_allocate_lock();
+    }
+
+
+
 PyThread_start_new_thread
 ------------------------------
 
 cpython/Python/thread_pthread.h
+
+最后创建线程是调用pthread_create
 
 .. code-block:: c
 
@@ -454,7 +483,10 @@ cpython/Python/thread_pthread.h
                              );
     }
 
-关PyThread_init_thread, 这个函数最终调用到PyThread__init_thread
+PyThread_init_thread 
+-----------------------
+
+这个函数最终调用到PyThread__init_thread, 不过一般都直接退出的
 
 cpython/Python/thread_pthread.h
 
@@ -465,7 +497,7 @@ cpython/Python/thread_pthread.h
     {
     #if defined(_AIX) && defined(__GNUC__)
         extern void pthread_init(void);
-        // 这里貌似是只有aix平台下并且使用gnc的编译器才会调用pthread_init
+        // 这里貌似是只有aix平台下并且使用gnu的c编译器才会调用pthread_init
         // 反正没找到pthread_init这个函数的详细信息
         pthread_init();
     #endif
@@ -478,7 +510,7 @@ t_bootstrap中会运行boot结构中的记录的python函数, 在python代码中
 
 t_bootstrap最后return之前还会释放掉self._tstate_lock这个锁, 这个锁是记录在thread state中的on_delete_data中
 
-并且是调用thread state中的on_delete(on_delete_data), 也就是release_sentinel(on_delete_data)
+并且是调用thread state中的on_delete(on_delete_data), 也就是release_sentinel(on_delete_data)来释放锁
 
 cpython/Modules/_threadmodule.c
 
@@ -494,6 +526,7 @@ cpython/Modules/_threadmodule.c
     
         tstate = boot->tstate;
         tstate->thread_id = PyThread_get_thread_ident();
+        // 未清楚目的
         _PyThreadState_Init(tstate);
         // 这里是拿gil, 最终调用的是take_gil这个函数
         PyEval_AcquireThread(tstate);

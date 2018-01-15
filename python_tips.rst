@@ -224,7 +224,8 @@ http://stackoverflow.com/questions/7127075/what-exactly-the-pythons-file-flush-i
 
 3. To do that, you need to call the os.fsync method which ensures all operating system buffers are synchronized with the storage devices they're for, in other words, that method will copy data from the operating system buffers to the disk.
 
-**flush socket**
+flush socket
+----------------
 
 在python的关于socket的文档中, 出现了关于flush socket的说明
 
@@ -1322,4 +1323,75 @@ inner.__closure__保存了在outer定义的局部变量, 如果outer的遍历是
     Out[128]: ('a', [1, 1])
 
 
+logging
+=========
+
+logging模块是线程安全的, 因为在basicConfig, getLogger, 以及每一个handler中都有锁
+
+basicConfig, getLogger是全局锁, 而handler是针对handler的锁
+
+basicConfig
+---------------
+
+.. code-block:: python
+
+    def basicConfig(**kwargs):
+        _acquireLock()
+        try:
+            # 省略了代码
+            pass
+        finally:
+            _releaseLock()
+
+logging.basicConfig保证了新建和配置某个logger的时候, 是只有一个线程能成功
+
+这里的锁是全局的, 保证了多个线程都配置同一个logger的话, 只有一个能成功
+
+logging.getLogger也是全局锁, 也就是多个线程获取同一个logger的话, 只有一个能成功
+
+logging.getLogger最后调用到Manager.getLogger
+
+.. code-block:: python
+
+    class Manager(object):
+        def getLogger(self, name):
+            # 省略了代码
+            _acquireLock()
+            try:
+                # 省略了代码
+                pass
+            finally:
+                _releaseLock()
+            return rv
+
+
+handler
+---------
+
+比如StreamHandler:
+
+.. code-block:: python
+
+    class StreamHandler(Handler):
+        def flush(self):
+            """
+            Flushes the stream.
+            """
+            self.acquire()
+            try:
+                if self.stream and hasattr(self.stream, "flush"):
+                    self.stream.flush()
+            finally:
+                self.release()
+    
+    class Handler(Filterer):
+        def acquire(self):
+            """
+            Acquire the I/O thread lock.
+            """
+            # 获取一下锁
+            if self.lock:
+                self.lock.acquire()
+
+所以每次调用flush的时候, 都会去拿self.lock这个锁
 

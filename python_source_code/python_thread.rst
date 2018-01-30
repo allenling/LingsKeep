@@ -580,15 +580,7 @@ cpython/Modules/_threadmodule.c
 PyObject_Call
 ----------------
 
-这个函数会去执行python的代码, 严格来说是执行opcode, 然后这个函数最终调用到的是_PyEval_EvalFrameDefault
-
-_PyEval_EvalFrameDefault这个函数会一直执行, 然后回去drop/take gil这样~~~~详情看python_gil.rst
-
-因为PyObject_Call之前就调用了PyEval_AcquireThread来获取到了gil, 那么_PyEval_EvalFrameDefault里面for的第一判断是
-
-查看是否有drop gil request发出, 如果在_PyEval_EvalFrameDefault里面首先又去take的话, 就死锁了呀~~~
-
-所以_PyEval_EvalFrameDefault里面首先是查看是否需要drop
+这个调用_PyEval_EvalFrameDefault去是执行opcode的过程, 参考: python_gil.rst
 
 PyThreadState_Clear
 -------------------------------

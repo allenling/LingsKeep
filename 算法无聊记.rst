@@ -37,6 +37,8 @@ next数组(最大公共前后缀长度)的意义是: 找出某个字符前面有
 
 next数组的意义就是上面的步骤, 往右移动几位, 而前后缀最大公共长度的意义是找出下一次移动的时候保证一定匹配的是首字符, 这样可得出next数组
 
+BM算法: http://www.ruanyifeng.com/blog/2013/05/boyer-moore_string_search_algorithm.html
+
 
 马拉车算法
 ============

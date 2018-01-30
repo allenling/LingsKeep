@@ -485,7 +485,7 @@ Condition
 
 控制访问, 基本上是存储子锁, self.waiters, 然后释放self.waiters里面的锁来通知其他线程的
 
-notify就是释放一个(semaphore), notify_all就是就是释放全部(event)
+notify是FIFO顺序释放一个(semaphore), notify_all就是就是释放全部(event)
 
 这里需要借助其他同步变量来理解
 
@@ -645,7 +645,7 @@ set的调用的话, 知道condtion.notify_all调用完成, 才会释放锁, 然�
         if not waiters_to_notify:
             return
         for waiter in waiters_to_notify:
-            # 一个个去release, 那么其他线程的acquired就返回了
+            # FIFO顺序release, 那么其他线程的acquired就返回了
             waiter.release()
             try:
                 all_waiters.remove(waiter)
@@ -660,4 +660,134 @@ Semaphore
 ===========
 
 **Semaphore也是用Condition来实现**
+
+
+queue.Queue
+=============
+
+队列的实现
+
+初始化
+---------
+
+初始化包括存储数据的deque(fifo结构), 以及get, put, not_full, not_empty, all_tasks_done等所需要的Condition.
+
+其中not_full, not_empty, all_tasks_done这三个Condition的锁都是指向一个互斥锁, 但是其中会有条件的去wait, 所以可以有
+
+多个线程去进行get, put. join操作的wait, 但是只有一个能成功, 也就是说可以有2个线程a, b去get, a, b都会wait,
+
+然后有2个线程c, d去put, c, d都会去wait, 但是同一时间a, b, c, d只有一个可以成功.
+
+**意味着: 获取三个Condition中的任意(只能一个)一个, 也隐式的拿到了其他两个Condition!!**
+
+**但是由于Condition的waiters不一样, 所以notify的时候可以通知到不同目的(get/put/join)的线程**
+
+.. code-block:: python
+
+    class Queue:
+        def __init__(self, maxsize=0):
+            self.maxsize = maxsize
+            self._init(maxsize)
+    
+            # 下面是各种Condition
+            self.mutex = threading.Lock()
+    
+            self.not_empty = threading.Condition(self.mutex)
+    
+            self.not_full = threading.Condition(self.mutex)
+    
+            self.all_tasks_done = threading.Condition(self.mutex)
+            self.unfinished_tasks = 0
+
+        def _init(self, maxsize):
+            # 初始化一个fifo结构
+            self.queue = deque()
+
+put
+------
+
+获取not_full这个Condition, 并且操作完成之前是不会释放掉Condition的, 所以如果没有满, 那么直接_put然后退出解锁
+
+如果满了, 调用Condition.wait去释放锁, 让其他线程有机会去get, 使得queue达到未满的状态, 或者其他线程也一起put进行等待.
+
+最后调用_put去添加数据之后, 调用not_empty.notify去通过可以去get了.
+
+为什么能调用not_empty.notify呢? 因为not_full和not_empty这两个Condition用的是同一个lock对象, 所以获取了一个就相当于
+
+获取了另外一个了.
+
+所以put会调用not_empty.notify, 通知可以get
+
+get调用not_full.notify通知可以put
+
+.. code-block:: python
+
+    def put(self, item, block=True, timeout=None):
+        # 拿到not_full的Condition
+        with self.not_full:
+            if self.maxsize > 0:
+                if not block:
+                    # 如果是non-block方式, 直接raise异常
+                    if self._qsize() >= self.maxsize:
+                        raise Full
+                elif timeout is None:
+                    # ********** 如果是block模式, 并且没有timeout, 则直接去在调用not_full(Condition).wait
+                    # *********  这样就释放了锁, 允许其他人去get/put
+                    while self._qsize() >= self.maxsize:
+                        self.not_full.wait()
+                elif timeout < 0:
+                    raise ValueError("'timeout' must be a non-negative number")
+                else:
+                    # block模式且有timeout, 则调用wait(timeout)
+                    endtime = time() + timeout
+                    while self._qsize() >= self.maxsize:
+                        remaining = endtime - time()
+                        if remaining <= 0.0:
+                            raise Full
+                        self.not_full.wait(remaining)
+            # 这里如果不限制大小的话, 直接调用_put, 然后退出
+            # 不限制大小的话每次都通知别人not_empty, 让别人能get
+            self._put(item)
+            self.unfinished_tasks += 1
+            # ****** 为什么能直接调用not_empty这个Condition.notify呢? 这里并没有去获取not_empty这个Condition
+            # ***** 答案就是not_empty和not_full公用一个lock, 所以可以notify
+            self.not_empty.notify()
+
+get
+-------
+
+和put差不多, 只不过把not_full缓存了not_empty!!
+
+
+.. code-block:: python
+
+    def get(self, block=True, timeout=None):
+        # 获取not_empty
+        with self.not_empty:
+            if not block:
+                if not self._qsize():
+                    raise Empty
+            elif timeout is None:
+                # 这里调用wait释放一下
+                while not self._qsize():
+                    self.not_empty.wait()
+            elif timeout < 0:
+                raise ValueError("'timeout' must be a non-negative number")
+            else:
+                # 无非是wait加个timeout咯
+                endtime = time() + timeout
+                while not self._qsize():
+                    remaining = endtime - time()
+                    if remaining <= 0.0:
+                        raise Empty
+                    self.not_empty.wait(remaining)
+            item = self._get()
+            # notify只会notify监听not_full的线程!!!
+            self.not_full.notify()
+            return item
+
+join/task_done
+-----------------
+
+差不多的了!!!!
 

@@ -1,3 +1,17 @@
+debug python步骤
+==================
+
+https://devguide.python.org/setup/
+
+cpython/Misc/SpecialBuilds.txt
+
+http://pythonextensionpatterns.readthedocs.io/en/latest/debugging/debug_python.html
+
+用gdb调试cpython: http://kharkivpy.org.ua/wp-content/uploads/2017/01/debugging-with-gdb.pdf
+
+vscode调试cpython
+
+
 gil的实现
 =============
 
@@ -5,15 +19,16 @@ gil的实现
 
 3.2之前的基于(100)tick的切换
 
-由于python的线程都是lwp, 所以是可以并发的，只是没拿到gil的线程是不能运行的啦
+由于python的线程都是lwp, 所以是可以并发的，只是没拿到gil的线程是不能运行
 
 
 .. raw:: 
+
     thread1 -----running---> release gil　-----wait gil---->
     
-    thread2 -----wait gil--> got gil      ------running----->
+    thread2 -----wait gil--> got     gil  ------running----->
     
-    thread3 -----wait gil--> still wait   ------wait gil---->
+    thread3 -----wait gil--> still  wait  ------wait gil---->
 
 
 **以下都是David Beazley的文章**
@@ -30,15 +45,11 @@ http://www.dabeaz.com/python/GIL.pdf
 
 py3.2之前 GIL，两个cpu密集型的线程，两核比单核慢很多。
 
-问题
------
-
 有时候ctrl+c不能杀死进程
-~~~~~~~~~~~~~~~~~~~~~~~~~~~
+---------------------------
  
-是因为如果解释器接收到信号之后，是每一个tick就释放gil让其他线程执行, 直到当前执行的线程为主线程为止. 若主线程被不可中断的thread join或者lock给阻塞了，然后主线程就不会被OS给唤醒，也就是不会重新启动.
+是因为如果解释器接收到信号之后
 
-这个时候程序由于check很频繁，运行就很慢:
 
 1. The reason Ctrl-C doesn't work with threaded programs is that the main thread is often blocked on an uninterruptible thread-join or lock.
 
@@ -46,9 +57,17 @@ py3.2之前 GIL，两个cpu密集型的线程，两核比单核慢很多。
 
 3. And as an extra little bonus, the interpreter is left in a state where it tries to thread-switch after every tick (so not only can you not interrupt your program, it runs slow as hell!)
 
+1. 是每一个tick就释放gil让其他线程执行, 直到当前执行的线程为主线程为止.
+
+2. 若主线程被不可中断的thread join或者lock给阻塞了，然后主线程就不会被OS给唤醒，也就是不会重新启动.
+
+3. 这个时候程序由于check很频繁, 导致程序呢很慢
+
+
+两个cpu密集型thread
+----------------------------
 
 多核情况下慢的原因是释放GIL之后的信号处理上
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 1. GIL thread signaling is the source of that
 
@@ -60,9 +79,17 @@ py3.2之前 GIL，两个cpu密集型的线程，两核比单核慢很多。
 
 5. Because another thread is waiting, extra pthreads processing and system calls get triggered to deliver the signal
 
-竞态
-~~~~~~~~
+文章接下来的图示表示了, 两个cpu密集型任务, 一旦使用了线程, 系统调用会大大增加.
 
+osx上:
+
+1. 单核情况下顺序执行两个任务只有736个unix系统调用和117个Mach系统调用, 如果用两个线程, 居然有3百多万个Mach的系统调用.
+   
+2. 多核的时候, 多线下unix系统调用没什么变化, 但是Mach系统调用能增加到9百万个.
+
+
+io和cpu密集型竞争
+---------------------
 
 1. 线程切换还依赖于OS的切换，在一般OS中，cpu密集型线程是低优先级，而IO密集型线程是高优先级
 
@@ -73,47 +100,62 @@ py3.2之前 GIL，两个cpu密集型的线程，两核比单核慢很多。
 4. 一个cpu密集的线程和一个IO密集的线程分别在不同核心上运行，然后，跟上面一个情况一样，一旦cpu密集型线程拿到GIL，另外一个线程几乎很难拿到GIL
 
 
-新gil实现
-=============================================
+新gil调度图解
+================
 
 http://www.dabeaz.com/python/NewGIL.pdf
 
-Py3.2之后GIL被重写了，cpu密集型的线程释放GIL不再是基于tick数目了，但是IO线程切换还是在陷入IO的时候释放GIL。sys.setcheckinterval不再影响线程切换了，而是这个sys.setswitchinterval函数设置解释器切换线程的间隔，默认是0.005s.
+Py3.2之后GIL被重写了，cpu密集型的线程释放GIL不再是基于tick数目了, 而是基于 **请求释放的机制**:
 
+1. 线程a会一直执行, 没有有其他线程发起drop gil的请求, 一直执行.
 
-2.1  一个线程会一直运行，直到一个全局变量gil_drop_request被设置为1，线程检查到该变量被设置为1之后，说明有其他线程需要GIL，然后当前线程会主动释放掉GIL。
+2. 线程b开始执行, b一开始检查有其他线程拿到了gil, 那么会默认等待5ms
 
-2.2  线程1一直运行，线程2先等待一段时间，在等待时间内，若线程1还没有主动释放掉GIL(陷入IO什么的)，则线程2设置全局变量gil_drop_request=1，然后再次等待，线程1检查到gil_drop_request=1，则主动释放掉GIL，
+3. 5ms期间a释放了gil, 比如a进入io的时候, 就去抢gil
 
-     同时发送信号给线程2，然后等待线程2的信号。线程2受信之后，拿到GIL，然后发送信号给线程1，表示线程2已经拿到了GIL。
+4. 5ms超时了其他线程依然没有释放gil, 那么b发起一个drop gil请求, 然后等待
 
-2.3  全局变量gil_drop_request不能被频繁设置，否则一个线程刚刚拿到GIL，另外一个线程恰好等待时间到了，又把gil_drop_request设置为1，则刚刚拿到GIL的线程又要切换。
+5. a收到drop gil的请求, 释放gil, 然后重新去抢gil.
 
-     2.3.1 On GIL timeout, a thread only sets gil_drop_request=1 if no thread switches of any kind have occurred in that period
+6. b得到gil被释放的通知之后, 去抢gil.
 
-     2.3.2 It's subtle, but if there are a lot of threads competing, gil_drop_request only gets set once per "time interval"
+其他情况
+----------
 
-     2.3.3 大概意思是，在一个等待超时段内，若没有线程切换，则可以设置gil_drop_request=1，否则，等到下一个等待超时。
+drop请求频率
+---------------
 
-     2.3.4 比如，线程1在运行，线程2之后开始等待，然后线程3在线程2等待之后也开始等待，然后线程2超时，然后设置gil_drop_request=1，然后线程1释放掉GIL，线程2拿到GIL，然后此时
+线程a, b, c中, 如果a拿着gil, 让b发起一次drop gil请求之后, c应该不需要再发drop gil请求了, 如果c再发一次drop gil请求, 那么b拿到gil之后, 又要释放了, 结果就是
 
-           线程3的等待超时了，这个时候不应该去设置gil_drop_request=1，因为在线程3的等待周期内，发生了一次线程切换，所以只能等待下一个等待超时才能设置gil_drop_request=1
+没人拿到gil!!!
 
-2.4  一个线程释放掉GIL之后，其他线程哪一个拿到GIL是由OS来决定的。比如2.3.4的例子中，线程1释放掉GIL，然后OS唤醒线程3，则线程2只能继续等待了。
+所以说, 在c等待gil释放期间, 判断有人已经发起drop请求了, 就等待就好, 不要发了.
+
+线程调度和gil
+----------------
+
+线程a, b, c, a拿着gil, 然后b发起一个drop请求, 那么b, c谁拿到gil?
+
+答案是不一定的, 如果此时os调度了c, 那么就是c拿, 如果先调度b, 那么b拿, 如果b, c同时被调度(多核), 那么抢吧.
+
+是否唤醒是取决os的调度, 也就是线程的优先级的.
+
+详解在: python_gil.rst
+
 
 新gil存在的问题
-=========================================================
+================
 
 http://www.dabeaz.com/python/UnderstandingGIL.pdf
+
+新gil的结构: It's a binary semaphore constructed from a pthreads mutex and a condition variable, **持有gil只是用一个真假值表示而已而已**, 但是操作真假值则是受mutx保护的.
+
 
 新GIL之后依然存在convoy effect。一个cpu密集型线程和一个io密集型线程同时在多核上运行，这样io密集的线程性能将严重下降，原因是，如果io密集型线程进行io操作的时候，会释放掉GIL，然后cpu密集型的线程拿到
 
 GIL，然后在下一个等待超时后将GIL还给io密集型的线程，但是若io密集型的线程的io操作是不需要挂起的呢，比如write数据情况下，由于os有读写缓冲区(假设空间足够)，所以write不会被阻塞，但是线程还是会释放掉
 
 GIL，然后cpu密集型线程就运行了，这样io密集型的线程必须等待下一个等待超时才能获取GIL，这样性能就下降了。
-
-(一个额外的参考，curio和trio这两个Python异步框架，curio的思想是每一个io操作都会引发yield，而trio中，有些不需要阻塞的io操作，则不会yield, 类比GIL的例子，yield就像
-切换线程一样)
 
 新的GIL消除了gil battle, 但是引入了timeout这样一个时间消耗, 所以对于高负载的io应用来说, gil timeout有可能会影响响应时间.
 
@@ -131,6 +173,8 @@ GIL，然后cpu密集型线程就运行了，这样io密集型的线程必须等
     - If a thread is preempted by a timeout, it is penalized with lowered priority (bad thread)
     - If a thread suspends early, it is rewarded with raised priority (good thread)
     - High priority threads always preempt low priority threads
+
+**python3.6中有个FORCE_SWITCHING的设置, 可以是得a线程释放之后, 一定会等待其他线程拿到gil之后才继续获取gil! 看起来会缓解convoy effect**
 
 
 护航效应

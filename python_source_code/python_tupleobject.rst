@@ -1,26 +1,14 @@
 Tuple
 =======
 
-使用一个数组来存储元素, 并且并没有set_item的方法, 所以tuple[n]=obj和tuple[n] += obj这样是不行的, 后面一个情况稍稍有点不太一样.
+1. 元祖创建的时候是根据长度固定分配大小
 
-不过最关键的还是tuple没有set_item, 所以tuple是不能改变元素的.
+2. 使用数组来存储元素(地址)
 
-下面代码是主要流程, 包括:
+2. 元祖不可修改是通过在type中不定义set_item方法来实现的.
 
-1. PyTupleObject.
 
-2. 初始化tuple和tuple赋值.
-
-3. 修改tuple.
-
-去掉了free_list相关代码和宏定义.
-
-关于PyTuple_Type和PyTupleObject的关系, 参考: python_objects.rst
-
-关于free_list, 参考: python_objects.rst
-
-关于gc, 参考: python_gc_memory.rst
-
+----
 
 PyTupleObject
 ==================

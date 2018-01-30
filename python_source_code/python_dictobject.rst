@@ -31,7 +31,6 @@ python3.6的实现
 使用开放地址法的变长的哈希表, 比起b树结构, 查找更好一点, 并且实现更简单:
 
 *Python’s dictionaries are implemented as resizable hash tables. 
-
 Compared to B-trees, this gives better performance for lookup (the most common operation by far) under most circumstances, and the implementation is simpler.*
 
 和树结构实现的map比较, 大概就是:
@@ -249,7 +248,6 @@ pep412的motivation中提到, 之前__dict__是会把类中的属性的名字, �
 这样内存有点浪费:
 
 *The current dictionary implementation uses more memory than is necessary when used as a container 
-
 for object attributes as the keys are replicated for each instance rather than being shared across many instances of the same class.*
 
 
@@ -294,9 +292,7 @@ combined
 除了访问obj.__dict__之外, 都是combined模式的字典, pep412:
 
 *Explicit dictionaries (dict() or {}), module dictionaries and most other dictionaries are created as combined-table dictionaries.
-
 A combined-table dictionary never becomes a split-table dictionary.
-
 Combined tables are laid out in much the same way as the tables in the old dictionary, resulting in very similar performance.*
 
 
@@ -340,6 +336,9 @@ Combined tables are laid out in much the same way as the tables in the old dicti
 但是缩减的意义不大, 因为split经过删除之后是一个combined的dict, 那就不会收缩了, 所以split其实也不会收缩.
 
 具体看resize部分.
+
+
+----
 
 
 

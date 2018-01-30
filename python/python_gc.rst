@@ -6,7 +6,6 @@ GC
 参考2: https://docs.python.org/3/faq/design.html#how-does-python-manage-memory
 
 *The standard implementation of Python, CPython, uses reference counting to detect inaccessible objects, and another mechanism to collect reference cycles, periodically
-
 executing a cycle detection algorithm which looks for inaccessible cycles and deletes the objects involved*
 
 CPython是引用计数为主, 当引用计数为0的时候, 触发回收(这里的回收统称, 不区分回收到os还是回收到内存池)， 标记清除为辅去清理循环引用, 这个过程也称为gc.
@@ -215,9 +214,7 @@ Ac也是一个gc对象, 也会被放在gc链表中. 当遍历gc链表, 如果直
 
 所以, 最终不可达是在遍历可达对象完毕之后, 猜得到最终不可达对象, 对不可达对象进行gc.
 
-
----
-
+----
 
 引用计数
 =============

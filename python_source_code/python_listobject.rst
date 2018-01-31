@@ -1,15 +1,23 @@
 list
 =========
 
-1. 连续数组来存储元素
+1. 使用数组来存储元素
 
-2. 每当元素增减, 会resize调整数组长度, 而dict是不会的.
+2. 每当元素增减, 会resize调整数组长度, 而dict是不会的. resize会将老数组元素复制到新数组上.
 
-3. pop最后一个元素的操作很快, 调整list长度就好了, 甚至不需要把list槽位置空, 其他位置触发slice操作
+3. 已分配大小allocated, 元素个数size, resize要保证: allocated >= size & size >= (allocated/2)
 
-4. append也很快, 只需数组槽位赋值而已
+4. 数组大小n字节, 对应pool的单位分配大小是k字节, 那么如果n/k > 3/4的时候, 数组并不会重新分配内存.
 
-5. insert需要把目标位置之后的元素一个个往后移动, 从而腾出目标位置
+5. 插入slice(包括append)的时候, 把目标位置之后的元素往后移动, 然后在目标位置依次赋值
+
+6. 删除slice(包括pop不是最后一个位置)的时候, 把要删除元素之后的元素往前移动覆盖删除元素
+
+7. pop最后一个元素的操作很快, 只是调整list长度而不会移动元素位置.
+
+8. append也很快, 只需数组槽位赋值而已
+
+9. insert是for循环一个个去移动, 而slice和resize则是调用memmove/memcpy系统调用去移动(复制)元素.
 
 ----
 
@@ -109,7 +117,7 @@ resize
         // 所以, 换句话说:
         // 1. 需要扩容: newsize大于已分配的内存
         // 或者
-        // 2. 需要缩减: newsize的大小小于已分配的一半		
+        // 2. 需要缩减: newsize的小于已分配的一半		
         if (allocated >= newsize && newsize >= (allocated >> 1)) {		
             assert(self->ob_item != NULL || newsize == 0);		
             // 这里说明新长度也没有满足条件, 改变一下list的长度就好了
@@ -124,12 +132,6 @@ resize
          * system realloc().		
          * The growth pattern is:  0, 4, 8, 16, 25, 35, 46, 58, 72, 88, ...		
          */		
-        // newsize >> 3是newsize往右移３位, 也就是newsize / 8	
-        // new_allocated是多分配的大小, new_allocated加上newsize才是上面注释写的步长		
-        // 比如newsize = 1, 然后 1 >> 3 = 0, 1 < 9, 所以是new_allocated = 0 + 3 =3, newsize = 1		
-        // 所以是allocated = new_allocated + newsize = 3 +1 = 4		
-        // 如果是pop等操作的话, allocated会减少, 比如allocated = 8, newsize = 3		
-        // 则new_allocated = 0 + 3 = 3, 所以最后allocated = new_allocated + newsize = 3 + 3 = 6		
         new_allocated = (newsize >> 3) + (newsize < 9 ? 3 : 6);		
     		
         /* check for integer overflow */		
@@ -137,15 +139,15 @@ resize
             PyErr_NoMemory();		
             return -1;		
         } else {		
+            // 注意, 这里是+=
             new_allocated += newsize;		
         }		
     		
         if (newsize == 0)		
             new_allocated = 0;		
         items = self->ob_item;		
-        // 这里的PyMem_RESIZE才是真正的去改变内存大小		
-        // 也就是移动数组元素填补空位
         if (new_allocated <= (SIZE_MAX / sizeof(PyObject *)))		
+            // 这里的PyMem_RESIZE才是真正的去改变内存大小		
             PyMem_RESIZE(items, PyObject *, new_allocated);		
         else		
             items = NULL;		
@@ -160,6 +162,146 @@ resize
         self->allocated = new_allocated;		
         return 0;		
     }
+
+resize条件
+--------------
+
+.. code-block:: c
+
+        if (allocated >= newsize && newsize >= (allocated >> 1)) {
+            // 不resize
+        }        
+
+1. 需要扩容: newsize大于已分配的内存, allocated < new_size
+
+2. 需要缩减: newsize的小于已分配的一半, (allocated >> 1) > new_size
+
+增加
+------------
+
+一开始x=[], 然后x.append(1):
+
+.. code-block:: python
+
+    '''
+
+    allocated=0, new_size=1
+    
+    new_allocated = (new_size >> 3) + (new_size <9 ? 3: 6)
+    
+    new_allocated = (1 >> 3) + (1 <9 ? 3: 6) = 0 + 3 = 3
+    
+    new_allocated += new_size = 3 + 1 = 4
+    
+    '''
+
+x的长度为1, 已分配大小为4, 一直append直到x=[1, 2, 3, 4]都不会resize, 然后x.append(5):
+
+.. code-block:: python
+
+   '''
+
+    allocated=4, new_size=5
+    
+    new_allocated = (new_size >> 3) + (new_size <9 ? 3: 6)
+    
+    new_allocated = (5 >> 3) + (5 <9 ? 3: 6) = 0 + 3 = 3
+    
+    new_allocated += new_size = 3 + 5 = 8
+
+    '''
+
+此时x的长度为5, 已分配大小为8
+
+减少
+-------
+
+x=[1, 2, 3, 4, 5], 调用x.pop(1), 此时allocated=8, new_size=4, 因为4>=8/2, 所以数组长度不变
+
+继续, x.pop(), 此时数组长度变为:
+
+.. code-block:: python
+
+    '''
+    
+    allocated=8, new_size=3
+    
+    new_allocated = (new_size >> 3) + (new_size <9 ? 3: 6)
+    
+    new_allocated = (3 >> 3) + (3 <9 ? 3: 6) = 0 + 3 = 3
+    
+    new_allocated += new_size = 3 + 3 = 6
+
+    '''
+
+x的数组长度变为6, 一直append知道x=[1, 2, 3, 4, 5, 6], 数组才会再次扩张.
+
+所以注释中的步长只是一直append的时候的长度, 长度变化最主要要满足: allocated > new_size并且new_size>=allocated/2这两个条件
+
+
+内存复制
+-----------
+
+resize的时候是调用PyMem_RESIZE去新分配一个数组, 然后把元素复制过去
+
+PyMem_RESIZE最后调用
+
+
+.. code-block:: c
+
+    static void *
+    _PyObject_Realloc(void *ctx, void *p, size_t nbytes)
+    {
+        void *bp;
+        poolp pool;
+        size_t size;
+    
+        if (p == NULL)
+            return _PyObject_Alloc(0, ctx, 1, nbytes);
+    
+        // 省略代码
+    
+        pool = POOL_ADDR(p);
+        if (address_in_range(p, pool)) {
+            /* We're in charge of this block */
+            size = INDEX2SIZE(pool->szidx);
+            if (nbytes <= size) {
+                /* The block is staying the same or shrinking.  If
+                 * it's shrinking, there's a tradeoff:  it costs
+                 * cycles to copy the block to a smaller size class,
+                 * but it wastes memory not to copy it.  The
+                 * compromise here is to copy on shrink only if at
+                 * least 25% of size can be shaved off.
+                 */
+                if (4 * nbytes > 3 * size) {
+                    /* It's the same,
+                     * or shrinking and new/old > 3/4.
+                     */
+                    // 这里并没有新分配内存, 而是返回
+                    // 数组的原内存地址
+                    return p;
+                }
+                size = nbytes;
+            }
+            // 新分配内存
+            bp = _PyObject_Alloc(0, ctx, 1, nbytes);
+            if (bp != NULL) {
+                // 然后复制内存
+                memcpy(bp, p, size);
+                _PyObject_Free(ctx, p);
+            }
+            return bp;
+        }
+        
+    }
+
+
+从注释可以看出来, 如果pool的单位长度, 比如是32字节, 比缩减之后的长度, 比如25字节大, 
+
+并且缩减之后的长度至少占pool单位长度的3/4, 那么不就会去新开辟内存空间. 估计是为了
+
+充分利用数组原来所占的内存吧.
+
 
 insert
 ==========
@@ -212,7 +354,6 @@ pop
 ====
 
 
-
 .. code-block:: c
 
     // 这个是pop
@@ -245,6 +386,7 @@ pop
         // 其他位置的pop则是要当做slice来操作
         // 这里的增加和减少引用计数没看懂
         Py_INCREF(v);
+        // 调用slice操作
         status = list_ass_slice(self, i, i+1, (PyObject *)NULL);
         if (status < 0) {
             Py_DECREF(v);
@@ -286,8 +428,7 @@ list_ass_slice
         if (v == NULL)
             n = 0;
         else {
-            // 下面是获取slice大小的
-            // 主要是没看懂, 就先省略了
+            // 没看懂, 就省略了
         }
         // 下面都是计算slice的左右边界的
 
@@ -325,10 +466,13 @@ list_ass_slice
         if (d < 0) { /* Delete -d items */
             Py_ssize_t tail;
             tail = (Py_SIZE(a) - ihigh) * sizeof(PyObject *);
+
+            // 这里移动内存
             memmove(&item[ihigh+d], &item[ihigh], tail);
 
-            // 这个list_resize是变小大小, a+d, d<0
+            // 这里缩小list的长度
             if (list_resize(a, Py_SIZE(a) + d) < 0) {
+                // 这里list长度改变失败, 然后把老内容重新复制到list
                 memmove(&item[ihigh], &item[ihigh+d], tail);
                 memcpy(&item[ilow], recycle, s);
                 goto Error;
@@ -338,6 +482,7 @@ list_ass_slice
         // 这里是说明赋值slice操作的
         else if (d > 0) { /* Insert d items */
             k = Py_SIZE(a);
+            // 增加list长度
             if (list_resize(a, k+d) < 0)
                 goto Error;
             item = a->ob_item;
@@ -363,4 +508,99 @@ list_ass_slice
     #undef b
     }
 
+memmove
+-----------
+
+改系统调用, 第一个参数是目标位置, 第二个参数是源位置, 第三个参数是内存大小
+
+也就是把源位置开始, 之后的指定大小的内存, 复制到目标位置.
+
+
+缩减移动元素
+---------------
+
+.. code-block:: c
+
+
+        if (d < 0) { /* Delete -d items */
+            Py_ssize_t tail;
+            tail = (Py_SIZE(a) - ihigh) * sizeof(PyObject *);
+
+            // 这里移动内存
+            memmove(&item[ihigh+d], &item[ihigh], tail);
+
+            // 这里缩小list的长度
+            if (list_resize(a, Py_SIZE(a) + d) < 0) {
+                memmove(&item[ihigh], &item[ihigh+d], tail);
+                memcpy(&item[ilow], recycle, s);
+                goto Error;
+            }
+            item = a->ob_item;
+        }
+
+例如x=[1, 2, 3, 4, 5], 然后pop(1)
+
+.. code-block:: python
+
+    '''
+    
+    [1, 2, 3, 4, 5]
+    
+    其中d=-1, ilow=1, ihight=2, 此时tail = 5 - 2 = 3, 也就是移动3个元素.
+    
+    调用memmove(&item[1], &item[2], 3), 也就是把3, 4, 5移动到2所在的位置, 变为:
+    
+    [1, 3, 4, 5]
+    
+    然后缩减x的长度为4, 但是数组长度依然是8, 因为4<=8/2, 然后继续pop(1), 有
+
+    [1, 4, 5]
+
+
+    
+    '''
+
+增加长度移动元素
+------------------
+
+.. code-block:: c
+
+        else if (d > 0) { /* Insert d items */
+            k = Py_SIZE(a);
+            // 增加list长度
+            if (list_resize(a, k+d) < 0)
+                goto Error;
+            item = a->ob_item;
+            // 依然要复制元素
+            memmove(&item[ihigh+d], &item[ihigh],
+                (k - ihigh)*sizeof(PyObject *));
+        }
+       // n是slice的大小
+       for (k = 0; k < n; k++, ilow++) {
+        PyObject *w = vitem[k];
+        Py_XINCREF(w);
+        // 一个个插入到list中
+        item[ilow] = w;
+       }
+
+
+例如x=[1, 2, 3, 4, 5], 然后x[1:2] = [10, 11]
+
+.. code-block:: python
+
+'''
+
+[1, 2, 3, 4, 5]
+
+其中k=5, d=1, ilow=1, ihight=2, n=2, 此时tail = 5 - 2 = 3, 也就是移动3个元素.
+
+调用memmove(&item[3], &item[2], 3), 也就是把3, 4, 5移动到4开始的位置
+
+[1, , , 3, 4, 5]
+
+然后一个个插入
+
+[1, 10, 11, 3, 4, 5]
+
+'''
 

@@ -19,6 +19,8 @@ list
 
 9. insert是for循环一个个去移动, 而slice和resize则是调用memmove/memcpy系统调用去移动(复制)元素.
 
+10. contains和index都是需要逐个去比较.
+
 ----
 
 

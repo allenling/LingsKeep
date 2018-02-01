@@ -7,23 +7,92 @@ python3.6的实现
    
 2. 使用key数组保证了key是插入顺序, key/value一般一起存在key数组.
 
-3. 字典只会在添加k/v的时候扩张key数组长度, 但是删除操作不会缩减key数组, resize只针对key数组, hash表不会resize, 只有hash mask会变化
+3. 字典只会在添加k/v的时候扩张key数组长度, 但是删除操作不会缩减key数组, resize只针对key数组, hash表不会resize, 只有hash mask会变化.
 
-4. 区分有split和combined两种模式.
+   为什么不缩减数组长度呢? 
 
-5. dict根据key的不一样有不同的搜索策略
+4. resize的条件是可用空间(usable)为0, 也就是数组长度的2/3已经被使用, 那么扩容
 
-6. py2/3中, 调用dict函数和调用{}创建字典的区别和性能.
+5. resize每次都是最小长度(8)开始, 一直乘以2, 最后保证new_size要大于当前已用大小的两倍, new_size > used * 2.
+
+6. resize之后, 新usable只会包含used的元素, 不包含dummy的元素, 所以新的usable可能会比老usable大.
+
+7. insert的时候, dict不会占用dummy的槽位, 查找的时候会忽略dummy槽位, 只会找下一个空槽位, 这和set不一样.
+
+5. 区分有split和combined两种模式.
+
+6. dict根据key的不一样有不同的搜索策略
+
+7. py2和3中, 调用dict函数和调用{}创建字典的区别和性能.
 
 
-参考
-=======
 
-1. 关于free_list, type和object的关系, 参考: python_objects.rst
+resize流程
+===============
 
-2. 关于指针数组, 参考: C_指针小结.rst.
+1. 关于dummy的槽位, dict会无视它的, 每次insert的是总是要找到一个空位, 所以调用look函数总是返回empty状态或者错误.
 
-3. 关于gc, 参考: python_gc_memory.rst
+2. 因为每次都是insert的时候, 总是赋值数组的dk_nentries这个下标位置, 所以这个位置只会增加, 不会减少, 也就是delete的时候不变, insert的时候加1
+
+3. GROWTH_RATE是每次需要扩容的时候, 扩容的最小大小, 值是: used * 2 + size / 2 
+
+4. dk_nentries是当前插入的时候, 插入到key数组的位置.
+
+.. code-block:: python
+
+    '''
+    x = {1: 1, 2: 2, 3: 3, 4: 4, 5: 5}, 此时usable = 0, used = 5, array_size = 8, dk_nentries=5
+    
+    hash表: xh = [-1, 0, 1, 2, 3, 4, -1, -1]
+
+    数组为: xa = [1, 2, 3, 4, 5, NULL, NULL, NULL]
+
+    xh中, -1表示空槽位, -2表示dummy, 存储的是xa的下标
+    
+    1. 然后x[6] = 6, 此时寻找第一个hash槽位, 6 & 7 = 6, 所以找到xh[6], 看到是empty, 返回. 由于usable = 0, 所以扩容, 最小大小是2 * 5 + 8 / 2 = 14.
+       
+    要求 new_array_size >= 14, 所以new_array_size = 16, used = 5, usable = 16 * 2/3 - used = 5, dk_nentries = 5:
+
+    xh = [-1, 0, 1, 2, 3, 4, -1, -1, ...], 长度16
+
+    xa = [1, 2, 3, 4, 5, NULL, ...], 长度16
+
+    然后插入最后xa最后一位, xh[6]等于下标5:
+
+    xh = [-1, 0, 1, 2, 3, 4, 5, -1, -1, ...], 长度16
+
+    xa = [1, 2, 3, 4, 5, 6, NULL, NULL, ...], 长度16
+
+    之后used += 1 = 6, usable -= 1 = 4, dk_nentries += 1 =6
+    
+    2. 然后一直赋值, 有x={1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6, 7: 7, 8: 8, 9: 9, 10: 10}, x不会扩容, usable = 0, used = 10, dk_nentries=10
+
+    xh = [-1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, -1, ...], 长度16
+
+    xa = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, NULL, ...], 长度16
+    
+    3. 然后del x[1], 此时used = 9(used-=1), usable = 0(不变), dk_nentries=10, 不变
+
+    xh = [-1, -2, 1, 2, 3, 4, 5, 6, 7, 8, 9, -1, ...], 长度16
+
+    xa = [NULL, 2, 3, 4, 5, 6, 7, 8, 9, 10, NULL, ...], 长度16
+    
+    4. 继续del x[2], used = 8, usable = 0, dk_entries = 10, 不变
+
+    xh = [-1, -2, -2, 2, 3, 4, 5, 6, 7, 8, 9, -1, ...], 长度16
+
+    xa = [NULL, NULL, 3, 4, 5, 6, 7, 8, 9, 10, NULL, ...], 长度16
+    
+    5. 然后x[1] = 1, 第一个槽位是1, 发现是dummy, 然后继续, 直到找到一个empty的槽位, 二次探测最后得到1->6->15, 15是空槽位.
+       
+    usable是0, 需要扩容, 最小大小是28, 所以new_size = 32, dk_nentries=0, 顺序遍历xa, 只复制不为NULL的key, 然后放到新数组中, dk_entries初始为0, 然后dk_entries+=1
+
+    xh = [-1, -1, -1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, -1, ...], 长度是32
+
+    xa = [3, 4, 5, 6, 7, 8, 9, 10, NULL, NULL, ...], 长度是32
+    
+    '''
+
 
 数据结构
 =============
@@ -232,7 +301,7 @@ dummy状态
 
    这个槽位是空, 则返回, 表示查找不到, 这样就不正确了.
 
-3. 如果我们把这个槽位设置为dummy, 可以是得探测继续进行下去, 继续探测到2, 探测成功
+3. 如果我们把这个槽位设置为dummy, 可以使得探测能继续进行下去, 继续探测到2, 探测成功
 
 
 split/combined
@@ -336,544 +405,6 @@ Combined tables are laid out in much the same way as the tables in the old dicti
 但是缩减的意义不大, 因为split经过删除之后是一个combined的dict, 那就不会收缩了, 所以split其实也不会收缩.
 
 具体看resize部分.
-
-
-----
-
-
-
-PyDictObject
-================
-
-这个结构就表示了一个字典, ma_keys和ma_values则是分别存放key和value的地方, 但是
-
-对于小字典的话, 会把key和value都存在ma_keys中, 大字典就把key放在ma_keys中, ma_values放的是value
-
-.. code-block:: c
-
-   typedef struct _dictkeysobject PyDictKeysObject;
-
-    typedef struct {
-        PyObject_HEAD
-    
-        // 字典中的元素实际个数
-        Py_ssize_t ma_used;
-    
-        // 字典的版本, 一旦字典被改变, 版本也会改变
-        // pep509
-        uint64_t ma_version_tag;
-    
-        //  一个dictkeys对象
-        PyDictKeysObject *ma_keys;
-    
-        // split模式下的value数组
-        PyObject **ma_values;
-    } PyDictObject;
-
-PyDictKeysObject最终对应于_dictkeysobject, 下面是主要的字段:
-
-cpython/Objects/dict-common.h
-
-.. code-block:: c
-
-    struct _dictkeysobject {
-
-        // hash表的大小, 大小必须是2的n次方
-        Py_ssize_t dk_size;
-    
-        // 搜索的函数, 解释在下面搜索函数部分
-        dict_lookup_func dk_lookup;
-    
-        // 可用槽位置, dk_size * 2/3
-        Py_ssize_t dk_usable;
-    
-        Py_ssize_t dk_nentries;
-    
-        // 下面是一个8字节的公用体
-        // 用来作为indices数组
-        union {
-            int8_t as_1[8];
-            int16_t as_2[4];
-            int32_t as_4[2];
-    #if SIZEOF_VOID_P > 4
-            int64_t as_8[1];
-    #endif
-        } dk_indices;
-    
-    };
- 
-几个长度
-----------
-
-1. ma_used是dict的实际长度, 也就是元素的个数
-
-2. dk_nentries是entries数组已用长度, 而dk_usable是再添加多少个就会触发resize条件.
-
-   两者之和为hash表的2/3, 没添加一个key, dk_nentries加1, 而dk_usable减1, 删除的时候反之.
-
-3. dk_nentries一般是和ma_used相等, 但是如果从大字典变为小字典, 比如一直删除字典的key的时候, 此时
-
-   dk_entries和ma_used会不相等, 这是因为dict不会因为删除了元素而缩减entries数组.
-
-
-关于dict的空间变化, 在下面的resize部分.
-
-
-新建字典
-===========
-
-使用{}新建字典的字节码是BUILD_MAP, 流程是先创建一个空字典, 然后一个个setitem
-
-.. code-block:: c
-
-    TARGET(BUILD_MAP) {
-        Py_ssize_t i;
-        // 初始化空字典
-        PyObject *map = _PyDict_NewPresized((Py_ssize_t)oparg);
-        if (map == NULL)
-            goto error;
-        // for循环setitem
-        for (i = oparg; i > 0; i--) {
-            int err;
-            PyObject *key = PEEK(2*i);
-            PyObject *value = PEEK(2*i - 1);
-            err = PyDict_SetItem(map, key, value);
-            if (err != 0) {
-                Py_DECREF(map);
-                goto error;
-            }
-        }
-
-_PyDict_NewPresized
-=====================
-
-.. code-block:: c
-
-    PyObject *
-    _PyDict_NewPresized(Py_ssize_t minused)
-    {
-        const Py_ssize_t max_presize = 128 * 1024;
-        Py_ssize_t newsize;
-        PyDictKeysObject *new_keys;
-    
-        // 计算dict的大小
-        // 只能预分配最大长度
-        if (minused > USABLE_FRACTION(max_presize)) {
-            newsize = max_presize;
-        }
-        else {
-            // 没有超过最大预分配长度, 则计算size
-            // 要满足newsize=2**n, 并且newsize*2/3 > minsize
-            Py_ssize_t minsize = ESTIMATE_SIZE(minused);
-            newsize = PyDict_MINSIZE;
-            while (newsize < minsize) {
-                newsize <<= 1;
-            }
-        }
-        assert(IS_POWER_OF_2(newsize));
-    
-        // 新建keys对象
-        new_keys = new_keys_object(newsize);
-        if (new_keys == NULL)
-            return NULL;
-        // 新建dict
-        return new_dict(new_keys, NULL);
-    }
-
-
-_PyDict_NewPresized会根据size, 新建一个keys对象, 然后调用new_dict去新建一个dict, 
-
-new_keys_object
-==================
-
-这个函数负责初始化keys和values
-
-.. code-block:: c
-
-    static PyDictKeysObject *new_keys_object(Py_ssize_t size)
-    {
-        PyDictKeysObject *dk;
-        Py_ssize_t es, usable;
-    
-        // 下面是校验长度和可用个数
-        assert(size >= PyDict_MINSIZE);
-        assert(IS_POWER_OF_2(size));
-    
-        usable = USABLE_FRACTION(size);
-        // 省略了代码
-    
-        // 小字典从free_list拿出来
-        if (size == PyDict_MINSIZE && numfreekeys > 0) {
-            dk = keys_free_list[--numfreekeys];
-        }
-        else {
-            // 大字典嘛, 分配一个
-            dk = PyObject_MALLOC(sizeof(PyDictKeysObject)
-                                 - Py_MEMBER_SIZE(PyDictKeysObject, dk_indices)
-                                 + es * size
-                                 + sizeof(PyDictKeyEntry) * usable);
-            if (dk == NULL) {
-                PyErr_NoMemory();
-                return NULL;
-            }
-        }
-        // 下面就是初始化了
-        DK_DEBUG_INCREF dk->dk_refcnt = 1;
-        dk->dk_size = size;
-        dk->dk_usable = usable;
-        dk->dk_lookup = lookdict_unicode_nodummy;
-        dk->dk_nentries = 0;
-        // 初始化hash表, 意思懂了, 但是如何映射的嘛, 没看懂
-        memset(&dk->dk_indices.as_1[0], 0xff, es * size);
-        PyDictKeyEntry *tmp = DK_ENTRIES(dk);
-        // 这里初始化PyDictKeyEntry的数组， 意思看懂了, 但是细节没看懂
-        // DK_ENTRIES这个宏有点难看懂
-        memset(DK_ENTRIES(dk), 0, sizeof(PyDictKeyEntry) * usable);
-        return dk;
-    }
-
-这个函数只是根据长度, 分配一个空的PyDictObject, 然后初始化look函数.
-
-1. 长度有两个, 一个hash表的长度, 也就是要保持2的n次方, 值是保存在dk_size里面, 但是其对应的hash表, 也就是indices变量,
-
-   只是一个8字节的固定长度的共用体而已, 如何映射, 没看懂(c语言比较渣), 但是按照上面的设计思路, 把indices当做一个
-
-   数组就好了.
-   
-2. 一个是PyDictKeyEntry数组的长度, 会预分配, 使用的是指针移动的方式去赋值, 长度为hash表长度的2/3.
-
-3. look函数默认初始化为lookdict_unicode_nodummy.
-
-
-new_dict
-==========
-
-这里只是把keys对象赋值到dict对象中而已
-
-.. code-block:: c
-
-    static PyObject *
-    new_dict(PyDictKeysObject *keys, PyObject **values)
-    {
-        PyDictObject *mp;
-        assert(keys != NULL);
-        if (numfree) {
-            // 从free_list中拿一个
-            mp = free_list[--numfree];
-            assert (mp != NULL);
-            assert (Py_TYPE(mp) == &PyDict_Type);
-            _Py_NewReference((PyObject *)mp);
-        }
-        else {
-            // 否则从内存中新分配一个dict
-            mp = PyObject_GC_New(PyDictObject, &PyDict_Type);
-            if (mp == NULL) {
-                DK_DECREF(keys);
-                free_values(values);
-                return NULL;
-            }
-        }
-        // 赋值传入的keys对象
-        mp->ma_keys = keys;
-        mp->ma_values = values;
-        mp->ma_used = 0;
-        mp->ma_version_tag = DICT_NEXT_VERSION();
-        assert(_PyDict_CheckConsistency(mp));
-        return (PyObject *)mp;
-    }
- 
-insertdict
-=============
-
-PyDict_SetItem将会调用insertdict去将key/value插入到keys对象中.
-
-每次向dict插入key/value的时候, 比如调用dict[key] = value, 调用该函数:
-
-
-.. code-block:: c
-
-    static int
-    insertdict(PyDictObject *mp, PyObject *key, Py_hash_t hash, PyObject *value)
-    {
-        PyDictKeyEntry *ep, *ep0;
-        Py_ssize_t hashpos, ix;
-    
-        Py_INCREF(key);
-        Py_INCREF(value);
-
-        // 这里判断split模式的dict插入一个非字符串的key
-        if (mp->ma_values != NULL && !PyUnicode_CheckExact(key)) {
-            if (insertion_resize(mp) < 0)
-                goto Fail;
-        }
-
-        // 调用look函数
-        ix = mp->ma_keys->dk_lookup(mp, key, hash, &value_addr, &hashpos);
-        if (ix == DKIX_ERROR)
-            goto Fail;
-    
-        // 这里的条件是如果是split模式的dict, 并且
-        // mp-ma_used和mp->ma_keys不相等的时候需要resize
-        // 两者不相等的时候是有可能大字典变为小字典, 导致不相等的
-        if (_PyDict_HasSplitTable(mp) &&
-           ((ix >= 0 && *value_addr == NULL && mp->ma_used != ix) ||
-            (ix == DKIX_EMPTY && mp->ma_used != mp->ma_keys->dk_nentries))) {
-           if (insertion_resize(mp) < 0)
-               goto Fail;
-           find_empty_slot(mp, key, hash, &value_addr, &hashpos);
-           ix = DKIX_EMPTY;
-        }
-    
-        // 这个if是如果搜索出来的槽位可用, 那么插入
-        if (ix == DKIX_EMPTY) {
-            // 但是没有可用个数了
-            if (mp->ma_keys->dk_usable <= 0) {
-                // 所以需要resize
-                if (insertion_resize(mp) < 0)
-                    goto Fail;
-                find_empty_slot(mp, key, hash, &value_addr, &hashpos);
-            }
-            // ep0是PyDictKeyEntry的数组
-            ep0 = DK_ENTRIES(mp->ma_keys);
-            ep = &ep0[mp->ma_keys->dk_nentries];
-            // 把value的hash下标设置到indices数组
-            dk_set_index(mp->ma_keys, hashpos, mp->ma_keys->dk_nentries);
-            // 更新value对应的PyDictKeyEntry对象
-            ep->me_key = key;
-            ep->me_hash = hash;
-            // 如果是split模式, value应该赋值到values数组
-            if (mp->ma_values) {
-                assert (mp->ma_values[mp->ma_keys->dk_nentries] == NULL);
-                mp->ma_values[mp->ma_keys->dk_nentries] = value;
-            }
-            else {
-                ep->me_value = value;
-            }
-            // 各种更新PyDictObject对象
-            mp->ma_used++;
-            mp->ma_version_tag = DICT_NEXT_VERSION();
-            mp->ma_keys->dk_usable--;
-            mp->ma_keys->dk_nentries++;
-            assert(mp->ma_keys->dk_usable >= 0);
-            assert(_PyDict_CheckConsistency(mp));
-            return 0;
-        }
-
-        // 下面有些代码, 没太看懂, 省略
-    
-    }
-
-
-resize过程
-=============
-
-一旦dict的元素个数大于hash表的2/3的时候, 需要重新分配一个更大的hash表.
-
-这样是未来避免散列冲突过大, 导致探测失败或者冲突太大的时候搜索退化到O(N).
-
-.. code-block:: c
-
-    static int
-    dictresize(PyDictObject *mp, Py_ssize_t minsize)
-    {
-        // 这里设置新长度, 新长度的一半一定要大于原已用个数
-        /* Find the smallest table size > minused. */
-        for (newsize = PyDict_MINSIZE;
-             newsize < minsize && newsize > 0;
-             newsize <<= 1)
-            ;
-
-        // 这里赋值一份老的keys和values
-        oldkeys = mp->ma_keys;
-        oldvalues = mp->ma_values;
-        /* Allocate a new table. */
-        // 分配新的keys和values
-        mp->ma_keys = new_keys_object(newsize);
-        if (mp->ma_keys == NULL) {
-            mp->ma_keys = oldkeys;
-            return -1;
-        }
-        // New table must be large enough.
-        // 再次校验下长度, 并且顺手设置下look函数
-        assert(mp->ma_keys->dk_usable >= mp->ma_used);
-        if (oldkeys->dk_lookup == lookdict)
-            mp->ma_keys->dk_lookup = lookdict;
-        // resize的是, 返回的永远是一个combined模式的dict
-        // 所以这里的mp->ma_values设置为NULL
-        mp->ma_values = NULL;
-        ep0 = DK_ENTRIES(oldkeys);
-        // 这里如果老values有值, 表示是一个split表
-        // 但是为了方便, 把老的values也设置到老的keys里面
-        // 这样接下来复制两个数组的循环就只需要考虑老keys就好了
-        if (oldvalues != NULL) {
-            for (i = 0; i < oldkeys->dk_nentries; i++) {
-                if (oldvalues[i] != NULL) {
-                    Py_INCREF(ep0[i].me_key);
-                    ep0[i].me_value = oldvalues[i];
-                }
-            }
-        }
-        /* Main loop */
-        // 把老keys的数据复制到新的keys中
-        for (i = 0; i < oldkeys->dk_nentries; i++) {
-            PyDictKeyEntry *ep = &ep0[i];
-            if (ep->me_value != NULL) {
-                insertdict_clean(mp, ep->me_key, ep->me_hash, ep->me_value);
-            }
-        }
-        // 更新已用的个数, 比如之前是8, 用了5个之后触发resize
-        // 新表长度是16, 那么可用个数是10, 然后我们复制5个数据进去之后
-        // 明显可用个数就要减5了
-        mp->ma_keys->dk_usable -= mp->ma_used;
-        if (oldvalues != NULL) {
-            /* NULL out me_value slot in oldkeys, in case it was shared */
-            for (i = 0; i < oldkeys->dk_nentries; i++)
-                ep0[i].me_value = NULL;
-            DK_DECREF(oldkeys);
-            if (oldvalues != empty_values) {
-                free_values(oldvalues);
-            }
-        }
-        else {
-            assert(oldkeys->dk_lookup != lookdict_split);
-            assert(oldkeys->dk_refcnt == 1);
-            DK_DEBUG_DECREF PyObject_FREE(oldkeys);
-        }
-        return 0;
-    }
-
-resize之后长度可能缩小
---------------------------
-
-**resize之后, 返回的一定是一个combined模式的dict**
-
-resize中, 如果原dict是split模式的, 那么新的dict切换成combined. 期间新的dict的entries数组有可能比较小.
-
-小的原因是因为如果split下有被删除过的value, 那么不会复制到新的dict中的
-
-.. code-block:: c
-
-        // 如果原字典是split模式
-        // 那么把values的值复制到老的keys下面, 方便复制到新字典
-        if (oldvalues != NULL) {
-            for (i = 0; i < oldkeys->dk_nentries; i++) {
-                // 如果原来的value被删除过, 也就是被设置为NULL
-                // 跳过赋值
-                if (oldvalues[i] != NULL) {
-                    Py_INCREF(ep0[i].me_key);
-                    ep0[i].me_value = oldvalues[i];
-                }
-            }
-        }
-        /* Main loop */
-        // 把老keys的数据复制到新的keys中
-        // 经过上面的处理, 这里直接复制老的keys数组就可以了
-        for (i = 0; i < oldkeys->dk_nentries; i++) {
-            PyDictKeyEntry *ep = &ep0[i];
-            if (ep->me_value != NULL) {
-                insertdict_clean(mp, ep->me_key, ep->me_hash, ep->me_value);
-            }
-        }
-
-
-pop
-============
-
-.. code-block:: c
-
-    /* Internal version of dict.pop(). */
-    PyObject *
-    _PyDict_Pop_KnownHash(PyObject *dict, PyObject *key, Py_hash_t hash, PyObject *deflt)
-    {
-        mp = (PyDictObject *)dict;
-    
-        // 这里如果dict是空的, 那么报错
-        if (mp->ma_used == 0) {
-            if (deflt) {
-                Py_INCREF(deflt);
-                return deflt;
-            }
-            _PyErr_SetKeyError(key);
-            return NULL;
-        }
-        // 查询要删除的key的hash下标, 会赋值到hashpos
-        ix = (mp->ma_keys->dk_lookup)(mp, key, hash, &value_addr, &hashpos);
-        if (ix == DKIX_ERROR)
-            return NULL;
-        // key不存在, 报错
-        if (ix == DKIX_EMPTY || *value_addr == NULL) {
-            if (deflt) {
-                Py_INCREF(deflt);
-                return deflt;
-            }
-            _PyErr_SetKeyError(key);
-            return NULL;
-        }
-    
-        // Split table doesn't allow deletion.  Combine it.
-        // split模式的字典不能删除, resize成一个新的combined的字典
-        // 这里会触发resize, 返回一个combined字典
-        if (_PyDict_HasSplitTable(mp)) {
-            if (dictresize(mp, DK_SIZE(mp->ma_keys))) {
-                return NULL;
-            }
-            ix = (mp->ma_keys->dk_lookup)(mp, key, hash, &value_addr, &hashpos);
-            assert(ix >= 0);
-        }
-        // 下面都是一些置空和减少操作
-    
-    }
-
-删除操作
-===========
-
-调用del删除key的时候
-
-.. code-block:: c
-
-    int
-    _PyDict_DelItem_KnownHash(PyObject *op, PyObject *key, Py_hash_t hash)
-    {
-        mp = (PyDictObject *)op;
-        // 查询
-        ix = (mp->ma_keys->dk_lookup)(mp, key, hash, &value_addr, &hashpos);
-        if (ix == DKIX_ERROR)
-            return -1;
-        // key不存在, 报错
-        if (ix == DKIX_EMPTY || *value_addr == NULL) {
-            _PyErr_SetKeyError(key);
-            return -1;
-        }
-        assert(dk_get_index(mp->ma_keys, hashpos) == ix);
-    
-        // Split table doesn't allow deletion.  Combine it.
-        // 跟pop一样, split变成combined
-        if (_PyDict_HasSplitTable(mp)) {
-            if (dictresize(mp, DK_SIZE(mp->ma_keys))) {
-                return -1;
-            }
-            ix = (mp->ma_keys->dk_lookup)(mp, key, hash, &value_addr, &hashpos);
-            assert(ix >= 0);
-        }
-        // 里面都是一些置空和减少的操作
-        return delitem_common(mp, hashpos, ix, value_addr);
-    }
-   
-del操作会触发split字典的resize
-
-
-resize的小疑惑
-================
-
-一旦对split字典进行删除操作, 那么split字典马上就变成combined, 那么永远称为一个combined操作了, 就永远不会收缩长度了.
-
-那么删除操作中的split判断如果是为了对split字典首次删除key的时候的缩减的话, 删除操作一次只会删除一个key, 几乎不会使得
-
-字典长度压缩.
-
-**那么也就是说删除中对split的resize仅仅是进行一次combined转化而已吗?**
-
-
 
 look函数
 ===========
@@ -1081,8 +612,8 @@ ipython打印
 ipython的问题: https://github.com/ipython/ipython/issues?utf8=%E2%9C%93&q=dict
 
 
-dict函数
-============
+dict内置函数
+===============
 
 参考: https://doughellmann.com/blog/2012/11/12/the-performance-impact-of-using-dict-instead-of-in-cpython-2-7-2/
 
@@ -1114,7 +645,7 @@ py2中, dict确实比{}慢一点, 但是py3中, dict却比{}快了挺多的.
 
 但是调用dict的过程, py3和py2是一样的:
 
-1. 先调用dict_new(tp_new)生成一个key初始话长度了的空字典
+1. 先调用dict_new(tp_new)生成一个key初始长度的空字典
 
 2. 调用dict_init(tp_init)去merge从dict中传入的参数字典
 
@@ -1122,4 +653,794 @@ py2中, dict确实比{}慢一点, 但是py3中, dict却比{}快了挺多的.
 
 
 结果上的不一致也没太明白
+
+
+
+----
+
+
+
+PyDictObject
+================
+
+这个结构就表示了一个字典, ma_keys和ma_values则是分别存放key和value的地方, 但是
+
+对于小字典的话, 会把key和value都存在ma_keys中, 大字典就把key放在ma_keys中, ma_values放的是value
+
+.. code-block:: c
+
+   typedef struct _dictkeysobject PyDictKeysObject;
+
+    typedef struct {
+        PyObject_HEAD
+    
+        // 字典中的元素实际个数
+        Py_ssize_t ma_used;
+    
+        // 字典的版本, 一旦字典被改变, 版本也会改变
+        // pep509
+        uint64_t ma_version_tag;
+    
+        //  一个dictkeys对象
+        PyDictKeysObject *ma_keys;
+    
+        // split模式下的value数组
+        PyObject **ma_values;
+    } PyDictObject;
+
+PyDictKeysObject最终对应于_dictkeysobject, 下面是主要的字段:
+
+cpython/Objects/dict-common.h
+
+.. code-block:: c
+
+    struct _dictkeysobject {
+
+        // hash表的大小, 大小必须是2的n次方
+        Py_ssize_t dk_size;
+    
+        // 搜索的函数, 解释在下面搜索函数部分
+        dict_lookup_func dk_lookup;
+    
+        // 可用槽位置, dk_size * 2/3
+        Py_ssize_t dk_usable;
+    
+        Py_ssize_t dk_nentries;
+    
+        // 下面是一个8字节的公用体
+        // 用来作为indices数组
+        union {
+            int8_t as_1[8];
+            int16_t as_2[4];
+            int32_t as_4[2];
+    #if SIZEOF_VOID_P > 4
+            int64_t as_8[1];
+    #endif
+        } dk_indices;
+    
+    };
+ 
+几个长度
+----------
+
+1. ma_used是dict的实际长度, 也就是元素的个数, 每次insert/del都是加减.
+
+2. dk_nentries是entries数组的当前插入的下标, 插入完成之后自增1. 当插入的时候会一直增加, 删除的时候不变.
+
+3. dk_usable = size_hash * 2/ 3 - maused.
+   
+4. 之所以dk_nentries是只增不减, 是因为这个值是保证key是插入顺序.
+
+
+关于dict的空间变化, 在下面的resize部分.
+
+
+新建字典
+===========
+
+使用{}新建字典的字节码是BUILD_MAP, 流程是先创建一个空字典, 然后一个个setitem
+
+.. code-block:: c
+
+    TARGET(BUILD_MAP) {
+        Py_ssize_t i;
+        // 初始化空字典
+        PyObject *map = _PyDict_NewPresized((Py_ssize_t)oparg);
+        if (map == NULL)
+            goto error;
+        // for循环setitem
+        for (i = oparg; i > 0; i--) {
+            int err;
+            PyObject *key = PEEK(2*i);
+            PyObject *value = PEEK(2*i - 1);
+            err = PyDict_SetItem(map, key, value);
+            if (err != 0) {
+                Py_DECREF(map);
+                goto error;
+            }
+        }
+
+_PyDict_NewPresized
+=====================
+
+.. code-block:: c
+
+    PyObject *
+    _PyDict_NewPresized(Py_ssize_t minused)
+    {
+        const Py_ssize_t max_presize = 128 * 1024;
+        Py_ssize_t newsize;
+        PyDictKeysObject *new_keys;
+    
+        // 计算dict的大小
+        // 只能预分配最大长度
+        if (minused > USABLE_FRACTION(max_presize)) {
+            newsize = max_presize;
+        }
+        else {
+            // 没有超过最大预分配长度, 则计算size
+            // 要满足newsize=2**n, 并且newsize*2/3 > minsize
+            Py_ssize_t minsize = ESTIMATE_SIZE(minused);
+            newsize = PyDict_MINSIZE;
+            while (newsize < minsize) {
+                newsize <<= 1;
+            }
+        }
+        assert(IS_POWER_OF_2(newsize));
+    
+        // 新建keys对象
+        new_keys = new_keys_object(newsize);
+        if (new_keys == NULL)
+            return NULL;
+        // 新建dict
+        return new_dict(new_keys, NULL);
+    }
+
+
+_PyDict_NewPresized会根据size, 新建一个keys对象, 然后调用new_dict去新建一个dict, 
+
+new_keys_object
+==================
+
+这个函数负责初始化keys和values
+
+.. code-block:: c
+
+    static PyDictKeysObject *new_keys_object(Py_ssize_t size)
+    {
+        PyDictKeysObject *dk;
+        Py_ssize_t es, usable;
+    
+        // 下面是校验长度和可用个数
+        assert(size >= PyDict_MINSIZE);
+        assert(IS_POWER_OF_2(size));
+    
+        usable = USABLE_FRACTION(size);
+        // 省略了代码
+    
+        // 小字典从free_list拿出来
+        if (size == PyDict_MINSIZE && numfreekeys > 0) {
+            dk = keys_free_list[--numfreekeys];
+        }
+        else {
+            // 大字典嘛, 分配一个
+            dk = PyObject_MALLOC(sizeof(PyDictKeysObject)
+                                 - Py_MEMBER_SIZE(PyDictKeysObject, dk_indices)
+                                 + es * size
+                                 + sizeof(PyDictKeyEntry) * usable);
+            if (dk == NULL) {
+                PyErr_NoMemory();
+                return NULL;
+            }
+        }
+        // 下面就是初始化了
+        DK_DEBUG_INCREF dk->dk_refcnt = 1;
+        dk->dk_size = size;
+        dk->dk_usable = usable;
+        dk->dk_lookup = lookdict_unicode_nodummy;
+        dk->dk_nentries = 0;
+        // 初始化hash表, 意思懂了, 但是如何映射的嘛, 没看懂
+        memset(&dk->dk_indices.as_1[0], 0xff, es * size);
+        PyDictKeyEntry *tmp = DK_ENTRIES(dk);
+        // 这里初始化PyDictKeyEntry的数组， 意思看懂了, 但是细节没看懂
+        // DK_ENTRIES这个宏有点难看懂
+        memset(DK_ENTRIES(dk), 0, sizeof(PyDictKeyEntry) * usable);
+        return dk;
+    }
+
+这个函数只是根据长度, 分配一个空的PyDictObject, 然后初始化look函数.
+
+1. 长度有两个, 一个hash表的长度, 也就是要保持2的n次方, 值是保存在dk_size里面, 但是其对应的hash表, 也就是indices变量,
+
+   只是一个8字节的固定长度的共用体而已, 如何映射, 没看懂(c语言比较渣), 但是按照上面的设计思路, 把indices当做一个
+
+   数组就好了.
+   
+2. 一个是PyDictKeyEntry数组的长度, 会预分配, 使用的是指针移动的方式去赋值, 长度为hash表长度的2/3.
+
+3. look函数默认初始化为lookdict_unicode_nodummy.
+
+
+new_dict
+==========
+
+这里只是把keys对象赋值到dict对象中而已
+
+.. code-block:: c
+
+    static PyObject *
+    new_dict(PyDictKeysObject *keys, PyObject **values)
+    {
+        PyDictObject *mp;
+        assert(keys != NULL);
+        if (numfree) {
+            // 从free_list中拿一个
+            mp = free_list[--numfree];
+            assert (mp != NULL);
+            assert (Py_TYPE(mp) == &PyDict_Type);
+            _Py_NewReference((PyObject *)mp);
+        }
+        else {
+            // 否则从内存中新分配一个dict
+            mp = PyObject_GC_New(PyDictObject, &PyDict_Type);
+            if (mp == NULL) {
+                DK_DECREF(keys);
+                free_values(values);
+                return NULL;
+            }
+        }
+        // 赋值传入的keys对象
+        mp->ma_keys = keys;
+        mp->ma_values = values;
+        mp->ma_used = 0;
+        mp->ma_version_tag = DICT_NEXT_VERSION();
+        assert(_PyDict_CheckConsistency(mp));
+        return (PyObject *)mp;
+    }
+
+lookdict
+============
+
+这个函数是一般性的搜索函数, 注意的是, **该只会返回一个空槽位, 是忽略dummy槽位的**
+
+
+.. code-block:: c
+
+    static Py_ssize_t
+    lookdict(PyDictObject *mp, PyObject *key,
+             Py_hash_t hash, PyObject ***value_addr, Py_ssize_t *hashpos)
+    {
+        size_t i, mask;
+        Py_ssize_t ix, freeslot;
+        int cmp;
+        PyDictKeysObject *dk;
+        PyDictKeyEntry *ep0, *ep;
+        PyObject *startkey;
+    
+    top:
+        // 拿到初始数据
+        dk = mp->ma_keys;
+        mask = DK_MASK(dk);
+        ep0 = DK_ENTRIES(dk);
+
+        // 拿到第一个hash表槽位
+        i = (size_t)hash & mask;
+    
+        // 拿到槽位中对应的下标
+        ix = dk_get_index(dk, i);
+
+        // 下标是空的, 那么返回
+        if (ix == DKIX_EMPTY) {
+            if (hashpos != NULL)
+                *hashpos = i;
+            *value_addr = NULL;
+            return DKIX_EMPTY;
+        }
+
+        // 如果是dummy的, 记住它, 然后继续下面
+        if (ix == DKIX_DUMMY) {
+            freeslot = i;
+        }
+        else {
+
+            // 如果不是空也不是dummy, 说明hash一样
+            ep = &ep0[ix];
+            assert(ep->me_key != NULL);
+
+            // 如果key一样, 说明是一个元素, 返回
+            if (ep->me_key == key) {
+                *value_addr = &ep->me_value;
+                if (hashpos != NULL)
+                    *hashpos = i;
+                return ix;
+            }
+            // 如果hash值一样, 则继续比较
+            if (ep->me_hash == hash) {
+                startkey = ep->me_key;
+                Py_INCREF(startkey);
+
+                // 调用对象比较函数
+                cmp = PyObject_RichCompareBool(startkey, key, Py_EQ);
+                Py_DECREF(startkey);
+
+                //下面比较起来小于0, 说明同一个hash不同的对象, 错误
+                if (cmp < 0) {
+                    *value_addr = NULL;
+                    return DKIX_ERROR;
+                }
+                // 比较值大于0, 说明是likely的, 返回
+                if (dk == mp->ma_keys && ep->me_key == startkey) {
+                    if (cmp > 0) {
+                        *value_addr = &ep->me_value;
+                        if (hashpos != NULL)
+                            *hashpos = i;
+                        return ix;
+                    }
+                }
+                else {
+                    /* The dict was mutated, restart */
+                    goto top;
+                }
+            }
+            freeslot = -1;
+        }
+    
+        // 上面找到的是dummy
+        // 下面继续开放地址法
+        for (size_t perturb = hash;;) {
+            perturb >>= PERTURB_SHIFT;
+            i = ((i << 2) + i + perturb + 1) & mask;
+            ix = dk_get_index(dk, i);
+
+            // 找到空槽位, 返回
+            if (ix == DKIX_EMPTY) {
+                if (hashpos != NULL) {
+                    *hashpos = (freeslot == -1) ? (Py_ssize_t)i : freeslot;
+                }
+                *value_addr = NULL;
+                return ix;
+            }
+
+            // 依然是dummy的, 继续
+            if (ix == DKIX_DUMMY) {
+                if (freeslot == -1)
+                    freeslot = i;
+                continue;
+            }
+
+            // 下面继续之前的比较
+            ep = &ep0[ix];
+            assert(ep->me_key != NULL);
+            if (ep->me_key == key) {
+                if (hashpos != NULL) {
+                    *hashpos = i;
+                }
+                *value_addr = &ep->me_value;
+                return ix;
+            }
+            if (ep->me_hash == hash) {
+                startkey = ep->me_key;
+                Py_INCREF(startkey);
+                cmp = PyObject_RichCompareBool(startkey, key, Py_EQ);
+                Py_DECREF(startkey);
+                if (cmp < 0) {
+                    *value_addr = NULL;
+                    return DKIX_ERROR;
+                }
+                if (dk == mp->ma_keys && ep->me_key == startkey) {
+                    if (cmp > 0) {
+                        if (hashpos != NULL) {
+                            *hashpos = i;
+                        }
+                        *value_addr = &ep->me_value;
+                        return ix;
+                    }
+                }
+                else {
+                    /* The dict was mutated, restart */
+                    goto top;
+                }
+            }
+        }
+        assert(0);          /* NOT REACHED */
+        return 0;
+    }
+
+所以, 搜索函数一定会返回empty或者error
+
+ 
+insertdict
+=============
+
+PyDict_SetItem将会调用insertdict去将key/value插入到keys对象中.
+
+每次向dict插入key/value的时候, 比如调用dict[key] = value, 调用该函数:
+
+
+.. code-block:: c
+
+    static int
+    insertdict(PyDictObject *mp, PyObject *key, Py_hash_t hash, PyObject *value)
+    {
+        PyDictKeyEntry *ep, *ep0;
+        Py_ssize_t hashpos, ix;
+    
+        Py_INCREF(key);
+        Py_INCREF(value);
+
+        // 这里判断split模式的dict插入一个非字符串的key
+        if (mp->ma_values != NULL && !PyUnicode_CheckExact(key)) {
+            if (insertion_resize(mp) < 0)
+                goto Fail;
+        }
+
+        // 调用look函数
+        // 一定会返回一个empty或者error
+        ix = mp->ma_keys->dk_lookup(mp, key, hash, &value_addr, &hashpos);
+        if (ix == DKIX_ERROR)
+            goto Fail;
+    
+        // 这里的条件是如果是split模式的dict, 并且
+        // mp-ma_used和mp->ma_keys不相等的时候需要resize
+        // 两者不相等的时候是有可能大字典变为小字典, 导致不相等的
+        if (_PyDict_HasSplitTable(mp) &&
+           ((ix >= 0 && *value_addr == NULL && mp->ma_used != ix) ||
+            (ix == DKIX_EMPTY && mp->ma_used != mp->ma_keys->dk_nentries))) {
+           if (insertion_resize(mp) < 0)
+               goto Fail;
+           find_empty_slot(mp, key, hash, &value_addr, &hashpos);
+           ix = DKIX_EMPTY;
+        }
+    
+        // 这个if是如果搜索出来的槽位可用, 那么插入
+        if (ix == DKIX_EMPTY) {
+            // 但是没有可用个数了
+            if (mp->ma_keys->dk_usable <= 0) {
+                // 所以需要resize
+                if (insertion_resize(mp) < 0)
+                    goto Fail;
+                find_empty_slot(mp, key, hash, &value_addr, &hashpos);
+            }
+            // ep0是PyDictKeyEntry的数组
+            ep0 = DK_ENTRIES(mp->ma_keys);
+
+            // 插入key数组
+            ep = &ep0[mp->ma_keys->dk_nentries];
+
+            // 设置hash对应位置为key数组下标
+            dk_set_index(mp->ma_keys, hashpos, mp->ma_keys->dk_nentries);
+
+            // 更新value对应的PyDictKeyEntry对象
+            ep->me_key = key;
+            ep->me_hash = hash;
+            // 如果是split模式, value应该赋值到values数组
+            if (mp->ma_values) {
+                assert (mp->ma_values[mp->ma_keys->dk_nentries] == NULL);
+                mp->ma_values[mp->ma_keys->dk_nentries] = value;
+            }
+            else {
+                ep->me_value = value;
+            }
+            // 各种更新PyDictObject对象
+            mp->ma_used++;
+            mp->ma_version_tag = DICT_NEXT_VERSION();
+            mp->ma_keys->dk_usable--;
+            mp->ma_keys->dk_nentries++;
+            assert(mp->ma_keys->dk_usable >= 0);
+            assert(_PyDict_CheckConsistency(mp));
+            return 0;
+        }
+
+        // 下面有些代码, 没太看懂, 省略
+    
+    }
+
+插入key的时候, dk_entries总是下一个连续下标, 所以:
+
+.. code-block:: c
+
+    ep = &ep0[mp->ma_keys->dk_nentries]
+    // 下面是ep的赋值
+  
+就是key数组的append操作, 并且每次插入都是append only.
+
+
+resize过程
+=============
+
+1. resize只会在插入的时候发生
+
+2. 一旦dict的元素个数大于hash表的2/3的时候, 需要重新分配一个更大的key数组.
+
+3. resize的要求是新长度至少大于GROWTH_RATE: 2*used + size / 2
+
+4. resize只会返回的PyDictKeysObject一定是一个combined的.
+
+.. code-block:: c 
+
+    static int
+    insertion_resize(PyDictObject *mp)
+    {
+        // 插入的时候设置最小长度
+        return dictresize(mp, GROWTH_RATE(mp));
+    }
+
+
+    static int
+    dictresize(PyDictObject *mp, Py_ssize_t minsize)
+    {
+        // 这里设置新长度, 新长度的是2**n次方, 并且大于最小长度
+        /* Find the smallest table size > minused. */
+        for (newsize = PyDict_MINSIZE;
+             newsize < minsize && newsize > 0;
+             newsize <<= 1)
+            ;
+
+        // 这里赋值一份老的keys和values
+        oldkeys = mp->ma_keys;
+        oldvalues = mp->ma_values;
+        /* Allocate a new table. */
+        // 分配新的keys和values
+        mp->ma_keys = new_keys_object(newsize);
+        if (mp->ma_keys == NULL) {
+            mp->ma_keys = oldkeys;
+            return -1;
+        }
+        // New table must be large enough.
+        // 再次校验下长度, 并且顺手设置下look函数
+        assert(mp->ma_keys->dk_usable >= mp->ma_used);
+        if (oldkeys->dk_lookup == lookdict)
+            mp->ma_keys->dk_lookup = lookdict;
+        // resize的是, 返回的永远是一个combined模式的dict
+        // 所以这里的mp->ma_values设置为NULL
+        mp->ma_values = NULL;
+        ep0 = DK_ENTRIES(oldkeys);
+        // 这里如果老values有值, 表示是一个split表
+        // 但是为了方便, 把老的values也设置到老的keys里面
+        // 这样接下来复制两个数组的循环就只需要考虑老keys就好了
+        if (oldvalues != NULL) {
+            for (i = 0; i < oldkeys->dk_nentries; i++) {
+                if (oldvalues[i] != NULL) {
+                    Py_INCREF(ep0[i].me_key);
+                    ep0[i].me_value = oldvalues[i];
+                }
+            }
+        }
+        /* Main loop */
+        // 把老keys的数据复制到新的keys中
+        // 遍历keys数组
+        for (i = 0; i < oldkeys->dk_nentries; i++) {
+            PyDictKeyEntry *ep = &ep0[i];
+            // 只复制非NULL数据
+            if (ep->me_value != NULL) {
+                insertdict_clean(mp, ep->me_key, ep->me_hash, ep->me_value);
+            }
+        }
+        // 更新已用的个数, 比如之前是8, 用了5个之后触发resize
+        // 新表长度是16, 那么可用个数是10, 然后我们复制5个数据进去之后
+        // 明显可用个数就要减5了
+        mp->ma_keys->dk_usable -= mp->ma_used;
+        if (oldvalues != NULL) {
+            /* NULL out me_value slot in oldkeys, in case it was shared */
+            for (i = 0; i < oldkeys->dk_nentries; i++)
+                ep0[i].me_value = NULL;
+            DK_DECREF(oldkeys);
+            if (oldvalues != empty_values) {
+                free_values(oldvalues);
+            }
+        }
+        else {
+            assert(oldkeys->dk_lookup != lookdict_split);
+            assert(oldkeys->dk_refcnt == 1);
+            DK_DEBUG_DECREF PyObject_FREE(oldkeys);
+        }
+        return 0;
+    }
+
+insertdict_clean
+===================
+
+这个函数是resize的时候, 设置hash表下标和更新dk_nentries的.
+
+.. code-block:: c
+
+    static void
+    insertdict_clean(PyDictObject *mp, PyObject *key, Py_hash_t hash,
+                     PyObject *value)
+    {
+        size_t i;
+        PyDictKeysObject *k = mp->ma_keys;
+        size_t mask = (size_t)DK_SIZE(k)-1;
+        PyDictKeyEntry *ep0 = DK_ENTRIES(mp->ma_keys);
+        PyDictKeyEntry *ep;
+    
+        assert(k->dk_lookup != NULL);
+        assert(value != NULL);
+        assert(key != NULL);
+        assert(PyUnicode_CheckExact(key) || k->dk_lookup == lookdict);
+
+        // i是hash表的下标, 这里&mask就是模运算了
+        i = hash & mask;
+        // 看看需不需要探测
+        for (size_t perturb = hash; dk_get_index(k, i) != DKIX_EMPTY;) {
+            perturb >>= PERTURB_SHIFT;
+            i = mask & ((i << 2) + i + perturb + 1);
+        }
+
+        // append到keys数组
+        ep = &ep0[k->dk_nentries];
+        assert(ep->me_value == NULL);
+        dk_set_index(k, i, k->dk_nentries);
+
+        // 插入下标自增1
+        k->dk_nentries++;
+        ep->me_key = key;
+        ep->me_hash = hash;
+        ep->me_value = value;
+    }
+
+
+所以, insert的时候, 对于keys数组和hash表:
+
+1. ma_used自增1
+
+2. dk_usable减少1, dk_nentries自增1
+
+pop
+============
+
+.. code-block:: c
+
+    /* Internal version of dict.pop(). */
+    PyObject *
+    _PyDict_Pop_KnownHash(PyObject *dict, PyObject *key, Py_hash_t hash, PyObject *deflt)
+    {
+        mp = (PyDictObject *)dict;
+    
+        // 这里如果dict是空的, 那么报错
+        if (mp->ma_used == 0) {
+            if (deflt) {
+                Py_INCREF(deflt);
+                return deflt;
+            }
+            _PyErr_SetKeyError(key);
+            return NULL;
+        }
+        // 查询要删除的key的hash下标, hash表下标会赋值到hashpos
+        ix = (mp->ma_keys->dk_lookup)(mp, key, hash, &value_addr, &hashpos);
+        if (ix == DKIX_ERROR)
+            return NULL;
+        // key不存在, 报错
+        if (ix == DKIX_EMPTY || *value_addr == NULL) {
+            if (deflt) {
+                Py_INCREF(deflt);
+                return deflt;
+            }
+            _PyErr_SetKeyError(key);
+            return NULL;
+        }
+    
+        // Split table doesn't allow deletion.  Combine it.
+        // split模式的字典不能删除, resize成一个新的combined的字典
+        // 这里会触发resize, 返回一个combined字典
+        if (_PyDict_HasSplitTable(mp)) {
+            if (dictresize(mp, DK_SIZE(mp->ma_keys))) {
+                return NULL;
+            }
+            ix = (mp->ma_keys->dk_lookup)(mp, key, hash, &value_addr, &hashpos);
+            assert(ix >= 0);
+        }
+        // 下面都是一些置空和减少操作
+
+        old_value = *value_addr;
+        assert(old_value != NULL);
+        *value_addr = NULL;
+
+        // ma_used自减1
+        mp->ma_used--;
+        mp->ma_version_tag = DICT_NEXT_VERSION();
+
+        // 设置hash表对应槽位为dummy
+        dk_set_index(mp->ma_keys, hashpos, DKIX_DUMMY);
+
+        // 拿到ep对象
+        ep = &DK_ENTRIES(mp->ma_keys)[ix];
+        // 这个是设置look函数的
+        ENSURE_ALLOWS_DELETIONS(mp);
+
+        old_key = ep->me_key;
+        // 也就是key数组的value设NULL, 表示删除
+        ep->me_key = NULL;
+        Py_DECREF(old_key);
+
+        assert(_PyDict_CheckConsistency(mp));
+        return old_value;
+    
+    }
+
+删除操作
+===========
+
+调用del删除key的时候
+
+.. code-block:: c
+
+    int
+    _PyDict_DelItem_KnownHash(PyObject *op, PyObject *key, Py_hash_t hash)
+    {
+        mp = (PyDictObject *)op;
+        // 查询
+        ix = (mp->ma_keys->dk_lookup)(mp, key, hash, &value_addr, &hashpos);
+        if (ix == DKIX_ERROR)
+            return -1;
+        // key不存在, 报错
+        if (ix == DKIX_EMPTY || *value_addr == NULL) {
+            _PyErr_SetKeyError(key);
+            return -1;
+        }
+        assert(dk_get_index(mp->ma_keys, hashpos) == ix);
+    
+        // Split table doesn't allow deletion.  Combine it.
+        // 跟pop一样, split变成combined
+        if (_PyDict_HasSplitTable(mp)) {
+            if (dictresize(mp, DK_SIZE(mp->ma_keys))) {
+                return -1;
+            }
+            ix = (mp->ma_keys->dk_lookup)(mp, key, hash, &value_addr, &hashpos);
+            assert(ix >= 0);
+        }
+        // 里面都是一些置空和减少的操作
+        return delitem_common(mp, hashpos, ix, value_addr);
+    }
+   
+delitem_common
+===============
+
+这里是del操作的时候的置空操作
+
+.. code-block:: c
+
+    static int
+    delitem_common(PyDictObject *mp, Py_ssize_t hashpos, Py_ssize_t ix,
+                   PyObject **value_addr)
+    {
+        PyObject *old_key, *old_value;
+        PyDictKeyEntry *ep;
+    
+        old_value = *value_addr;
+        assert(old_value != NULL);
+        *value_addr = NULL;
+
+        // ma_used自减1
+        mp->ma_used--;
+        mp->ma_version_tag = DICT_NEXT_VERSION();
+        ep = &DK_ENTRIES(mp->ma_keys)[ix];
+
+        // 设置dummy
+        dk_set_index(mp->ma_keys, hashpos, DKIX_DUMMY);
+        ENSURE_ALLOWS_DELETIONS(mp);
+        old_key = ep->me_key;
+
+        // 设置key数组槽位为NULL表示删除
+        ep->me_key = NULL;
+        Py_DECREF(old_key);
+        Py_DECREF(old_value);
+    
+        assert(_PyDict_CheckConsistency(mp));
+        return 0;
+    }
+
+
+删除操作
+=============
+
+pop和del操作对key数组有同样的操作:
+
+
+1. ma_used自减1, 然后dk_nentries不变, dk_usable不变
+
+2. 设置hash表槽位为dummy
+
+3. 设置keys数组对应槽位为NULL, 表示删除
+
 

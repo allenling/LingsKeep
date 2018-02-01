@@ -9,11 +9,13 @@ set
 
 4. 如果插入一个dummy的槽位, 那么不需要扩容, 而插入一个空槽位, 则需要考虑是否扩容
 
-5. 如果dummy和active的总数大于hash表的2/3, 那么resize.
+5. 如果dummy和used的总数, 也就是fill的值, 大于hash表的2/3, 那么resize. resize思路和dict不太一样.
 
-6. 减少元素并不会缩减hash表. 这个和dict一样, 虽然dict的resize目标是key数组.
+6. resize之后, 如果原来的fill包含了dummy的个数, 那么新的set的fill会变小. 也就是新的set只会包含used的元素.
 
-7. pop操作是按hash顺序找到第一个可用的key, 然后弹出.
+7. 删除元素并不会缩减hash表. 这个和dict一样, 并且dict的resize目标是key数组.
+
+8. pop操作是按hash顺序找到第一个可用的key, 然后弹出.
 
 
 实现思路
@@ -52,7 +54,49 @@ set
 2. 解决冲突是先线性探测n个槽位, 然后再使用开放地址法
 
 
+resize流程
+===============
+
+.. code-block:: python
+
+    '''
+    
+    x = {1, 2, 3, 4, 5, 6}, 此时fill = used = 6, hash_size = 8
+    
+    1. 然后x.add(7)
+    
+    由于fill = 7 > 2/3 * 8, 所以扩容,要求 new_hash_size > 12 (used * 2), 所以new_hash_size = 16, new_fill = used = 7
+    
+    2. 然后一直add, 有x={1, 2, 3, 4, 5, 6, 7, 8, 9, 10}, x不会扩容, fill = used = 10
+    
+    3. 然后x.pop(), pop出1, 此时used = 9(used-=1), fill=10(不变)
+
+    x={2, 3, 4, 5, 6, 7, 8, 9, 10}
+    
+    4. 继续pop, pop出2, used = 8, fill = 10
+    
+    x={3, 4, 5, 6, 7, 8, 9, 10}
+
+    5. 然后我们add(1), fill=10(不变), used = 9(used += 1)
+
+    x={1, 3, 4, 5, 6, 7, 8, 9, 10}
+    
+    6. 然后x.add(11)
+       
+    此时fill = 11 > 2/3 * 16, 所以扩容.
+    
+    new_size > 18(used * 2), 所以new_size = 32
+    
+    new_fill = old_used = 9, new_used = old_used = 9
+    
+    '''
+
+
+跟dict不太一样, dict不会占用dummy的槽位的.
+
+
 ----
+
 
 
 PySetObject
@@ -303,17 +347,17 @@ set_add_entry
            i = (i * 5 + 1 + perturb) & mask;
 
            entry = &so->table[i];
-           // 一个空槽位
+           // 一个可用槽位
            if (entry->key == NULL)
                goto found_unused_or_dummy;
 
-        // 获得可用的处理
+        // 获得可用槽位置
         found_unused_or_dummy:
-          // freeslot是空, 说明是一个dummy的
+          // freeslot是空, 说明是一个空槽位
           if (freeslot == NULL)
               goto found_unused;
 
-          // 插入已经删除过的位置的话, 不需要扩容
+          // 插入已经删除过的, dummy, 位置的话, 不需要扩容
           so->used++;
           freeslot->key = key;
           freeslot->hash = hash;
@@ -328,12 +372,15 @@ set_add_entry
           // 这个时候的插入需要考虑扩容
           if ((size_t)so->fill*3 < mask*2)
               return 0;
+          // 已用的和dummy的总大小大于hash的2/3, 扩容
           return set_table_resize(so, so->used>50000 ? so->used*2 : so->used*4);
     }
 
 
 
-1. freeslot是一个dummy的槽位, 这样插入的时候不需要resize, 所以分unused和dummy两种情况
+1. freeslot是一个dummy的槽位, 判断条件是该位置的entry.hash == -1. 这样插入的时候不需要resize, 所以分unused和dummy两种情况
+
+2. 扩容的时候, 如果已用槽位大于50000, 那么扩容的时候至少要比used的两部大, 否则是4倍大. 也就是小于50000的set, 扩容会很快.
 
 
 pop
@@ -378,7 +425,120 @@ pop只是把槽位设置为dummy, 然后并不缩减hash大小
         return key;
     }
 
+1. pop的时候不去resize
+
+2. pop的时候不会减少fill, 而是只减少used
+
+resize
+=============
 
 
+insert的时候传入的minused可能是used的两倍(used大于50000), 或者used的四倍(used小于50000).
 
+
+.. code-block:: c
+
+    static int
+    set_table_resize(PySetObject *so, Py_ssize_t minused)
+    {
+        Py_ssize_t newsize;
+        setentry *oldtable, *newtable, *entry;
+        Py_ssize_t oldfill = so->fill;
+        Py_ssize_t oldused = so->used;
+        Py_ssize_t oldmask = so->mask;
+        size_t newmask;
+        int is_oldtable_malloced;
+        setentry small_copy[PySet_MINSIZE];
+    
+        assert(minused >= 0);
+    
+        /* Find the smallest table size > minused. */
+        /* XXX speed-up with intrinsics */
+
+        // 最小大小不断乘以2, 得到新大小
+        // 新大小一定要大于最小大小, 不算dummy的
+        for (newsize = PySet_MINSIZE;
+             newsize <= minused && newsize > 0;
+             newsize <<= 1)
+            ;
+        if (newsize <= 0) {
+            PyErr_NoMemory();
+            return -1;
+        }
+    
+        /* Get space for a new table. */
+
+        oldtable = so->table;
+        assert(oldtable != NULL);
+        is_oldtable_malloced = oldtable != so->smalltable;
+    
+        // 下面是直接得到最小hash表
+        if (newsize == PySet_MINSIZE) {
+            /* A large table is shrinking, or we can't get any smaller. */
+            newtable = so->smalltable;
+            if (newtable == oldtable) {
+                if (so->fill == so->used) {
+                    /* No dummies, so no point doing anything. */
+                    return 0;
+                }
+                /* We're not going to resize it, but rebuild the
+                   table anyway to purge old dummy entries.
+                   Subtle:  This is *necessary* if fill==size,
+                   as set_lookkey needs at least one virgin slot to
+                   terminate failing searches.  If fill < size, it's
+                   merely desirable, as dummies slow searches. */
+                assert(so->fill > so->used);
+                memcpy(small_copy, oldtable, sizeof(small_copy));
+                oldtable = small_copy;
+            }
+        }
+        else {
+            // 否则分配一个新大小的hash表
+            newtable = PyMem_NEW(setentry, newsize);
+            if (newtable == NULL) {
+                PyErr_NoMemory();
+                return -1;
+            }
+        }
+    
+        /* Make the set empty, using the new table. */
+        assert(newtable != oldtable);
+        // hash表初始化空
+        memset(newtable, 0, sizeof(setentry) * newsize);
+
+        // 这里fill会赋值为used, 所以
+        // 新大小的fill会比原来的小
+        so->fill = oldused;
+        so->used = oldused;
+        so->mask = newsize - 1;
+        so->table = newtable;
+    
+        /* Copy the data over; this is refcount-neutral for active entries;
+           dummy entries aren't copied over, of course */
+        // 下面是根据是否有dummy来考虑是否加入dummy的判断
+        // if和else的代码差不多, 只是else多了一个dummy判断
+        newmask = (size_t)so->mask;
+        if (oldfill == oldused) {
+            for (entry = oldtable; entry <= oldtable + oldmask; entry++) {
+                if (entry->key != NULL) {
+                    set_insert_clean(newtable, newmask, entry->key, entry->hash);
+                }
+            }
+        } else {
+            for (entry = oldtable; entry <= oldtable + oldmask; entry++) {
+                if (entry->key != NULL && entry->key != dummy) {
+                    set_insert_clean(newtable, newmask, entry->key, entry->hash);
+                }
+            }
+        }
+    
+        if (is_oldtable_malloced)
+            PyMem_DEL(oldtable);
+        return 0;
+    }
+
+
+1. new_size满足2**n, 并且2**n一定要大于传入的minused大
+
+2. fill和原来的fill相比, 可能变小, 因为原来的fill包含了dummy和used, 新的fill值包含used
 

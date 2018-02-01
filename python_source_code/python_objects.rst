@@ -47,6 +47,41 @@ PyObject_HEAD
 
 这个结构只包含一个类型为PyObject, 名字为ob_base的字段, 也就是说, 每一个对象都是基础自PyObject, PyObject是一个最基础的类.
 
+PyObject_VAR_HEAD
+======================
+
+有些对象包含的是PyObject_VAR_HEAD而不是PyObject_HEAD, 但是这个接头只是PyObject的一些拓展而已, 作用是初始化的时候, 
+
+会根据ob_size的长度参数是初始化对象.
+
+PyObject_VAR_HEAD的定义是:
+
+.. code-block:: c
+
+    #define PyObject_VAR_HEAD PyVarObject ob_base;
+
+而PyVarObject为:
+
+
+.. code-block:: c
+
+    typedef struct {
+        PyObject ob_base;
+        Py_ssize_t ob_size; /* Number of items in variable part */
+    } PyVarObject;
+
+所以说, PyVarObject是PyObject和一个表示对象长度的ob_size组合, 也就是说, PyVarObject也是一个PyObject, 只是它表示
+
+该对象有一个长度参数. 根据 `文档 <https://docs.python.org/3/c-api/structures.html#c.PyVarObject>`_ 中的说明, 该头部表示该对象是一个
+
+带有长度的对象. 这个长度会不会变化, 或者这么说, 是否是可变对象, 恩~~看起来都不一定, 因为tuple和list的定义都是包含
+
+PyVarObject, 但是tuple是一个不可变对象, 而list是一个可变对象.
+
+**所以我觉得如果一个对象带有这个头, 只是说明改对象有个长度参数, 初始化的时候会根据该长度初始化空间, 但是也就仅此而已, 跟其他PyObject没说明不同**
+
+
+
 
 PyObject
 ============
@@ -292,37 +327,5 @@ c代码中强制转换
 
 **整个过程都是忽略对象的具体类型, 而是去找对应的接口函数, oop嘛**
 
-
-
-PyObject_VAR_HEAD
-======================
-
-有些对象包含的是PyObject_VAR_HEAD而不是PyObject_HEAD, 但是这个接头只是PyObject的一些拓展而已.
-
-PyObject_VAR_HEAD的定义是:
-
-.. code-block:: c
-
-    #define PyObject_VAR_HEAD PyVarObject ob_base;
-
-而PyVarObject为:
-
-
-.. code-block:: c
-
-    typedef struct {
-        PyObject ob_base;
-        Py_ssize_t ob_size; /* Number of items in variable part */
-    } PyVarObject;
-
-所以说, PyVarObject是PyObject和一个表示对象长度的ob_size组合, 也就是说, PyVarObject也是一个PyObject, 只是它表示
-
-该对象有一个长度参数. 根据 `文档 <https://docs.python.org/3/c-api/structures.html#c.PyVarObject>`_ 中的说明, 该头部表示该对象是一个
-
-带有长度的对象. 这个长度会不会变化, 或者这么说, 是否是可变对象, 恩~~看起来都不一定, 因为tuple和list的定义都是包含
-
-PyVarObject, 但是tuple是一个不可变对象, 而list是一个可变对象.
-
-**所以我觉得如果一个对象带有这个头, 只是说明改对象有个长度参数, 初始化的时候会根据该长度初始化空间, 但是也就仅此而已, 跟其他PyObject没说明不同**
 
 

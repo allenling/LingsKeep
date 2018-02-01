@@ -1,11 +1,11 @@
 Tuple
 =======
 
-1. 元祖创建的时候是根据长度固定分配大小
+1. 元组创建的时候是根据长度固定分配大小
 
 2. 使用数组来存储元素(地址)
 
-2. 元祖不可修改是通过在type中不定义set_item方法来实现的.
+3. 元组不可修改是通过在type中不定义set_item方法来实现的.
 
 
 ----
@@ -20,11 +20,12 @@ PyTupleObject
         PyObject *ob_item[1];
     } PyTupleObject;
 
-PyObject_VAR_HEAD这个头包含了PyObject和一个长度信息, PyObject保存了type信息, 这里也就是PyTuple_Type这个结构体.
+PyObject_VAR_HEAD这个头包含了PyObject和一个长度信息ob_size, PyObject保存了type信息, type指向PyTuple_Type这个结构体.
 
-然后ob_item是一个指针数组, 关于指针数组已经其越界问题, 参考: C_指针小结.rst.
+然后ob_item是一个指针数组, ob_item就是包含了对象的地址了.
 
-ob_item就是包含了对象的地址了.
+ob_item看起来是只是一个长度为1的数组, 但是其实是可以越界的, 关于指针数组已经其越界问题, 参考: `C_指针小结.rst <https://github.com/allenling/LingsKeep/blob/master/C_%E6%8C%87%E9%92%88%E5%B0%8F%E7%BB%93.rst>`_.
+
 
 初始化
 =============

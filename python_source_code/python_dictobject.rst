@@ -36,8 +36,6 @@ resize流程
 
 3. GROWTH_RATE是每次需要扩容的时候, 扩容的最小大小, 值是: used * 2 + size / 2 
 
-4. dk_nentries是当前插入的时候, 插入到key数组的位置.
-
 .. code-block:: python
 
     '''
@@ -83,13 +81,24 @@ resize流程
 
     xa = [NULL, NULL, 3, 4, 5, 6, 7, 8, 9, 10, NULL, ...], 长度16
     
-    5. 然后x[1] = 1, 第一个槽位是1, 发现是dummy, 然后继续, 直到找到一个empty的槽位, 二次探测最后得到1->6->15, 15是空槽位.
-       
-    usable是0, 需要扩容, 最小大小是28, 所以new_size = 32, dk_nentries=0, 顺序遍历xa, 只复制不为NULL的key, 然后放到新数组中, dk_entries初始为0, 然后dk_entries+=1
+    5. 然后x[1] = 1
 
-    xh = [-1, -1, -1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, -1, ...], 长度是32
+    5.1. 先第一次搜索, 第一个槽位是1, 发现是dummy, 然后继续, 直到找到一个empty的槽位, 二次探测最后得到1->6->15, 15是空槽位.
 
-    xa = [3, 4, 5, 6, 7, 8, 9, 10, NULL, NULL, ...], 长度是32
+    5.2. 插入的时候, 发现usable是0, 需要扩容, 最小大小是28, 所以new_size = 32. 
+    
+    5.3. 新的xa数组需要把老key复制到新的key数组, 过程是顺序遍历xa, 只复制不为NULL的key, 然后放到新数组中, dk_entries初始为0, 遍历的时候dk_entries+=1
+
+    new_xh = [-1, -1, -1, 0, 1, 2, 3, 4, 5, 6, 7, -1, -1, -1, ...], 长度是32
+
+    new_xa = [3, 4, 5, 6, 7, 8, 9, 10, NULL, NULL, ...], 长度是32
+
+
+    5.4 重新从new_xh和new_xa中找到1的可用位置, 明显, 第一个槽位1就是可用的, 所以把1插入到1的位置:
+
+    new_xh = [-1, 8, -1, 0, 1, 2, 3, 4, 5, 6, 7, -1, ...], 长度是32
+
+    new_xa = [3, 4, 5, 6, 7, 8, 9, 10, 1, NULL, ...], 长度是32
     
     '''
 
@@ -1099,6 +1108,8 @@ PyDict_SetItem将会调用insertdict去将key/value插入到keys对象中.
                 // 所以需要resize
                 if (insertion_resize(mp) < 0)
                     goto Fail;
+
+                // 新hash的新下标, hashpos会变
                 find_empty_slot(mp, key, hash, &value_addr, &hashpos);
             }
             // ep0是PyDictKeyEntry的数组
@@ -1135,6 +1146,9 @@ PyDict_SetItem将会调用insertdict去将key/value插入到keys对象中.
     
     }
 
+append only
+-------------------
+
 插入key的时候, dk_entries总是下一个连续下标, 所以:
 
 .. code-block:: c
@@ -1143,6 +1157,30 @@ PyDict_SetItem将会调用insertdict去将key/value插入到keys对象中.
     // 下面是ep的赋值
   
 就是key数组的append操作, 并且每次插入都是append only.
+
+
+resize之后重新获得hash
+------------------------
+
+第一次拿到hashpos:
+
+.. code-block:: c
+
+    ix = mp->ma_keys->dk_lookup(mp, key, hash, &value_addr, &hashpos);
+
+然后发现resize, 那么需要重新求hashpos
+
+.. code-block:: c
+
+    if (mp->ma_keys->dk_usable <= 0) {
+        // 所以需要resize
+        if (insertion_resize(mp) < 0)
+            goto Fail;
+    
+        // 新hash的新下标, hashpos会变
+        find_empty_slot(mp, key, hash, &value_addr, &hashpos);
+    }
+
 
 
 resize过程

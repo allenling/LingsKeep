@@ -247,7 +247,7 @@ c代码中强制转换
 
 也就说, 一个PyDictObject的起始地址就是其PyObject的其实地址, 所以两个指针其实指向的是同一个地址, 那么自然可以通过
 
-强制转换得到. 关于C语言指针, 参考: C_指针小结.rst
+强制转换得到. 关于C语言指针, 参考: `C_指针小结.rst <https://github.com/allenling/LingsKeep/blob/master/C_%E6%8C%87%E9%92%88%E5%B0%8F%E7%BB%93.rst>`_
 
 
 一些代码结构

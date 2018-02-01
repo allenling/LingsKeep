@@ -8,16 +8,19 @@ gil结构
 
 cpython/Python/ceval_gil.h
 
-gil只是一个真假值, 只是其访问是受到gil_mutex的保护, 已经使用gil_cond来通知其他线程拿锁.
+1. gil只是一个真假值, 只是其访问是受到gil_mutex的保护, 已经使用gil_cond来通知其他线程拿锁.
 
-强制切换模式, FORCE_SWITCHING, 的意思是释放gil之后, 必须等待其他某个被调度, 并且拿到锁的线程开始执行， 方法是释放
+2. 强制切换模式, FORCE_SWITCHING, 的意思是释放gil之后, 必须等待其他某个被调度, 并且拿到锁的线程开始执行.
 
-gile的线程在switch_cond这个竞态上等待. 这样可以保证释放了gil的线程不会马上又拿到, 其他线程一定会执行.
+3. 方法是释放gile的线程在switch_cond这个竞态上等待. 这样可以保证释放了gil的线程不会马上又拿到, 其他线程一定会执行.
 
-FORCE_SWITCHING模式可以缓解convey effect? 看起来可以
+4. gil的interval是其他线程等待gil释放的时间, 获得gil的线程每执行一个opcode都会去检查是否有drop request
+
+**FORCE_SWITCHING模式可以缓解convey effect? 看起来可以**
 
 
 .. code-block:: c
+
    /*
    - The GIL is just a boolean variable (gil_locked) whose access is protected
      by a mutex (gil_mutex), and whose changes are signalled by a condition
@@ -46,13 +49,13 @@ FORCE_SWITCHING模式可以缓解convey effect? 看起来可以
     static MUTEX_T switch_mutex;
     #endif
 
-gil_locked就是所谓的gil了, -1表示未初始化.
+1. gil_locked就是所谓的gil了, -1表示未初始化.
 
-其中每一组一个互斥锁和一个竞态(Condition), 竞态是保证多个线程可以wait, 而互斥锁是保护gil一次只能被一个线程所操作的作用,
+2. 其中每一组一个互斥锁和一个竞态(Condition), 竞态是保证多个线程可以wait, 而互斥锁是保护gil一次只能被一个线程所操作的作用,
 
-可以看成(就是)threading.Condition结构, 只是Condition中的lock被分出来了
+3. 可以看成(就是)threading.Condition结构, 只是Condition中的lock被分出来了
 
-**注意的是: 持有gil的线程最少唤醒一个等待gil的线程.**
+4. **注意的是: 持有gil的线程最少唤醒一个等待gil的线程.**
 
 
 其他辅助结构
@@ -69,11 +72,11 @@ gil_locked就是所谓的gil了, -1表示未初始化.
     /* Request for dropping the GIL */
     static _Py_atomic_int gil_drop_request = {0};
 
-2. gil_switch_number: gil总切换次数, 如果switch_number有变化, 那么就是等待gil释放期间, 有释放gil的请求, 避免发送多个drop_gil_request.
+1. gil_switch_number: gil总切换次数, 如果switch_number有变化, 那么就是等待gil释放期间, 有释放gil的请求, 避免发送多个drop_gil_request.
 
-3. gil_last_holder  : 最后一个拿到gil的线程.
+2. gil_last_holder  : 最后一个拿到gil的线程.
 
-4. gil_drop_request : 是否有其他线程发起了drop请求
+<F3>. gil_drop_request : 是否有其他线程发起了drop请求
 
 create_gil
 ============
@@ -194,13 +197,13 @@ pthread_cond_timedwait
 
 ---参考man手册
 
-pthread_cond_timedwait这个系统调用的行为则是和Python代码里面的Condition一样, 解锁mutex, 然后等待在waiter锁上
+1. pthread_cond_timedwait这个系统调用的行为则是和Python代码里面的Condition一样, 解锁mutex, 然后等待在waiter锁上
 
-pthread_cond_timedwait会被pthread_cond_signal唤醒, 但是 **pthread_cond_signal不能保证只唤醒一个线程(特别是多核情况下)**, 所以
+2. pthread_cond_timedwait会被pthread_cond_signal唤醒, 但是 **pthread_cond_signal不能保证只唤醒一个线程(特别是多核情况下)**, 所以
 
-这里用while和一个_Py_atomic_load_relaxed **原子操作** 保证了多个线程被唤醒的时候, 仍然能保证只要一个线程拿到gil锁(设置gil真假值为真), 并且其他
+3. 这里用while和一个_Py_atomic_load_relaxed **原子操作** 保证了多个线程被唤醒的时候, 仍然能保证只要一个线程拿到gil锁(设置gil真假值为真), 并且其他
 
-被唤醒的线程还可以继续wait
+   被唤醒的线程还可以继续wait
 
 drop_gil
 ============
@@ -233,7 +236,7 @@ COND_SIGNAL这个宏则是调用pthread_cond_signal这个系统调用来notify_a
         // 释放下gil_mutx
         MUTEX_UNLOCK(gil_mutex);
     
-    // FORCE_SWITCHING模式记得一定要等待switch_cond的通知
+    // FORCE_SWITCHING模式记得一定要等待switch_cond的通知!!!
     #ifdef FORCE_SWITCHING
         if (_Py_atomic_load_relaxed(&gil_drop_request) && tstate != NULL) {
             MUTEX_LOCK(switch_mutex);
@@ -280,7 +283,7 @@ The resulting applications are thus more robust. Therefore, IEEE Std 1003.1-2001
 drop的顺序
 -----------
 
-drop_gil的时候, cond通知和mutex的释放的顺序是先发送cond通知, 再释放mutex, 或者可以先释放mutex, 在发送cond通知:
+drop_gil的时候, cond通知和mutex的释放的顺序是先发送cond通知, 再释放mutex, 或许也可以先释放mutex, 在发送cond通知:
 
 http://blog.csdn.net/yeyuangen/article/details/37593533
 
@@ -288,15 +291,15 @@ http://blog.csdn.net/yeyuangen/article/details/37593533
 _PyEval_EvalFrameDefault
 ==========================
 
-这个函数会去执行python的代码, 严格来说是执行opcode, 然后这个函数最终调用到的是_PyEval_EvalFrameDefault
+1. 这个函数会去执行python的代码, 严格来说是执行opcode, 然后这个函数最终调用到的是_PyEval_EvalFrameDefault.
 
-_PyEval_EvalFrameDefault这个函数会一直执行, 然后回去drop/take gil这样~~~~详情看python_gil.rst
+2. _PyEval_EvalFrameDefault这个函数会一直执行, **每执行一个opcode就检查是否有drop request, 有就调用drop_gil**
 
-因为PyObject_Call之前就调用了PyEval_AcquireThread来获取到了gil, 那么_PyEval_EvalFrameDefault里面for的第一判断是
+3. 因为PyObject_Call之前就调用了PyEval_AcquireThread来获取到了gil, 那么_PyEval_EvalFrameDefault里面for的第一判断是
 
-查看是否有drop gil request发出, 如果在_PyEval_EvalFrameDefault里面首先又去take的话, 就死锁了呀~~~
+   查看是否有drop gil request发出, 如果在_PyEval_EvalFrameDefault里面首先又去take的话, 就死锁了呀~~~
 
-所以_PyEval_EvalFrameDefault里面首先是查看是否需要drop
+   所以_PyEval_EvalFrameDefault里面首先是查看是否需要drop
 
 cpython/Python/ceval.c
 
@@ -310,6 +313,7 @@ cpython/Python/ceval.c
         // 直接看执行过程
         for (;;) {
             // 还是省略了一堆代码
+
             // 这就是看有没有drop_gil_request
             if (_Py_atomic_load_relaxed(&gil_drop_request)) {
               /* Give another thread a chance */

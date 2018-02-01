@@ -57,6 +57,8 @@ set
 resize流程
 ===============
 
+1. add的时候会占用dummy的槽位
+
 .. code-block:: python
 
     '''
@@ -77,7 +79,7 @@ resize流程
     
     x={3, 4, 5, 6, 7, 8, 9, 10}
 
-    5. 然后我们add(1), fill=10(不变), used = 9(used += 1)
+    5. 然后我们add(1), 发现槽位1是dummy, 则直接插入, fill=10(不变), used = 9(used += 1)
 
     x={1, 3, 4, 5, 6, 7, 8, 9, 10}
     

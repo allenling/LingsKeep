@@ -9,7 +9,7 @@ set
 
 4. 如果插入一个dummy的槽位, 那么不需要扩容, 而插入一个空槽位, 则需要考虑是否扩容
 
-5. 如果dummy和used的总数, 也就是fill的值, 大于hash表的2/3, 那么resize. 和dict不一样的是, set插入dummy而dict插入dummy.
+5. 如果dummy和used的总数, 也就是fill的值, 大于hash表的2/3, 那么resize. 和dict不一样的是, **set会插入dummy而dict不会插入dummy**.
 
 6. resize之后, 如果原来的fill包含了dummy的个数, 那么新的set的fill会变小. 也就是新的set只会包含used的元素.
 

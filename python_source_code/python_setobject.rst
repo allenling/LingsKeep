@@ -71,9 +71,11 @@ resize流程
 
     '''
     
-    x = {1, 2, 3, 4}, 此时fill = used = 4, hash_size = 8, mask = hash_size - 1 = 7, -1表示dummy, NULl表示空槽位, 所以hash表:
+    x = {1, 2, 3, 4}, 此时fill = used = 4, hash_size = 8, mask = hash_size - 1 = 7
     
-    sh = {NULL, 1, 2, 3, 4, NULL, NULL, NULL}, 长度是8
+    xh是x的hash表, -1表示dummy, NULl表示空槽位, 所以hash表:
+    
+    xh = {NULL, 1, 2, 3, 4, NULL, NULL, NULL}, 长度是8
     
     1. 然后x.add(5)
     

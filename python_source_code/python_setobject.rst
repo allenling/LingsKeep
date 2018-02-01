@@ -5,7 +5,7 @@ set
 
 2. 有序性是hash顺序, 因为遍历的时候是遍历hash表.
 
-3. 混合线性探测和开放地址法来解决冲突
+3. 混合线性探测和开放地址法来解决冲突, 先线性遍历n个槽位, 如果找到空槽位, 则返回, 否则开放地址法探测, 开放地址法会返回dummy槽位.
 
 4. 如果插入一个dummy的槽位, 那么不需要扩容, 而插入一个空槽位, 则需要考虑是否扩容
 
@@ -57,39 +57,58 @@ set
 resize流程
 ===============
 
-1. add的时候会占用dummy的槽位
+1. add的时候会占用dummy的槽位, 遇到空槽位和dummy, 优先插入dummy.
+
+2. 线性探测只寻找空槽位, 遇到dummy则记录下来继续, 而二次探测遇到dummy则会返回, 最后综合, 如果之前记录到dummy了, 优先插入dummy槽位.
+
+3. resize的条件是: 3 * fill > 2 * mask
+
+4. used小于50000之前, resize的最小大小是used * 4, 否则是used * 2
+
+5. 查找的时候先线性查找9个位置, 若没有发现空槽位, 那么继续开放地址法, 
 
 .. code-block:: python
 
     '''
     
-    x = {1, 2, 3, 4, 5, 6}, 此时fill = used = 6, hash_size = 8
+    x = {1, 2, 3, 4}, 此时fill = used = 4, hash_size = 8, mask = hash_size - 1 = 7, -1表示dummy, NULl表示空槽位, 所以hash表:
     
-    1. 然后x.add(7)
+    sh = {NULL, 1, 2, 3, 4, NULL, NULL, NULL}, 长度是8
     
-    由于fill = 7 > 2/3 * 8, 所以扩容,要求 new_hash_size > 12 (used * 2), 所以new_hash_size = 16, new_fill = used = 7
+    1. 然后x.add(5)
     
-    2. 然后一直add, 有x={1, 2, 3, 4, 5, 6, 7, 8, 9, 10}, x不会扩容, fill = used = 10
+    由于插入后, fill = 3 * 5 > 2 * 7, 所以扩容,要求 new_hash_size > 20 (used * 4), 所以new_hash_size = 32, mask=31, new_fill = used = 5
+
+    xh = {NULL, 1, 2, 3, 4, 5, NULL, ...}, 长度是32
+    
+    2. 然后一直add, 有x={1, 2, 3, 4, 5, 6, 7, 8, 9, 10}, xh不会扩容, fill = used = 10
+
+    xh = {NULL, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, NULL, ...}, 长度是32
     
     3. 然后x.pop(), pop出1, 此时used = 9(used-=1), fill=10(不变)
 
-    x={2, 3, 4, 5, 6, 7, 8, 9, 10}
+    xh = {NULL, -1, 2, 3, 4, 5, 6, 7, 8, 9, 10, NULL, ...}
     
     4. 继续pop, pop出2, used = 8, fill = 10
     
-    x={3, 4, 5, 6, 7, 8, 9, 10}
+    xh = {NULL, -1, -1, 3, 4, 5, 6, 7, 8, 9, 10, NULL, ...}
 
-    5. 然后我们add(1), 发现槽位1是dummy, 则直接插入, fill=10(不变), used = 9(used += 1)
+    5. 然后我们add(1)
+    
+    5.1 发现槽位1是dummy, 记录下来
+   
+    5.2 然后先线性查找9个位置, 2, 3, 4, 5, 6, 7, 8, 9, 10, 都没有空槽位置
+    
+    5.3 那么二次探测, 得到槽位6, 还是不为空, 继续从槽位6开始线性探测
+    
+    5.4 线性探测有: 7, 8, 9, 10, 11, 11是空槽位, 但是我们也找到了一个dummy槽位, 也就是1位置, 那么优先插入dummy槽位, fill=10(不变), used = 9(used += 1)
 
-    x={1, 3, 4, 5, 6, 7, 8, 9, 10}
+    xh = {NULL, 1, -1, 3, 4, 5, 6, 7, 8, 9, 10, NULL, ...}
     
-    6. 然后x.add(11)
-       
-    此时fill = 11 > 2/3 * 16, 所以扩容.
-    
-    new_size > 18(used * 2), 所以new_size = 32
-    
-    new_fill = old_used = 9, new_used = old_used = 9
+
+    6. 继续x.add(2), 那么根据5的步骤, 一开始2槽位是dummy, 记录下来, 线性查找到槽位11为空, 然后判断, 发现我们记录有dummy槽位置, 那么2插入到xh下标2的位置而不是11
+
+    xh = {NULL, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, NULL, ...}
     
     '''
 
@@ -257,6 +276,7 @@ set_add_entry
           // 拿到第一个位置的槽位
           entry = &so->table[i];
           if (entry->key == NULL)
+              // 第一个槽位是空的, 直接返回
               goto found_unused;
 
           freeslot = NULL;
@@ -474,7 +494,7 @@ insert的时候传入的minused可能是used的两倍(used大于50000), 或者us
         assert(oldtable != NULL);
         is_oldtable_malloced = oldtable != so->smalltable;
     
-        // 下面是直接得到最小hash表
+        // 新大小是最小hash表
         if (newsize == PySet_MINSIZE) {
             /* A large table is shrinking, or we can't get any smaller. */
             newtable = so->smalltable;
@@ -543,4 +563,32 @@ insert的时候传入的minused可能是used的两倍(used大于50000), 或者us
 1. new_size满足2**n, 并且2**n一定要大于传入的minused大
 
 2. fill和原来的fill相比, 可能变小, 因为原来的fill包含了dummy和used, 新的fill值包含used
+
+
+remove
+==========
+
+remove的操作和pop一样, 只是pop是python自己找key而remove是用户指定的
+
+
+.. code-block:: c
+
+    static int
+    set_discard_entry(PySetObject *so, PyObject *key, Py_hash_t hash)
+    {
+        setentry *entry;
+        PyObject *old_key;
+    
+        entry = set_lookkey(so, key, hash);
+        if (entry == NULL)
+            return -1;
+        if (entry->key == NULL)
+            return DISCARD_NOTFOUND;
+        old_key = entry->key;
+        entry->key = dummy;
+        entry->hash = -1;
+        so->used--;
+        Py_DECREF(old_key);
+        return DISCARD_FOUND;
+    }
 

@@ -175,7 +175,7 @@ cpython/Python/ceval_gil.h
         }
     
     #ifdef FORCE_SWITCHING
-        // 通知其他线程我已经切换到我了, 你可以方向的跑路了
+        // 通知其他线程我已经切换到我了, 你可以跑路了
         COND_SIGNAL(switch_cond);
         MUTEX_UNLOCK(switch_mutex);
     #endif

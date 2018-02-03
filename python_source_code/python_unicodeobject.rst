@@ -1,11 +1,24 @@
+unicode
+==========
+
+1. python3中, str和unicode合并了, 只存在unicode
+
+2. inter缓存机制
+
+3. find算法(BM和Horspool的综合)
+
+
+----
+
+PyUnicodeObject
+==================
+
 
 
 intern
 ============
 
 参考1: http://guilload.com/python-string-interning/
-
-参考2: http://www.laurentluce.com/posts/tag/python/
 
 简单来说, intern会把字符串当成全局唯一一个, 然后可以减少内存分配.
 
@@ -22,7 +35,7 @@ python会在编译成字节码的时候把常量和常量计算的结果, 长度
 字符串查找
 ===============
 
-http://guilload.com/python-string-interning/
+http://www.laurentluce.com/posts/python-string-objects-implementation/
 
 
 查找算法参考了BM算法和Horspool算法

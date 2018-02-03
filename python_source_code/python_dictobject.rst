@@ -9,28 +9,30 @@ python3.6的实现
 
 3. 字典只会在添加k/v的时候扩张key数组长度, 但是删除操作不会缩减key数组, resize只针对key数组, hash表不会resize, 只有hash mask会变化.
 
-   为什么不缩减数组长度呢? 
+   为什么不缩减数组长度呢? 注释说缩减要考虑到keys数组, 不好操作. 
 
-4. resize的条件是可用空间(usable)为0, 也就是数组长度的2/3已经被使用, 那么扩容
+4. 插入的时候, 会优先插入到dummy槽位, 和set一样, 但是不管插入的是empty还是dummy, usable总是减少1, 而set插入dummy的时候, fill不变.
 
-5. resize每次都是最小长度(8)开始, 一直乘以2, 最后保证new_size要大于当前已用大小的两倍, new_size > used * 2.
+5. resize的条件是可用空间(usable)为0, 也就是数组长度的2/3已经被使用, 那么扩容
 
-6. resize之后, 新usable只会包含used的元素, 不包含dummy的元素, 所以新的usable可能会比老usable大.
+6. resize每次都是最小长度(8)开始, 一直乘以2, 最后保证new_size要大于当前已用大小的两倍, new_size > used * 2.
 
-7. insert的时候, dict不会占用dummy的槽位, 查找的时候会忽略dummy槽位, 只会找下一个空槽位, 这和set不一样.
+7. resize之后, 新usable只会包含used的元素, 不包含dummy的元素, 所以新的usable可能会比老usable大.
 
-5. 区分有split和combined两种模式.
+8. 区分有split和combined两种模式.
 
-6. dict根据key的不一样有不同的搜索策略
+9. dict根据key的不一样有不同的搜索策略
 
-7. py2和3中, 调用dict函数和调用{}创建字典的区别和性能.
+10. py2和3中, 调用dict函数和调用{}创建字典的区别和性能.
 
 
 
 resize流程
 ===============
 
-1. 关于dummy的槽位, dict会无视它的, 每次insert的是总是要找到一个空位, 所以调用look函数总是返回empty状态或者错误.
+1. 关于dummy的槽位, dict也会优先占据dummy槽位, 这个和set一样.
+
+2. 但是不管插入的是dummy还是empty槽位, 总是会减少usable的个数, 而set的话, 插入dummy槽位不会减少fill的个数.
 
 2. 因为每次都是insert的时候, 总是赋值数组的dk_nentries这个下标位置, 所以这个位置只会增加, 不会减少, 也就是delete的时候不变, insert的时候加1
 
@@ -83,18 +85,20 @@ resize流程
     
     5. 然后x[1] = 1
 
-    5.1. 先第一次搜索, 第一个槽位是1, 发现是dummy, 然后继续, 直到找到一个empty的槽位, 二次探测最后得到1->6->15, 15是空槽位.
+    5.1. 先第一次搜索, 第一个槽位是1, 发现是dummy, 然后保存起来到free_slot=1, 继续, 直到找到一个empty的槽位, 二次探测最后得到1->6->15, 15是空槽位.
 
-    5.2. 插入的时候, 发现usable是0, 需要扩容, 最小大小是28, 所以new_size = 32. 
+    5.2. 插入的时候, 需要插入槽位1, 因为虽然15是空槽位, 但是先发现了一个dummy槽位置为free_slot=1, 所以要插入槽位1
     
-    5.3. 新的xa数组需要把老key复制到新的key数组, 过程是顺序遍历xa, 只复制不为NULL的key, 然后放到新数组中, dk_entries初始为0, 遍历的时候dk_entries+=1
+    5.3 插入的时候发现usable是0, 需要扩容, 最小大小是28, 所以new_size = 32. 
+    
+    5.4. 新的xa数组需要把老key复制到新的key数组, 过程是顺序遍历xa, 只复制不为NULL的key, 然后放到新数组中, dk_entries初始为0, 遍历的时候dk_entries+=1
 
     new_xh = [-1, -1, -1, 0, 1, 2, 3, 4, 5, 6, 7, -1, -1, -1, ...], 长度是32
 
     new_xa = [3, 4, 5, 6, 7, 8, 9, 10, NULL, NULL, ...], 长度是32
 
 
-    5.4 重新从new_xh和new_xa中找到1的可用位置, 明显, 第一个槽位1就是可用的, 所以把1插入到1的位置:
+    5.5 重新从new_xh和new_xa中找到1的可用位置, 明显, 第一个槽位1就是可用的, 所以把1插入到1的位置:
 
     new_xh = [-1, 8, -1, 0, 1, 2, 3, 4, 5, 6, 7, -1, ...], 长度是32
 
@@ -259,6 +263,8 @@ hash表寻址的时候是一个模运算, hash_value % sizeof(hash_table)
 所以也就是最低i比特位的值. 所以这样求hash值在hash表的第一个位置的时候就很快.
 
 *taking the low-order i bits as the initial table index is extremely fast*
+
+如果hash表大小大于hash值, 那么可以用&符号, 比如6 & 32 = 6, 由于python中一定保证hash表大小(mask值)大于
 
 冲突
 ------
@@ -946,7 +952,7 @@ lookdict
             return DKIX_EMPTY;
         }
 
-        // 如果是dummy的, 记住它, 然后继续下面
+        // 如果是dummy的, 记住它, 然后继续下面!!!
         if (ix == DKIX_DUMMY) {
             freeslot = i;
         }
@@ -1004,6 +1010,8 @@ lookdict
             // 找到空槽位, 返回
             if (ix == DKIX_EMPTY) {
                 if (hashpos != NULL) {
+                    // 这里, hashpos会优先获取free_slot的位置, 也就是
+                    // 如果之前发现了dummy的, 就优先拿dummy位置
                     *hashpos = (freeslot == -1) ? (Py_ssize_t)i : freeslot;
                 }
                 *value_addr = NULL;
@@ -1055,7 +1063,9 @@ lookdict
         return 0;
     }
 
-所以, 搜索函数一定会返回empty或者error
+1. 搜索函数一定会返回empty或者error
+
+2. 会优先返回free_slot, 也就是dummy的槽位, 但是其获取free_slot的条件是hashpos != NULL, 没看懂hashpos赋值的过程, 总之, 如果free_slot有值, 那么hashpos肯定不是NULL
 
  
 insertdict
@@ -1084,7 +1094,8 @@ PyDict_SetItem将会调用insertdict去将key/value插入到keys对象中.
         }
 
         // 调用look函数
-        // 一定会返回一个empty或者error
+        // ix一定会返回empty或者error
+        // 但是hashpos有可能是dummy的位置
         ix = mp->ma_keys->dk_lookup(mp, key, hash, &value_addr, &hashpos);
         if (ix == DKIX_ERROR)
             goto Fail;
@@ -1135,6 +1146,9 @@ PyDict_SetItem将会调用insertdict去将key/value插入到keys对象中.
             // 各种更新PyDictObject对象
             mp->ma_used++;
             mp->ma_version_tag = DICT_NEXT_VERSION();
+
+            // 插入的时候, 不管是empty还是dummy的槽位置
+            // 这里dk_usable都会减1
             mp->ma_keys->dk_usable--;
             mp->ma_keys->dk_nentries++;
             assert(mp->ma_keys->dk_usable >= 0);
@@ -1145,6 +1159,8 @@ PyDict_SetItem将会调用insertdict去将key/value插入到keys对象中.
         // 下面有些代码, 没太看懂, 省略
     
     }
+
+1. 插入的时候, 不管是empty还是dummy的槽位置, dk_usable都会减1
 
 append only
 -------------------

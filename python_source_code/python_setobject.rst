@@ -7,9 +7,9 @@ set
 
 3. 混合线性探测和开放地址法来解决冲突, 先线性遍历n个槽位, 如果找到空槽位, 则返回, 否则开放地址法探测, 若没有dummy或者空槽位置, 继续线性探测.
 
-4. 如果插入一个dummy的槽位, 那么不需要扩容, 而插入一个空槽位, 则需要考虑是否扩容
+4. 如果插入一个dummy的槽位, 那么不需要扩容, 也就是fill不变, 而插入一个空槽位, 则需要考虑是否扩容
 
-5. 如果dummy和used的总数, 也就是fill的值, 大于hash表的2/3, 那么resize. 和dict不一样的是, **set会插入dummy而dict不会插入dummy**.
+5. 如果dummy和used的总数, 也就是fill的值, 大于hash表的2/3, 那么resize, 和dict一样, set也是优先占据dummy槽位.
 
 6. resize之后, 如果原来的fill包含了dummy的个数, 那么新的set的fill会变小. 也就是新的set只会包含used的元素.
 

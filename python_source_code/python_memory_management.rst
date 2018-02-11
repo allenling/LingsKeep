@@ -11,6 +11,15 @@
 
 5. https://docs.python.org/3/c-api/memory.html
 
+C语言中malloc/calloc
+=======================
+
+malloc从堆中分配出来的是未初始化的内存, 需要用memset来初始化获得的内存块
+
+calloc从堆中分配出来的是已初始化的内存, 分配出来的内存块全部被初始化为0
+
+参考: http://www.cnblogs.com/52php/p/5794342.html
+
 
 整体结构
 =========

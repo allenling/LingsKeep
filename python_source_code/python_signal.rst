@@ -3,20 +3,17 @@ signal
 
 信号处理模块
 
-1. 只能在主线程中设置信号的handler, 使用的是统一的函数signal_handler, 而不是python代码, 毕竟内核又不能直接执行python代码.
+1. 只能在主线程中使用系统调用sigaction去设置对应信号的handler, handler不是python代码, 而是c函数signal_handler, 毕竟内核又不能直接执行python代码.
 
-2. 内部使用select去监听信号受信, select返回之后, 调用signal_handler(实际是trip_signal函数)去设置全局Handlers这个数组中对应的信号为受信状态, 然后
-   通知vm有信号受信.
+2. signal_handler(实际是trip_signal函数)去设置全局Handlers这个数组中对应的信号为受信状态, 然后通知vm有信号受信.
 
-3. 如果你自己设置了监听fd, 就是调用signal.sets_wakeup_fd这个函数, 那么signal_handler会把信号的信号码写入fd的, 这样你自己监听wakup_fd也就会被唤醒了.
+3. 如果你自己设置了监听fd, 就是你调用signal.sets_wakeup_fd这个函数设置自己的wakup_fd, 那么signal_handler会把信号的信号码写入wakeup_fd, 这样你自己监听wakup_fd也就会被唤醒了.
 
 4. 通知vm是通过设置runtime变量来实现的, 这样vm执行到下一个字节码的时候, 发现有待处理的调用(pendding_call), 那么去调用PyErr_CheckSignals去执行信号对应的python代码.
 
 5. PyErr_CheckSignals会遍历全局的Handlers这个数组, 找到受信的信号, 调用对应的python代码.
 
 6. python并不是把信号的handler加入队列, 然后一个个调用的形式, 而是受到信号之后, 尽可能的立马执行.
-
-7. 并没有找到内部初始化select的过程~~~~~在readline.c中?
 
 
 ----

@@ -1376,8 +1376,6 @@ https://elixir.bootlin.com/linux/v4.15/source/include/linux/wait.h#L87
 
 **所以, 每当事件受信, 那么调用的就是ep_poll_callback**
 
-ep_scan_ready_list后面再看
-
 **所以整体的epoll_insert就是查找fd, 然后操作各种wait_queue, 然后判断当前fd是否受信, 受信就加入到就绪列表中**
 
 epoll->poll_wait
@@ -1588,6 +1586,7 @@ ep_poll_callback
     	 * callback. We need to be able to handle both cases here, hence the
     	 * test for "key" != NULL before the event match test.
     	 */
+        // 如果发生的时间不是epi所关心的, 那么不唤醒
     	if (key && !((unsigned long) key & epi->event.events))
     		goto out_unlock;
     
@@ -1597,7 +1596,11 @@ ep_poll_callback
     	 * semantics). All the events that happen during that period of time are
     	 * chained in ep->ovflist and requeued later on.
     	 */
+        // ovflist的作用, 下面说
     	if (unlikely(ep->ovflist != EP_UNACTIVE_PTR)) {
+               // 如果需要把epi加入到ovflist的话
+               // 那么直接跑到out_unlock代码块, 而不走下面的
+               // 加入就绪链表的过程
     		if (epi->next == EP_UNACTIVE_PTR) {
     			epi->next = ep->ovflist;
     			ep->ovflist = epi;
@@ -1613,6 +1616,8 @@ ep_poll_callback
     		goto out_unlock;
     	}
     
+        // 如果不需要把epi加入到ovflist的话
+        // 把epi加入到就绪链表
     	/* If this file is already in the ready list we exit soon */
     	if (!ep_is_linked(&epi->rdllink)) {
     		list_add_tail(&epi->rdllink, &ep->rdllist);
@@ -1623,6 +1628,8 @@ ep_poll_callback
     	 * Wake up ( if active ) both the eventpoll wait list and the ->poll()
     	 * wait list.
     	 */
+        // 这里的判断是ep->wq是否为空, 是空的话表示没有人监听, 就不唤醒了
+        // 如果不为空, 则唤醒
     	if (waitqueue_active(&ep->wq)) {
     		if ((epi->event.events & EPOLLEXCLUSIVE) &&
     					!((unsigned long)key & POLLFREE)) {
@@ -1640,8 +1647,10 @@ ep_poll_callback
     				break;
     			}
     		}
+                // 唤醒ep->wq中的进程
     		wake_up_locked(&ep->wq);
     	}
+        // 唤醒自己的poll_wait
     	if (waitqueue_active(&ep->poll_wait))
     		pwake++;
     
@@ -1650,6 +1659,7 @@ ep_poll_callback
     
     	/* We have to call this outside the lock */
     	if (pwake)
+                // 这个唤醒的是自己的poll_wait
     		ep_poll_safewake(&ep->poll_wait);
     
     	if (!(epi->event.events & EPOLLEXCLUSIVE))
@@ -1675,16 +1685,21 @@ ep_poll_callback
     }
 
 
+ovflist是一个无锁情况下, 为了性能所使用的一个临时链表.
+
+比如当前有事件发生, 但是同时epoll正在把rdllist中的event赋值到用户态, 那么此时rdlist应该是允许操作的, 同时为了性能, 遍历
+
+rdlist的时候, 是不加锁的, 所以此时的event受信不能操作rdlist, 所以只好放到另一一个备用的链表中了.
+
+当epoll复制数据到用户态只好, ovflist就会被置为EP_UNACTIVE_PTR, 然后把ovflist中的epi添加到rdllist中.
 
 
+而唤醒的过程是wake_up_locked这个函数, 是唤醒epoll->wq这个wait_queue的, 而wake_up_locked最后还是会跑到之前说的
 
-epoll_wait
-===============
+__wake_up_common, 也就是遍历wait_queue, 然后调用wait_queue_entry中的func函数.
 
-https://elixir.bootlin.com/linux/v4.15/source/fs/eventpoll.c#L2148
+而wq是在调用ep_poll（epoll_wait)的时候时候把当前进程加入到wq的, 看下面
 
-
-这个调用就是返回受信的fd了
 
 
 epoll_wait/epoll_poll
@@ -1819,7 +1834,7 @@ https://elixir.bootlin.com/linux/v4.15/source/fs/eventpoll.c#L1736
     }
 
 
-1. 把当前进程组成一个wait_queue_entry结构, 加入到当前epoll结构的wq(wait_queue_head_t)中, 这样epoll受信的时候会唤醒对应的进程
+1. 把当前进程组成一个wait_queue_entry结构, 其func是default_wake_function, 然后被加入到当前epoll结构的wq(wait_queue_head_t)中, 这样epoll受信的时候会唤醒对应的进程
 
 2. schedule_hrtimeout_range是sleep until timeout的作用, 如果进程的状态被设置为TASK_UNINTERRUPTIBLE, 则不会被撞断唤醒，如果TASK_INTERRUPTIBLE, 则收到中断, 那么也会被唤醒
 
@@ -1837,7 +1852,70 @@ https://elixir.bootlin.com/linux/v4.15/source/fs/eventpoll.c#L1736
     }
 
 
+当前进程被加入到epoll->wq, 其中的wait_queue_entry的func属性被设置为default_wake_function, 而
 
+之前看到的, ep_poll_callback会调用__wake_up_common去处理epoll->wq中的wait_queue_entry, 调用func, 所以
+
+就是, 当一个event受信, 会调用default_wake_function
+
+
+default_wake_function
+=========================
+
+default_wake_function是调用try_to_wake_up这个函数, 这个函数是通用的唤醒程序的调用
+
+所以理解上, 理解为把程序唤醒就好了.
+
+https://elixir.bootlin.com/linux/v4.15/source/kernel/sched/core.c#L3625
+
+.. code-block:: c
+
+    int default_wake_function(wait_queue_entry_t *curr, unsigned mode, int wake_flags,
+    			  void *key)
+    {
+    	return try_to_wake_up(curr->private, mode, wake_flags);
+    }
+
+
+唤醒并复制event到用户态
+===========================
+
+
+在之前的ep_poll函数中, 被唤醒的时候, 在check_events代码块, 还会去检查一次epoll中的就绪链表, 原因是防止fetch之后, 事件又变为不受信状态了
+
+*Why does epoll check the event again in here? It does this to ensure the user registered event(s) are still available. Think about a scenario that a file descriptor got added into the ready list for EPOLLOUT while the user program writes to it. After the user program finishes writing, the file descriptor might no longer be available for writing anymore and epoll has to handle this case correctly otherwise the user will receive EPOLLOUT while the write operation will block.*
+
+--- 参考自: https://idndx.com/2015/07/08/the-implementation-of-epoll-4/
+
+
+然后调用ep_send_events去复制受信的event
+
+ep_send_events
+==================
+
+将ep_send_events_proc传入给ep_scan_ready_list, 调用调用
+
+.. code-block:: c
+
+    static int ep_send_events(struct eventpoll *ep,
+    			  struct epoll_event __user *events, int maxevents)
+    {
+    	struct ep_send_events_data esed;
+    
+    	esed.maxevents = maxevents;
+    	esed.events = events;
+    
+    	return ep_scan_ready_list(ep, ep_send_events_proc, &esed, 0, false);
+    }
+
+从名字上来看, ep_scan_ready_list作用是:
+
+1. 把ovflist设置不为EP_UNACTIVE_PTR状态, 这样是保护就绪链表的. 因为如果遍历就绪链表的时候, 同时有event受信, 那么为了不污染就绪链表, 受信的event会查看ovflist
+   是否是EP_UNACTIVE_PTR, 如果不是, 那么不操作就绪链表而是暂时添加到ovflist链表中.
+   
+2. 但是对就绪链表的采取什么操作, 可以通过传入函数来指定.
+
+3. ep_send_events_proc就是负责复制操作的
 
 
 ep_scan_ready_list
@@ -1857,35 +1935,112 @@ ep_scan_ready_list
     					   struct list_head *, void *),
     			      void *priv, int depth, bool ep_locked)
     {
-        //先省略代码
-    }
-
-其中, 第二个参数sproc, 是一个函数, 也就是对epoll结构的就绪列表调用怎么样的函数, 其中在ep_insert的时候, 如果epi对应的file是一个epoll对象, 那么传入的是ep_read_events_proc
-
-.. code-block:: c
-
-    static unsigned int ep_item_poll(struct epitem *epi, poll_table *pt, int depth)
-    {
-            // 省略之前的代码
-    	return ep_scan_ready_list(epi->ffd.file->private_data,
-    				  ep_read_events_proc, &depth, depth,
-    				  locked) & epi->event.events;
-    }
-
-而ep_poll传入的是函数ep_send_events_proc:
-
-.. code-block:: c
-
-    static int ep_send_events(struct eventpoll *ep,
-    			  struct epoll_event __user *events, int maxevents)
-    {
-    	struct ep_send_events_data esed;
+    	int error, pwake = 0;
+    	unsigned long flags;
+    	struct epitem *epi, *nepi;
+    	LIST_HEAD(txlist);
     
-    	esed.maxevents = maxevents;
-    	esed.events = events;
+    	/*
+    	 * We need to lock this because we could be hit by
+    	 * eventpoll_release_file() and epoll_ctl().
+    	 */
     
-    	return ep_scan_ready_list(ep, ep_send_events_proc, &esed, 0, false);
+    	if (!ep_locked)
+    		mutex_lock_nested(&ep->mtx, depth);
+    
+    	/*
+    	 * Steal the ready list, and re-init the original one to the
+    	 * empty list. Also, set ep->ovflist to NULL so that events
+    	 * happening while looping w/out locks, are not lost. We cannot
+    	 * have the poll callback to queue directly on ep->rdllist,
+    	 * because we want the "sproc" callback to be able to do it
+    	 * in a lockless way.
+    	 */
+    	spin_lock_irqsave(&ep->lock, flags);
+        // 复制一份就绪链表
+    	list_splice_init(&ep->rdllist, &txlist);
+        // 遍历的时候, 设置ovflist状态
+        // 保护就绪链表
+    	ep->ovflist = NULL;
+    	spin_unlock_irqrestore(&ep->lock, flags);
+    
+    	/*
+    	 * Now call the callback function.
+    	 */
+        // 调用传入的的操作函数
+    	error = (*sproc)(ep, &txlist, priv);
+    
+    	spin_lock_irqsave(&ep->lock, flags);
+    	/*
+    	 * During the time we spent inside the "sproc" callback, some
+    	 * other events might have been queued by the poll callback.
+    	 * We re-insert them inside the main ready-list here.
+    	 */
+        // 遍历ovflist
+        // 如果调用操作函数的时候, 同时有
+        // event受信, 那么为了不漏掉这部分event, 需要
+        // 把ovflist中的event加入到就绪链表
+    	for (nepi = ep->ovflist; (epi = nepi) != NULL;
+    	     nepi = epi->next, epi->next = EP_UNACTIVE_PTR) {
+    		/*
+    		 * We need to check if the item is already in the list.
+    		 * During the "sproc" callback execution time, items are
+    		 * queued into ->ovflist but the "txlist" might already
+    		 * contain them, and the list_splice() below takes care of them.
+    		 */
+    		if (!ep_is_linked(&epi->rdllink)) {
+    			list_add_tail(&epi->rdllink, &ep->rdllist);
+    			ep_pm_stay_awake(epi);
+    		}
+    	}
+    	/*
+    	 * We need to set back ep->ovflist to EP_UNACTIVE_PTR, so that after
+    	 * releasing the lock, events will be queued in the normal way inside
+    	 * ep->rdllist.
+    	 */
+        // 我们操作完就绪链表了
+        // 可以开放就绪链表了
+    	ep->ovflist = EP_UNACTIVE_PTR;
+    
+    	/*
+    	 * Quickly re-inject items left on "txlist".
+    	 */
+    	list_splice(&txlist, &ep->rdllist);
+    	__pm_relax(ep->ws);
+    
+        // 就绪链表不为空
+    	if (!list_empty(&ep->rdllist)) {
+    		/*
+    		 * Wake up (if active) both the eventpoll wait list and
+    		 * the ->poll() wait list (delayed after we release the lock).
+    		 */
+                // 唤醒进程!!!
+    		if (waitqueue_active(&ep->wq))
+    			wake_up_locked(&ep->wq);
+    		if (waitqueue_active(&ep->poll_wait))
+    			pwake++;
+    	}
+    	spin_unlock_irqrestore(&ep->lock, flags);
+    
+    	if (!ep_locked)
+    		mutex_unlock(&ep->mtx);
+    
+    	/* We have to call this outside the lock */
+    	if (pwake)
+    		ep_poll_safewake(&ep->poll_wait);
+    
+    	return error;
     }
 
+1. 复制一份就绪链表: list_splice_init(&ep->rdllist, &txlist);
 
+2. 操作就绪链表之前, 设置ovflist: ep->ovflist = NULL, 此时ovflist不等于EP_UNACTIVE_PTR, 保护就绪链表
+
+3. 调用传入的操作函数: error = (\*sproc)(ep, &txlist, priv);
+
+4. 操作函数处理完之后, 为了不漏掉同时发生的event, 把ovflist上的event赋值到就绪链表
+
+5. 设置ovflist为EP_UNACTIVE_PTR状态: ep->ovflist = EP_UNACTIVE_PTR, 开放就绪链表操作
+
+6. 如果ovflist复制到就绪链表之后, 就绪链表不为空, 那么表示同时有event受信, 然后唤醒进程.
 

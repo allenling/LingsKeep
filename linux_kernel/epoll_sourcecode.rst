@@ -109,11 +109,29 @@ vfs还处理了page cache, inode cache, buffer cache等等. vfs是内核的和�
 linux wait_queue
 ====================
 
-https://stackoverflow.com/questions/19942702/the-difference-between-wait-queue-head-and-wait-queue-in-linux-kernel
+A *wait queue* is exactly that -- a queue of processes that are waiting for an event.
 
-http://www.xml.com/ldd/chapter/book/ch05.html, Going to Sleep and Awakening和A Deeper Look at Wait Queues这两节
+--- 参考2
 
-http://guojing.me/linux-kernel-architecture/posts/wait-queue/
+关于休眠, 有sleep_on/sleep_on_timeout和interruptible_sleep_on/interruptible_sleep_on_timeout两组系统调用, 不同的地方是, 前者是不可中断的, 后面是可中断的.
+
+也就是前者必须得等到设置到的时间/或者等待的event受信的时候会"醒过来", 而后者则是可以在没有到设定时间的时候, 发送一个中断, 让其"醒过来".
+
+
+参考1: https://stackoverflow.com/questions/19942702/the-difference-between-wait-queue-head-and-wait-queue-in-linux-kernel
+
+参考2: http://www.xml.com/ldd/chapter/book/ch05.html, Going to Sleep and Awakening和A Deeper Look at Wait Queues这两节
+
+参考3: http://guojing.me/linux-kernel-architecture/posts/wait-queue/
+
+
+linux schedule
+=================
+
+
+参考1: https://zhuanlan.zhihu.com/p/33389178
+
+参考2: https://zhuanlan.zhihu.com/p/33461281
 
 
 ----
@@ -397,6 +415,7 @@ http://elixir.free-electrons.com/linux/v4.15/source/fs/eventpoll.c#L186
 
     struct eventpoll {
     	/* Protect the access to this structure */
+        // epoll的自旋锁
     	spinlock_t lock;
     
     	/*
@@ -409,9 +428,12 @@ http://elixir.free-electrons.com/linux/v4.15/source/fs/eventpoll.c#L186
     	struct mutex mtx;
     
     	/* Wait queue used by sys_epoll_wait() */
+        // 这个是调用epoll_wait的时候, 把当前进程加入到wq这个wait_queue中
     	wait_queue_head_t wq;
     
     	/* Wait queue used by file->poll() */
+        // 而这个是epoll自己的wait_queue
+        // 可以类比于socket自己的wait_queue
     	wait_queue_head_t poll_wait;
     
     	/* List of ready file descriptors */
@@ -429,7 +451,6 @@ http://elixir.free-electrons.com/linux/v4.15/source/fs/eventpoll.c#L186
     	 * happened while transferring ready events to userspace w/out
     	 * holding ->lock.
     	 */
-        // 看注释说, ovflist存储的是需要拷贝到用户态的epitem, 是一个单链表
     	struct epitem *ovflist;
     
     	/* wakeup_source used when ep_scan_ready_list is running */
@@ -456,6 +477,22 @@ http://elixir.free-electrons.com/linux/v4.15/source/fs/eventpoll.c#L186
     	unsigned int napi_id;
     #endif
     };
+
+有两个wait_queue_head_t, wq和poll_wait
+
+1. wq是调用epoll_poll的是, 把当前进程放入wq中, 一旦有event受信, 则唤醒wq中的进程.
+
+2. poll_wait, 根据注释, 就是epoll自己的poll实现使用的wait_queue, 因为epoll也实现了poll操作, 所以是支持poll行为的. 可类比于socket的wait_queue, 具体下面有解释
+
+有两个rdllist, rdllist和ovflist
+
+1. rdlist是把epoll把受信的event发送给用户态的时候, 遍历的已受信的链表
+
+2. 而ovflist则是, 如果现在epoll正在发送event到用户态, 此时则正在受信的时间暂时放在ovflist中, 当epoll处理完rdllist的时候, 会把ovflist的event加入到rdllist中.
+   也就是ovflist是为了不影响正在处理的rdllist, 暂时存放受信event的地方. 主要是发送event到用户态的时候是无锁状态(不会拿epoll中的lock这个自旋锁), 所以为了避免"污染"rdllist, 又没有拿锁, 则只能
+   用一个临时链表来解决. 无锁是为了效率.
+
+ovflist参考: http://blog.csdn.net/mercy_pm/article/details/51381216, https://idndx.com/2015/07/08/the-implementation-of-epoll-4/
 
 
 epitem
@@ -506,6 +543,11 @@ epitem
 
 1. 保存红黑树节点的作用是: 查询红黑树的时候, 可以通过已知的红黑树节点的地址通过计算内存其在epitem中的地址偏移量, 反过来得到epitem的地址(参考ep_find)
 
+2. ffd是epitem对应的fd的结构, ffd保存了fd和file两个结构, 红黑树查找的时候, 就是比对ffd, 也即是比对file和fd来确定对应的fd是否存在于红黑树
+
+3. rdlllink是一旦epitem受信了, 那么会把rdllink加入到epoll中的rdllist的尾部
+
+4. pwq结构是和eppoll_entry有关, 看后面
 
 epoll_create1
 ===============
@@ -604,7 +646,7 @@ file_operations包含的就是vfs的标准接口的集合
     #ifdef CONFIG_PROC_FS
     	.show_fdinfo	= ep_show_fdinfo,
     #endif
-        // 直接赋值了下面三个函数
+        // 直接覆盖了下面三个函数
     	.release	= ep_eventpoll_release,
     	.poll		= ep_eventpoll_poll,
     	.llseek		= noop_llseek,
@@ -771,20 +813,7 @@ http://elixir.free-electrons.com/linux/v4.15/source/fs/eventpoll.c#L1992
     		break;
                // 下面是删除和修改的操作, 先省略
     	}
-    	if (tep != NULL)
-    		mutex_unlock(&tep->mtx);
-    	mutex_unlock(&ep->mtx);
-    
-    error_tgt_fput:
-    	if (full_check)
-    		mutex_unlock(&epmutex);
-    
-    	fdput(tf);
-    error_fput:
-    	fdput(f);
-    error_return:
-    
-    	return error;
+        // 省略下面的错误处理
     }
 
 1. 检查操作码.
@@ -800,7 +829,7 @@ fd有效条件包括:
 1. 不能是epoll本身, 也就是不能把epoll加入到自己中, 强调自己是因为epoll对应的fd也可以加入到其他epoll中, 因为
    epoll对应的fd也继承了event_poll_fops这些操作.
 
-2. fd对应的file一定实现了event_poll_fops的操作, 最重要的是poll操作.
+2. fd对应的file一定实现有poll操作.
 
 ep_op_has_event
 -----------------
@@ -968,7 +997,8 @@ http://elixir.free-electrons.com/linux/v4.15/source/fs/eventpoll.c#L1412
     	if (!(epi = kmem_cache_alloc(epi_cache, GFP_KERNEL)))
     		return -ENOMEM;
     
-        // 下面各种双链表的初始化没看懂
+        // 下面各种双链表的初始化
+        // 过程就是双链表的头next和prev都指向自己了
     	/* Item initialization follow here ... */
     	INIT_LIST_HEAD(&epi->rdllink);
     	INIT_LIST_HEAD(&epi->fllink);
@@ -1002,8 +1032,7 @@ http://elixir.free-electrons.com/linux/v4.15/source/fs/eventpoll.c#L1412
     	 * this operation completes, the poll callback can start hitting
     	 * the new item.
     	 */
-        // 这里调用的ep_item_poll就是调用目标文件的poll操作
-        // 如果受信, 则返回受信的事件, revents可以是POLLIN等单个事件, 或者组合事件
+        // ep_item的作用下面说
     	revents = ep_item_poll(epi, &epq.pt, 1);
     
     	/*
@@ -1016,8 +1045,6 @@ http://elixir.free-electrons.com/linux/v4.15/source/fs/eventpoll.c#L1412
     		goto error_unregister;
     
     	/* Add the current item to the list of active epoll hook for this file */
-        // 下面是获取自旋锁, 然后把epi的fllink加入到目标文件的poll的监听链表中
-        // 可以这么理解, 把epi加入到file的poll的回调链表中
     	spin_lock(&tfile->f_lock);
     	list_add_tail_rcu(&epi->fllink, &tfile->f_ep_links);
     	spin_unlock(&tfile->f_lock);
@@ -1040,10 +1067,12 @@ http://elixir.free-electrons.com/linux/v4.15/source/fs/eventpoll.c#L1412
     	/* record NAPI ID of new item if present */
     	ep_set_busy_poll_napi_id(epi);
     
-        // 下面就是这个判断插入之后, 是否就受信了
-        // 如果是, 直接把fd添加到epoll的就绪链表中
+        // 之前的ep_item_poll是直接调用了epi对应的file的poll函数
+        // 返回的revents大于0, 说明该event受信了, 直接把fd添加到epoll的就绪链表中
     	/* If the file is already "ready" we drop it inside the ready list */
     	if ((revents & event->events) && !ep_is_linked(&epi->rdllink)) {
+
+                // 把epi加入到epoll结构的rdllink的最后
     		list_add_tail(&epi->rdllink, &ep->rdllist);
     		ep_pm_stay_awake(epi);
     
@@ -1064,31 +1093,662 @@ http://elixir.free-electrons.com/linux/v4.15/source/fs/eventpoll.c#L1412
     
     	return 0;
     
-    error_remove_epi:
-    	spin_lock(&tfile->f_lock);
-    	list_del_rcu(&epi->fllink);
-    	spin_unlock(&tfile->f_lock);
-    
-    	rb_erase_cached(&epi->rbn, &ep->rbr);
-    
-    error_unregister:
-    	ep_unregister_pollwait(ep, epi);
-    
-    	/*
-    	 * We need to do this because an event could have been arrived on some
-    	 * allocated wait queue. Note that we don't care about the ep->ovflist
-    	 * list, since that is used/cleaned only inside a section bound by "mtx".
-    	 * And ep_insert() is called with "mtx" held.
-    	 */
-    	spin_lock_irqsave(&ep->lock, flags);
-    	if (ep_is_linked(&epi->rdllink))
-    		list_del_init(&epi->rdllink);
-    	spin_unlock_irqrestore(&ep->lock, flags);
-    
-    	wakeup_source_unregister(ep_wakeup_source(epi));
-    
-    error_create_wakeup_source:
-    	kmem_cache_free(epi_cache, epi);
+        // 下面是错误处理, 忽略掉
     
     	return error;
     }
+
+关于waitqueue_active和ep_poll_safewake调用, 后面说.
+
+init_poll_funcptr
+====================
+
+这个函数是设置poll_table结构中的回调函数, 然后把其_key属性设置为所有事件.
+
+https://elixir.bootlin.com/linux/v4.15/source/include/linux/poll.h#L70
+
+
+.. code-block:: c
+
+    static inline void init_poll_funcptr(poll_table *pt, poll_queue_proc qproc)
+    {
+    	pt->_qproc = qproc;
+    	pt->_key   = ~0UL; /* all events enabled */
+    }
+
+由于~0=-1, 然后-1的补码是11111...111, 所以是接收所有的event.
+
+-1的原码是10000...001, 其反码是原码符号位不变, 其他1变0, 0变1, 所以是1111...1110, 然后补码是反码加1, 所以是11111...1111
+
+所以, epoll_insert中
+
+.. code-block:: c
+
+   epq.epi = epi;
+   init_poll_funcptr(&epq.pt, ep_ptable_queue_proc);
+
+
+就是把epq中的poll_table的回调设置为ep_ptable_queue_proc
+
+
+.. code-block:: python
+
+    '''
+    
+    epq(ep_pqueue) --+---> poll_table -+--->_qproc=ep_ptable_queue_proc
+                     |                 |
+                     |                 +--->_key=1111...1111
+                     |
+                     +--->epi(赋值为对应的epitem)
+    
+    '''
+
+
+ep_item_poll
+================
+
+这里其实是调用ep_ptable_queue_proc去设置wait_queue, 然后调用ep_scan_ready_list去扫描就绪链表
+
+https://elixir.bootlin.com/linux/v4.15/source/fs/eventpoll.c#L877
+
+.. code-block:: c
+
+    static unsigned int ep_item_poll(struct epitem *epi, poll_table *pt, int depth)
+    {
+    	struct eventpoll *ep;
+    	bool locked;
+    
+        // poll_table中的_key, 也就是-1
+    	pt->_key = epi->event.events;
+
+        // 如果epi对应的file不是epoll, 则直接调用poll实现
+        // 一般都是走这个if的return代码了
+    	if (!is_file_epoll(epi->ffd.file))
+    		return epi->ffd.file->f_op->poll(epi->ffd.file, pt) &
+    		       epi->event.events;
+    
+        // 获得epoll结构
+    	ep = epi->ffd.file->private_data;
+        // 调用poll_wait
+    	poll_wait(epi->ffd.file, &ep->poll_wait, pt);
+    	locked = pt && (pt->_qproc == ep_ptable_queue_proc);
+    
+        // 调用ep_scan_ready_list
+    	return ep_scan_ready_list(epi->ffd.file->private_data,
+    				  ep_read_events_proc, &depth, depth,
+    				  locked) & epi->event.events;
+    }
+
+**注意的是: 如果对应epi的file不是eventpoll结构, 则调用其file的poll实现**, 比如epi对应的file是socket的话, 那么就直接调用poll实现了.
+
+**is_file_epoll** 这个函数是判断: f->f_op == &eventpoll_fops的, 所以, 比如socket, 那么必然不相等, 所以, 比如是调用if中的return语句, 也就是调用file对应的poll操作.
+
+socket的poll参考 `这里 <https://github.com/allenling/LingsKeep/tree/master/linux_kernel/socket.rst>`_
+
+所以, 大部分情况下, 都不会走到poll_wait中的.
+
+**那么, 什么时候会调用后面的poll_wait呢?** 暂时不知道, 看代码就是只有epi的file是一个epoll的时候才会走后面, 也就是epoll监听的fd对应的也是一个epoll才行
+
+
+poll_wait
+===========
+
+不管是谁的poll调用, 最后是会走到poll_wait这个函数的, 比如tcp_poll这个tcp socket的poll实现.
+
+.. code-block:: c
+
+    // https://elixir.bootlin.com/linux/v4.15/source/net/ipv4/tcp.c#L496
+    unsigned int tcp_poll(struct file *file, struct socket *sock, poll_table *wait)
+    {
+    	unsigned int mask;
+    	struct sock *sk = sock->sk;
+    	const struct tcp_sock *tp = tcp_sk(sk);
+    	int state;
+    
+    	sock_rps_record_flow(sk);
+    
+    	sock_poll_wait(file, sk_sleep(sk), wait);
+            // 省略代码
+    }
+
+    // 而sk_sleep是获取sock结构(不是socket结构)的wait_queue结构
+    // https://elixir.bootlin.com/linux/v4.15/source/include/net/sock.h#L1692
+    static inline wait_queue_head_t *sk_sleep(struct sock *sk)
+    {
+    	BUILD_BUG_ON(offsetof(struct socket_wq, wait) != 0);
+        // 这里的wait是sock的wait_queue
+    	return &rcu_dereference_raw(sk->sk_wq)->wait;
+    }
+
+    // https://elixir.bootlin.com/linux/v4.15/source/include/net/sock.h#L2000
+    static inline void sock_poll_wait(struct file *filp,
+    		wait_queue_head_t *wait_address, poll_table *p)
+    {
+    	if (!poll_does_not_wait(p) && wait_address) {
+                // 又回到了poll_wait这个函数
+    		poll_wait(filp, wait_address, p);
+    		/* We need to be sure we are in sync with the
+    		 * socket flags modification.
+    		 *
+    		 * This memory barrier is paired in the wq_has_sleeper.
+    		 */
+    		smp_mb();
+    	}
+    }
+
+
+而poll_wait则是一个linux中poll实现的通用接口, 实际上就是调用对应poll_table中的回调函数
+
+对于epoll, 也就是ep_ptable_queue_proc这个函数
+
+https://elixir.bootlin.com/linux/v4.15/source/include/linux/poll.h#L43
+
+.. code-block:: c
+
+    static inline void poll_wait(struct file * filp, wait_queue_head_t * wait_address, poll_table *p)
+    {
+    	if (p && p->_qproc && wait_address)
+    		p->_qproc(filp, wait_address, p);
+    }
+
+ep_ptable_queue_proc
+======================
+
+这里初始化wait_queue_entry, 包括wait_queue_entry中的回调(func属性).
+
+把wait_queue_entry加入到 **对应的file自己的wait_queue中**, 所以一旦file受信, 那么对每一个wait_queue_entry, 调用其func回调函数.
+
+https://elixir.bootlin.com/linux/v4.15/source/fs/eventpoll.c#L1231
+
+.. code-block:: c
+
+    static void ep_ptable_queue_proc(struct file *file, wait_queue_head_t *whead,
+    				 poll_table *pt)
+    {
+        // 获取epitem
+    	struct epitem *epi = ep_item_from_epqueue(pt);
+    	struct eppoll_entry *pwq;
+    
+    	if (epi->nwait >= 0 && (pwq = kmem_cache_alloc(pwq_cache, GFP_KERNEL))) {
+                // 初始化eppoll_entry中wait这个wait_queue_entry的回调
+    		init_waitqueue_func_entry(&pwq->wait, ep_poll_callback);
+    		pwq->whead = whead;
+    		pwq->base = epi;
+                // 下面是把pwq中的wait_queue_entry加入到epoll结构的wait_queue列表中
+    		if (epi->event.events & EPOLLEXCLUSIVE)
+    			add_wait_queue_exclusive(whead, &pwq->wait);
+    		else
+    			add_wait_queue(whead, &pwq->wait);
+                // 把pwq的llink加入到epi的pwqlist这个链表中
+    		list_add_tail(&pwq->llink, &epi->pwqlist);
+    		epi->nwait++;
+    	} else {
+    		/* We have to signal that an error occurred */
+    		epi->nwait = -1;
+    	}
+    }
+
+具体例子来说, 如果调用的是tcp socket的poll, 那么传入的whead就是sock结构(不是socket结构)的socket_wq属性中的wait属性, 其中wait是一个wait_queue
+
+.. code-block:: python
+
+    '''
+                                    whead
+                                    
+                                    |whead是这个wait
+                                    |
+    
+           sock -+-->socket_wq +--->wait(wait_queue)
+    
+    '''
+
+init_waitqueue_func_entry是把ep_poll_callback设置为pwq中wait属性, 是一个wait_queue_entry, 的回调函数
+
+https://elixir.bootlin.com/linux/v4.15/source/include/linux/wait.h#L87
+
+.. code-block:: c
+
+
+    static inline void
+    init_waitqueue_func_entry(struct wait_queue_entry *wq_entry, wait_queue_func_t func)
+    {
+    	wq_entry->flags		= 0;
+    	wq_entry->private	= NULL;
+        // 这里就是ep_poll_callback
+    	wq_entry->func		= func;
+    }
+
+关于EPOLLEXCLUSIVE, 这个配置是解决epoll惊群问题的:
+
+.. code-block:: c
+
+    // https://elixir.bootlin.com/linux/v4.15/source/include/uapi/linux/eventpoll.h#L44
+    #define EPOLLEXCLUSIVE (1U << 28)
+
+这样不管是read还是write, and操作EPOLLEXCLUSIVE都是真, add_wait_queue_exclusive调用是把wait_queue_entry设置上WQ_FLAG_EXCLUSIVE标志, 这样唤醒的时候, 只会唤醒一个.
+
+.. code-block:: c
+
+    void add_wait_queue_exclusive(struct wait_queue_head *wq_head, struct wait_queue_entry *wq_entry)
+    {
+    	unsigned long flags;
+    
+        // 设置上WQ_FLAG_EXCLUSIVE标识
+    	wq_entry->flags |= WQ_FLAG_EXCLUSIVE;
+    	spin_lock_irqsave(&wq_head->lock, flags);
+    	__add_wait_queue_entry_tail(wq_head, wq_entry);
+    	spin_unlock_irqrestore(&wq_head->lock, flags);
+    }
+
+
+惊群参考: http://wangxuemin.github.io/2016/01/25/Epoll%20%E6%96%B0%E5%A2%9E%20EPOLLEXCLUSIVE%20%E9%80%89%E9%A1%B9%E8%A7%A3%E5%86%B3%E4%BA%86%E6%96%B0%E5%BB%BA%E8%BF%9E%E6%8E%A5%E7%9A%84%E2%80%99%E6%83%8A%E7%BE%A4%E2%80%98%E9%97%AE%E9%A2%98/ (额, 这个url有中文, 被编码过了, 所以才那么长)
+
+
+结构图示为:
+
+.. code-block:: python
+
+    '''
+    
+      (具体例子)sock结构 -+-----> sk_wq -+-->wait(wait_queue_head_t) -----> ... ------>
+                                                                                 |
+                                              |                                  | wait插入到poll_wait的尾部
+                                              |whead指向具体的                   |
+                                              |wait_queue头                      |
+                                                                                 |
+       pwq(eppoll_entry) -+----------------> whead                               |
+                          |                                                      |
+                          +-----> wait(wait_queue_entry_t) ----------------------+ --> func(wait_queue_func_t) = ep_poll_callback
+                          |
+                          +-----> llink ----------------------------
+                          |                                        |llink插入到epitem的pwq_list
+                          +-----> base(ep_item)                    |
+                                                                   |的尾部
+                                    |base指向epitem                |
+                                    |                              |
+                                                                   |
+                                  epitem -+----> pwqlist -> ... ->
+            
+            
+            
+    '''
+
+
+**所以, 每当事件受信, 那么调用的就是ep_poll_callback**
+
+ep_scan_ready_list后面再看
+
+**所以整体的epoll_insert就是查找fd, 然后操作各种wait_queue, 然后判断当前fd是否受信, 受信就加入到就绪列表中**
+
+epoll->poll_wait
+===================
+
+epoll中除了wq这个wait_queue, 还有一个poll_wait的wait_queue.
+
+在ep_item_poll函数中, 如果传入的epi对应的file是epoll对象, 那么就会把wait_queue_entry加入到epoll自己的poll_wait中, 那么当epoll中有
+
+event受信的时候, 会唤醒poll_wait中的wait_queue_entry.
+
+**其实这个poll_wait属性, 可以就类比于socket中的wait了**
+
+
+.. code-block:: c
+
+    static unsigned int ep_item_poll(struct epitem *epi, poll_table *pt, int depth)
+    {
+    	struct eventpoll *ep;
+    	bool locked;
+    
+    	pt->_key = epi->event.events;
+    	if (!is_file_epoll(epi->ffd.file))
+    		return epi->ffd.file->f_op->poll(epi->ffd.file, pt) &
+    		       epi->event.events;
+    
+        // 这里!!!!如果我们insert进来的file也是一个epoll对象的话
+        // 走到poll_wait, 也就是ep_ptable_queue_proc中的whead就是
+        // epi中file指向的另外一个epoll对象的poll_wait这个wait_queue
+    	ep = epi->ffd.file->private_data;
+    	poll_wait(epi->ffd.file, &ep->poll_wait, pt);
+    	locked = pt && (pt->_qproc == ep_ptable_queue_proc);
+    
+    	return ep_scan_ready_list(epi->ffd.file->private_data,
+    				  ep_read_events_proc, &depth, depth,
+    				  locked) & epi->event.events;
+    }
+
+
+ep_poll_callback
+====================
+
+这个是对应的file受信之后, 调用的回调, 这个是在ep_insert的时候调用的poll_wait函数中, 调用的ep_ptable_queue_proc中设置的:
+
+.. code-block:: c
+
+    static int ep_poll_callback(wait_queue_entry_t *wait, unsigned mode, int sync, void *key)
+    {
+    	int pwake = 0;
+    	unsigned long flags;
+    	struct epitem *epi = ep_item_from_wait(wait);
+    	struct eventpoll *ep = epi->ep;
+    	int ewake = 0;
+    
+    	spin_lock_irqsave(&ep->lock, flags);
+    
+    	ep_set_busy_poll_napi_id(epi);
+    
+    	/*
+    	 * If the event mask does not contain any poll(2) event, we consider the
+    	 * descriptor to be disabled. This condition is likely the effect of the
+    	 * EPOLLONESHOT bit that disables the descriptor when an event is received,
+    	 * until the next EPOLL_CTL_MOD will be issued.
+    	 */
+    	if (!(epi->event.events & ~EP_PRIVATE_BITS))
+    		goto out_unlock;
+    
+    	/*
+    	 * Check the events coming with the callback. At this stage, not
+    	 * every device reports the events in the "key" parameter of the
+    	 * callback. We need to be able to handle both cases here, hence the
+    	 * test for "key" != NULL before the event match test.
+    	 */
+    	if (key && !((unsigned long) key & epi->event.events))
+    		goto out_unlock;
+    
+    	/*
+    	 * If we are transferring events to userspace, we can hold no locks
+    	 * (because we're accessing user memory, and because of linux f_op->poll()
+    	 * semantics). All the events that happen during that period of time are
+    	 * chained in ep->ovflist and requeued later on.
+    	 */
+    	if (unlikely(ep->ovflist != EP_UNACTIVE_PTR)) {
+    		if (epi->next == EP_UNACTIVE_PTR) {
+    			epi->next = ep->ovflist;
+    			ep->ovflist = epi;
+    			if (epi->ws) {
+    				/*
+    				 * Activate ep->ws since epi->ws may get
+    				 * deactivated at any time.
+    				 */
+    				__pm_stay_awake(ep->ws);
+    			}
+    
+    		}
+    		goto out_unlock;
+    	}
+    
+    	/* If this file is already in the ready list we exit soon */
+    	if (!ep_is_linked(&epi->rdllink)) {
+    		list_add_tail(&epi->rdllink, &ep->rdllist);
+    		ep_pm_stay_awake_rcu(epi);
+    	}
+    
+    	/*
+    	 * Wake up ( if active ) both the eventpoll wait list and the ->poll()
+    	 * wait list.
+    	 */
+    	if (waitqueue_active(&ep->wq)) {
+    		if ((epi->event.events & EPOLLEXCLUSIVE) &&
+    					!((unsigned long)key & POLLFREE)) {
+    			switch ((unsigned long)key & EPOLLINOUT_BITS) {
+    			case POLLIN:
+    				if (epi->event.events & POLLIN)
+    					ewake = 1;
+    				break;
+    			case POLLOUT:
+    				if (epi->event.events & POLLOUT)
+    					ewake = 1;
+    				break;
+    			case 0:
+    				ewake = 1;
+    				break;
+    			}
+    		}
+    		wake_up_locked(&ep->wq);
+    	}
+    	if (waitqueue_active(&ep->poll_wait))
+    		pwake++;
+    
+    out_unlock:
+    	spin_unlock_irqrestore(&ep->lock, flags);
+    
+    	/* We have to call this outside the lock */
+    	if (pwake)
+    		ep_poll_safewake(&ep->poll_wait);
+    
+    	if (!(epi->event.events & EPOLLEXCLUSIVE))
+    		ewake = 1;
+    
+    	if ((unsigned long)key & POLLFREE) {
+    		/*
+    		 * If we race with ep_remove_wait_queue() it can miss
+    		 * ->whead = NULL and do another remove_wait_queue() after
+    		 * us, so we can't use __remove_wait_queue().
+    		 */
+    		list_del_init(&wait->entry);
+    		/*
+    		 * ->whead != NULL protects us from the race with ep_free()
+    		 * or ep_remove(), ep_remove_wait_queue() takes whead->lock
+    		 * held by the caller. Once we nullify it, nothing protects
+    		 * ep/epi or even wait.
+    		 */
+    		smp_store_release(&ep_pwq_from_wait(wait)->whead, NULL);
+    	}
+    
+    	return ewake;
+    }
+
+
+
+
+
+epoll_wait
+===============
+
+https://elixir.bootlin.com/linux/v4.15/source/fs/eventpoll.c#L2148
+
+
+这个调用就是返回受信的fd了
+
+
+epoll_wait/epoll_poll
+========================
+
+epoll_wait是系统调用, 调用函数epoll_poll去sleep
+
+https://elixir.bootlin.com/linux/v4.15/source/fs/eventpoll.c#L1736
+
+.. code-block:: c
+
+    static int ep_poll(struct eventpoll *ep, struct epoll_event __user *events,
+    		   int maxevents, long timeout)
+    {
+    	int res = 0, eavail, timed_out = 0;
+    	unsigned long flags;
+    	u64 slack = 0;
+    	wait_queue_entry_t wait;
+    	ktime_t expires, *to = NULL;
+    
+        // 下面是检查tiumeout
+        // 如果有timeout, 那么计算绝对时间
+        // 如果没有, 那么直接跑到check_events代码部分
+    	if (timeout > 0) {
+    		struct timespec64 end_time = ep_set_mstimeout(timeout);
+    
+    		slack = select_estimate_accuracy(&end_time);
+                // to是绝对时间
+    		to = &expires;
+    		*to = timespec64_to_ktime(end_time);
+    	} else if (timeout == 0) {
+    		/*
+    		 * Avoid the unnecessary trip to the wait queue loop, if the
+    		 * caller specified a non blocking operation.
+    		 */
+    		timed_out = 1;
+    		spin_lock_irqsave(&ep->lock, flags);
+                // 直接跑到check_events代码部分
+    		goto check_events;
+    	}
+    
+    // 这里是无限循环等待中断
+    fetch_events:
+    
+    	if (!ep_events_available(ep))
+    		ep_busy_loop(ep, timed_out);
+    
+    	spin_lock_irqsave(&ep->lock, flags);
+    
+        // 如果没有可用的event, 那么继续
+    	if (!ep_events_available(ep)) {
+    		/*
+    		 * Busy poll timed out.  Drop NAPI ID for now, we can add
+    		 * it back in when we have moved a socket with a valid NAPI
+    		 * ID onto the ready list.
+    		 */
+    		ep_reset_busy_poll_napi_id(ep);
+    
+    		/*
+    		 * We don't have any available event to return to the caller.
+    		 * We need to sleep here, and we will be wake up by
+    		 * ep_poll_callback() when events will become available.
+    		 */
+                // 注意, 这里是新建了一个wait(wait_queue_entry_t wait)
+                // 然后设置wait的private设置为当前进程, 然后回调是默认的default_wake_function
+    		init_waitqueue_entry(&wait, current);
+                // 把当前进程加入到epoll->wq这个wait_queue链表中
+                // 并且是exclusive模式, 避免惊群问题
+    		__add_wait_queue_exclusive(&ep->wq, &wait);
+    
+    		for (;;) {
+    			/*
+    			 * We don't want to sleep if the ep_poll_callback() sends us
+    			 * a wakeup in between. That's why we set the task state
+    			 * to TASK_INTERRUPTIBLE before doing the checks.
+    			 */
+                        // 设置当前进程状态是可中断状态
+                        // 这样sleep的时候可以被撞断唤醒
+    			set_current_state(TASK_INTERRUPTIBLE);
+    			/*
+    			 * Always short-circuit for fatal signals to allow
+    			 * threads to make a timely exit without the chance of
+    			 * finding more events available and fetching
+    			 * repeatedly.
+    			 */
+                        // 下面是检查进程的状态是否是被中断了
+                        // 是的话break出循环
+                        // 这里是说如果fd的poll调用在我们sleep之前, 已经发中断了
+                        // 那么直接不用sleep了
+    			if (fatal_signal_pending(current)) {
+    				res = -EINTR;
+    				break;
+    			}
+    			if (ep_events_available(ep) || timed_out)
+    				break;
+    			if (signal_pending(current)) {
+    				res = -EINTR;
+    				break;
+    			}
+    
+    			spin_unlock_irqrestore(&ep->lock, flags);
+                        // schedule_hrtimeout_range这个就是sleep until timeout了
+    			if (!schedule_hrtimeout_range(to, slack, HRTIMER_MODE_ABS))
+    				timed_out = 1;
+    
+    			spin_lock_irqsave(&ep->lock, flags);
+    		}
+    
+                // 跳出了循环
+                // 要么被中断, 要么timeout了
+    		__remove_wait_queue(&ep->wq, &wait);
+    		__set_current_state(TASK_RUNNING);
+    	}
+    check_events:
+    	/* Is it worth to try to dig for events ? */
+        // 再次检查是否有可用的event
+    	eavail = ep_events_available(ep);
+    
+    	spin_unlock_irqrestore(&ep->lock, flags);
+    
+    	/*
+    	 * Try to transfer events to user space. In case we get 0 events and
+    	 * there's still timeout left over, we go trying again in search of
+    	 * more luck.
+    	 */
+        // 这里的ep_send_events就是把就绪列表中的event发送到用户态的缓冲区
+    	if (!res && eavail &&
+    	    !(res = ep_send_events(ep, events, maxevents)) && !timed_out)
+    		goto fetch_events;
+    
+    	return res;
+    }
+
+
+1. 把当前进程组成一个wait_queue_entry结构, 加入到当前epoll结构的wq(wait_queue_head_t)中, 这样epoll受信的时候会唤醒对应的进程
+
+2. schedule_hrtimeout_range是sleep until timeout的作用, 如果进程的状态被设置为TASK_UNINTERRUPTIBLE, 则不会被撞断唤醒，如果TASK_INTERRUPTIBLE, 则收到中断, 那么也会被唤醒
+
+3. ep_send_events会把对应的的就绪event发送到用户态缓冲区.
+
+4. 把当前进程加入到epoll的wq这个wait_queue中, 并且是exclusive模式, 避免惊群问题.
+
+5. ep_events_available这个函数是判断epoll是否有可用的event. 两者其中一个为真就是真: 1. 就绪列表是否不为空, 2. ovflist是否不是EP_UNACTIVE_PTR.
+
+.. code-block:: c
+
+    static inline int ep_events_available(struct eventpoll *ep)
+    {
+    	return !list_empty(&ep->rdllist) || ep->ovflist != EP_UNACTIVE_PTR;
+    }
+
+
+
+
+
+ep_scan_ready_list
+======================
+
+看注释:
+
+.. code-block:: c
+
+    /**
+     * ep_scan_ready_list - Scans the ready list in a way that makes possible for
+     *                      the scan code, to call f_op->poll(). Also allows for
+     *                      O(NumReady) performance.
+    */
+    static int ep_scan_ready_list(struct eventpoll *ep,
+    			      int (*sproc)(struct eventpoll *,
+    					   struct list_head *, void *),
+    			      void *priv, int depth, bool ep_locked)
+    {
+        //先省略代码
+    }
+
+其中, 第二个参数sproc, 是一个函数, 也就是对epoll结构的就绪列表调用怎么样的函数, 其中在ep_insert的时候, 如果epi对应的file是一个epoll对象, 那么传入的是ep_read_events_proc
+
+.. code-block:: c
+
+    static unsigned int ep_item_poll(struct epitem *epi, poll_table *pt, int depth)
+    {
+            // 省略之前的代码
+    	return ep_scan_ready_list(epi->ffd.file->private_data,
+    				  ep_read_events_proc, &depth, depth,
+    				  locked) & epi->event.events;
+    }
+
+而ep_poll传入的是函数ep_send_events_proc:
+
+.. code-block:: c
+
+    static int ep_send_events(struct eventpoll *ep,
+    			  struct epoll_event __user *events, int maxevents)
+    {
+    	struct ep_send_events_data esed;
+    
+    	esed.maxevents = maxevents;
+    	esed.events = events;
+    
+    	return ep_scan_ready_list(ep, ep_send_events_proc, &esed, 0, false);
+    }
+
+
+

@@ -1416,6 +1416,32 @@ event受信的时候, 会唤醒poll_wait中的wait_queue_entry.
     				  locked) & epi->event.events;
     }
 
+用ep_item_poll中if之后的代码, 和epoll自己的poll实现的代码对比, 其实一样
+
+所以ep_item_poll中if后面的代码就是执行了epoll自己的poll实现了
+
+https://elixir.bootlin.com/linux/v4.15/source/fs/eventpoll.c#L923
+
+.. code-block:: c
+
+    static unsigned int ep_eventpoll_poll(struct file *file, poll_table *wait)
+    {
+    	struct eventpoll *ep = file->private_data;
+    	int depth = 0;
+    
+    	/* Insert inside our poll wait queue */
+    	poll_wait(file, &ep->poll_wait, wait);
+    
+    	/*
+    	 * Proceed to find out if wanted events are really available inside
+    	 * the ready list.
+    	 */
+    	return ep_scan_ready_list(ep, ep_read_events_proc,
+    				  &depth, depth, false);
+    }
+
+
+
 
 ep_poll_callback
 ====================

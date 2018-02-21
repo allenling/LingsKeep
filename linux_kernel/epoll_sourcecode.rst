@@ -1441,6 +1441,117 @@ https://elixir.bootlin.com/linux/v4.15/source/fs/eventpoll.c#L923
     }
 
 
+受信回调
+============
+
+用socket作为例子
+
+
+在socket中, 当有数据到来的时候, 会调用到sock_def_readable, 而sock_def_readable会去调用
+
+wait_queue中的wait_queue_entry的回调, 也就是之前设置的ep_poll_callback
+
+https://elixir.bootlin.com/linux/v4.15/source/net/core/sock.c#L2620
+
+.. code-block:: c
+
+    static void sock_def_readable(struct sock *sk)
+    {
+    	struct socket_wq *wq;
+    
+    	rcu_read_lock();
+        // 拿到wait_queue
+    	wq = rcu_dereference(sk->sk_wq);
+        // 这个skwq_has_sleeper的判断是判断wa是否为空
+        // 不为空就是真
+    	if (skwq_has_sleeper(wq))
+                // 去处理wq->wait
+    		wake_up_interruptible_sync_poll(&wq->wait, POLLIN | POLLPRI |
+    						POLLRDNORM | POLLRDBAND);
+    	sk_wake_async(sk, SOCK_WAKE_WAITD, POLL_IN);
+    	rcu_read_unlock();
+    }
+
+wake_up_interruptible_sync_poll定义为
+
+https://elixir.bootlin.com/linux/v4.15/source/include/linux/wait.h#L215
+
+.. code-block:: c
+
+   #define wake_up_interruptible_sync_poll(x, m)					\
+	__wake_up_sync_key((x), TASK_INTERRUPTIBLE, 1, (void *) (m))
+
+
+注意下TASK_INTERRUPTIBLE这个进程状态的要求
+
+
+__wake_up_common
+===================
+
+上面的__wake_up_sync_key会调用到__wake_up_common这个函数, 这个函数是基础的wake_up处理
+
+
+.. code-block:: c
+
+    /*
+     * The core wakeup function. Non-exclusive wakeups (nr_exclusive == 0) just
+     * wake everything up. If it's an exclusive wakeup (nr_exclusive == small +ve
+     * number) then we wake all the non-exclusive tasks and one exclusive task.
+     *
+     * There are circumstances in which we can try to wake a task which has already
+     * started to run but is not in state TASK_RUNNING. try_to_wake_up() returns
+     * zero in this (rare) case, and we handle it by continuing to scan the queue.
+     */
+    static int __wake_up_common(struct wait_queue_head *wq_head, unsigned int mode,
+    			int nr_exclusive, int wake_flags, void *key,
+    			wait_queue_entry_t *bookmark)
+    {
+    	wait_queue_entry_t *curr, *next;
+    	int cnt = 0;
+    
+    	if (bookmark && (bookmark->flags & WQ_FLAG_BOOKMARK)) {
+    		curr = list_next_entry(bookmark, entry);
+    
+    		list_del(&bookmark->entry);
+    		bookmark->flags = 0;
+    	} else
+    		curr = list_first_entry(&wq_head->head, wait_queue_entry_t, entry);
+    
+    	if (&curr->entry == &wq_head->head)
+    		return nr_exclusive;
+    
+    	list_for_each_entry_safe_from(curr, next, &wq_head->head, entry) {
+    		unsigned flags = curr->flags;
+    		int ret;
+    
+    		if (flags & WQ_FLAG_BOOKMARK)
+    			continue;
+    
+                // 这里就是调用wait_queue_entry的回调的地方了!!!!
+    		ret = curr->func(curr, mode, wake_flags, key);
+    		if (ret < 0)
+    			break;
+    		if (ret && (flags & WQ_FLAG_EXCLUSIVE) && !--nr_exclusive)
+    			break;
+    
+    		if (bookmark && (++cnt > WAITQUEUE_WALK_BREAK_CNT) &&
+    				(&next->entry != &wq_head->head)) {
+    			bookmark->flags = WQ_FLAG_BOOKMARK;
+    			list_add_tail(&bookmark->entry, &next->entry);
+    			break;
+    		}
+    	}
+    	return nr_exclusive;
+    }
+
+从注释上看, 参数nr_exclusive为0, 则是唤醒所有的进程, 而nr_exclusive大于0, 则是只会唤醒一个的exclusive模式的进程, 和所有的非exclusive模式的进程
+
+*If it's an exclusive wakeup (nr_exclusive == small +venumber) then we wake all the non-exclusive tasks and one exclusive task.*
+
+而epoll中, 基本上都是把wait_queue_entry设置上了exclusive标识(WQ_FLAG_EXCLUSIVE).
+
+该函数会遍历wait_queue, 然后调用wait_queue_entry中的func这个回调函数, 而在epoll中, 基本上就是ep_poll_callback这个函数了
+
 
 
 ep_poll_callback

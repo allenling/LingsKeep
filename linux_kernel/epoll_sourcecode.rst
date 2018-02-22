@@ -1416,7 +1416,7 @@ event受信的时候, 会唤醒poll_wait中的wait_queue_entry.
 
 用ep_item_poll中if之后的代码, 和epoll自己的poll实现的代码对比, 其实一样
 
-所以ep_item_poll中if后面的代码就是执行了epoll自己的poll实现了
+**所以ep_item_poll中if后面的代码就是执行了epoll自己的poll实现了**
 
 https://elixir.bootlin.com/linux/v4.15/source/fs/eventpoll.c#L923
 
@@ -1699,6 +1699,11 @@ rdlist的时候, 是不加锁的, 所以此时的event受信不能操作rdlist, 
 __wake_up_common, 也就是遍历wait_queue, 然后调用wait_queue_entry中的func函数.
 
 而wq是在调用ep_poll（epoll_wait)的时候时候把当前进程加入到wq的, 看下面
+
+
+所以, 插入一个fd的时候, 调用改fd对应的file的poll实现的作用是:
+
+**调用poll_table的func, ep_ptable_queue_proc, 把一个wait_queue_entry加入到该file的wait_queue中, 并且这个wait_queue_entry的回调func是ep_poll_callback**
 
 
 
@@ -2043,4 +2048,184 @@ ep_scan_ready_list
 5. 设置ovflist为EP_UNACTIVE_PTR状态: ep->ovflist = EP_UNACTIVE_PTR, 开放就绪链表操作
 
 6. 如果ovflist复制到就绪链表之后, 就绪链表不为空, 那么表示同时有event受信, 然后唤醒进程.
+
+
+关于惊群
+============
+
+代码流程分两部分
+
+回调的exclusive
+-------------------
+
+之前的流程中, 在insert的时候, 调用目标file的poll实现, 是添加wait_queue_entry, 并且改wait_queue_entry的回调是ep_poll_callback.
+
+作为例子, 假设socket变为可读状态, 那么sock_def_readable中调用wake_up_interruptible_sync_poll去唤醒自己的wait_queue.
+
+其中wake_up_interruptible_sync_poll的定义是:
+
+https://elixir.bootlin.com/linux/v4.15/source/include/linux/wait.h#L215
+
+.. code-block:: c
+
+    #define wake_up_interruptible_sync_poll(x, m)					\
+    	__wake_up_sync_key((x), TASK_INTERRUPTIBLE, 1, (void *) (m))
+    
+
+注意__wake_up_sync_key的第三个参数, 先看看__wake_up_sync_key的定义:
+
+https://elixir.bootlin.com/linux/v4.15/source/kernel/sched/wait.c#L192
+
+.. code-block:: c
+
+    void __wake_up_sync_key(struct wait_queue_head *wq_head, unsigned int mode,
+    			int nr_exclusive, void *key)
+    {
+    	int wake_flags = 1; /* XXX WF_SYNC */
+    
+    	if (unlikely(!wq_head))
+    		return;
+    
+    	if (unlikely(nr_exclusive != 1))
+    		wake_flags = 0;
+    
+    	__wake_up_common_lock(wq_head, mode, nr_exclusive, wake_flags, key);
+    }
+    EXPORT_SYMBOL_GPL(__wake_up_sync_key);
+
+__wake_up_sync_key第三个参数是nr_exclusive, 和唤醒多少个wait_queue_entry有关, 而__wake_up_common_lock会把nr_exclusive这个参数传入到
+
+__wake_up_common中, 而__wake_up_common中, nr_exclusive的作用是:
+
+*The core wakeup function. Non-exclusive wakeups (nr_exclusive == 0) just wake everything up.
+If it's an exclusive wakeup (nr_exclusive == small +venumber) then we wake all the non-exclusive tasks and one exclusive task.*
+
+也就是nr_exclusive如果是0, 那么会唤醒所有的wait_queue_entry, 如果大于0, 那么唤醒一个exclusive的wait_queue_entry和所有的非exclusive的wait_queue_entry
+
+https://elixir.bootlin.com/linux/v4.15/source/kernel/sched/wait.c#L72
+
+.. code-block:: c
+
+    static int __wake_up_common(struct wait_queue_head *wq_head, unsigned int mode,
+    			int nr_exclusive, int wake_flags, void *key,
+    			wait_queue_entry_t *bookmark)
+    {
+        // 拿到wait_queue_entry的flag
+        unsigned flags = curr->flags;
+       
+        // 省略代码
+    
+        // 遍历wait_queue
+    	list_for_each_entry_safe_from(curr, next, &wq_head->head, entry) {
+    		unsigned flags = curr->flags;
+    		int ret;
+    
+    		if (flags & WQ_FLAG_BOOKMARK)
+    			continue;
+    
+    		ret = curr->func(curr, mode, wake_flags, key);
+    		if (ret < 0)
+    			break;
+                // 注意看这个判断
+    		if (ret && (flags & WQ_FLAG_EXCLUSIVE) && !--nr_exclusive)
+    			break;
+                    // 省略代码
+             }
+    
+            // 省略代码
+    
+    }
+
+从上面的代码中看到, 遍历到一个wait_queue_entry, 调用其func之后, 如果成功, 并且flag是WQ_FLAG_EXCLUSIVE, 并且nr_exclusive已经减少到0, 那么退出.
+
+由于:
+
+1. 我们在调用socket的poll实现的时候, 最后会调用到(tcp_poll -> poll_wait)ep_ptable_queue_proc中, 而该函数是调用add_wait_queue_exclusive把每一个
+   wait_queue_entry都设置上WQ_FLAG_EXCLUSIVE标识的.
+
+.. code-block:: c
+
+    static void ep_ptable_queue_proc(struct file *file, wait_queue_head_t *whead,
+    				 poll_table *pt)
+    {
+        if (epi->nwait >= 0 && (pwq = kmem_cache_alloc(pwq_cache, GFP_KERNEL))) {
+            // EPOLLEXCLUSIVE是1<<28, 所以这个if必然是真
+            if (epi->event.events & EPOLLEXCLUSIVE)
+    	    add_wait_queue_exclusive(whead, &pwq->wait);
+    	else
+    	    add_wait_queue(whead, &pwq->wait);
+        }
+    }
+
+2. 目标的file的wait_queue_entry的func是ep_poll_callback, 其中向__wake_up_common传入的nr_exclusive是1!!!
+
+**所以socket受信的时候, 只会唤醒一个wait_queue_entry!!**
+
+而在ep_poll_callback中, 会调用wake_up_locked去唤醒epoll->wq中的进程:
+
+
+.. code-block:: c
+
+    // https://elixir.bootlin.com/linux/v4.15/source/fs/eventpoll.c#L1114
+    static int ep_poll_callback(wait_queue_entry_t *wait, unsigned mode, int sync, void *key)
+    {
+        
+        if (waitqueue_active(&ep->wq)) {
+            // 唤醒epoll->wq
+            wake_up_locked(&ep->wq);
+        }
+    }
+
+    // https://elixir.bootlin.com/linux/v4.15/source/include/linux/wait.h#L198
+    #define wake_up_locked(x)		__wake_up_locked((x), TASK_NORMAL, 1)
+   
+    // https://elixir.bootlin.com/linux/v4.15/source/kernel/sched/wait.c#L156
+    void __wake_up_locked(struct wait_queue_head *wq_head, unsigned int mode, int nr)
+    {
+    	__wake_up_common(wq_head, mode, nr, 0, NULL, NULL);
+    }
+
+**可以看到传入__wake_up_common的nr_exclusive参数也是1**, 所以__wake_up_common中的判断:
+
+.. code-block:: c
+
+    if (ret && (flags & WQ_FLAG_EXCLUSIVE) && !--nr_exclusive)
+        break
+
+就只需要看看flag是否是WQ_FLAG_EXCLUSIVE了, 也就是把当前进程加入到epoll->wq时候的flag了, 看下面
+
+关于唤醒进程的exclusive
+-------------------------
+
+当调用ep_poll的时候, 把当前经常加入到epoll->wq的方式也是exclusive的:
+
+.. code-block:: c
+
+    static int ep_poll(struct eventpoll *ep, struct epoll_event __user *events,
+    		   int maxevents, long timeout)
+    {
+    
+        init_waitqueue_entry(&wait, current);
+        __add_wait_queue_exclusive(&ep->wq, &wait);
+    
+    
+    }
+
+其中wait_queue_entry的回调是default_wake_function, 并且其flag是WQ_FLAG_EXCLUSIVE, 关于default_wake_function, 也就是唤醒指定进程的操作了
+
+.. code-block:: c
+
+    // https://elixir.bootlin.com/linux/v4.15/source/kernel/sched/core.c#L3625
+    int default_wake_function(wait_queue_entry_t *curr, unsigned mode, int wake_flags,
+    			  void *key)
+    {
+        // 之前init_waitqueue_entry的时候, 已经把当前进程
+        // 存储到private这个属性中了
+    	return try_to_wake_up(curr->private, mode, wake_flags);
+    }
+
+
+**所以, WQ_FLAG_EXCLUSIVE和nr_exclusive, 两个参数指定了epoll的返回是exclusive的**
+
+
 

@@ -2227,5 +2227,35 @@ https://elixir.bootlin.com/linux/v4.15/source/kernel/sched/wait.c#L72
 
 **所以, WQ_FLAG_EXCLUSIVE和nr_exclusive, 两个参数指定了epoll的返回是exclusive的**
 
+但是!!!
+=========
 
+及时在4.4的内核中, 由于ep_ptable_queue_proc中添加wait_queue_entry到目标file的wait_queue的时候, 没有
+
+带上exclusive标识, 所以还是会惊群的. 下面是4.4内核的代码
+
+.. code-block:: c
+
+    https://elixir.bootlin.com/linux/v4.4/source/fs/eventpoll.c#L1088
+    static void ep_ptable_queue_proc(struct file *file, wait_queue_head_t *whead,
+    				 poll_table *pt)
+    {
+    	struct epitem *epi = ep_item_from_epqueue(pt);
+    	struct eppoll_entry *pwq;
+    
+    	if (epi->nwait >= 0 && (pwq = kmem_cache_alloc(pwq_cache, GFP_KERNEL))) {
+    		init_waitqueue_func_entry(&pwq->wait, ep_poll_callback);
+    		pwq->whead = whead;
+    		pwq->base = epi;
+                // 看这里!!!!
+    		add_wait_queue(whead, &pwq->wait);
+    		list_add_tail(&pwq->llink, &epi->pwqlist);
+    		epi->nwait++;
+    	} else {
+    		/* We have to signal that an error occurred */
+    		epi->nwait = -1;
+    	}
+    }
+
+4.4中是add_wait_queue, 而4.15的话是判断一下EPOLLEXCLUSIVE, 然后调用add_wait_queue_exclusive的
 

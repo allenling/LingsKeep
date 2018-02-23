@@ -916,7 +916,7 @@ new_dict
 lookdict
 ============
 
-这个函数是一般性的搜索函数, 注意的是, **该只会返回一个空槽位, 是忽略dummy槽位的**
+这个函数是一般性的搜索函数, 注意的是, **该只会返回一个空槽位的标志, 但是hashops可能是dummy槽位的**
 
 
 .. code-block:: c
@@ -997,7 +997,8 @@ lookdict
                     goto top;
                 }
             }
-            freeslot = -1;
+            // freeslot表示这个槽位被占据了
+            freeslot = -1;
         }
     
         // 上面找到的是dummy
@@ -1009,17 +1010,23 @@ lookdict
 
             // 找到空槽位, 返回
             if (ix == DKIX_EMPTY) {
-                if (hashpos != NULL) {
+                // 这里hashops声明为py_size_t, 当然不是NULL
+                if (hashpos != NULL) {
                     // 这里, hashpos会优先获取free_slot的位置, 也就是
                     // 如果之前发现了dummy的, 就优先拿dummy位置
-                    *hashpos = (freeslot == -1) ? (Py_ssize_t)i : freeslot;
+                    // 如果之前找到的是一个被占据的槽位, 那么这里就返回当前的空槽位置
+                    *hashpos = (freeslot == -1) ? (Py_ssize_t)i : freeslot;
                 }
                 *value_addr = NULL;
                 return ix;
             }
 
             // 依然是dummy的, 继续
-            if (ix == DKIX_DUMMY) {
+            // 这里如果freeslot是-1的话, 说明之前的位置不是dummy
+            // 因为我们要记住第一个dummy位置, 所以这里判断下
+            // 如果freeslot不是-1, 那么之前肯定找到了一个dummy槽位
+            // 如果不是, 那么现在找到的dummy就是第一个
+            if (ix == DKIX_DUMMY) {
                 if (freeslot == -1)
                     freeslot = i;
                 continue;
@@ -1065,7 +1072,9 @@ lookdict
 
 1. 搜索函数一定会返回empty或者error
 
-2. 会优先返回free_slot, 也就是dummy的槽位, 但是其获取free_slot的条件是hashpos != NULL, 没看懂hashpos赋值的过程, 总之, 如果free_slot有值, 那么hashpos肯定不是NULL
+2. 但是返回的hashops会优先返回找到的第一个free_slot, 也就是dummy的槽位, 而freeslot=-1, 说明之前找到的槽位是被占据的
+
+3. 代码中槽的位置是保存在hashops中, 并且声明的时候是Py_ssize_t, 所以初始值是0, 不是NULL, 所以代码中很多if hashops == NULL这个判断感觉有点~~~怪怪    的
 
  
 insertdict

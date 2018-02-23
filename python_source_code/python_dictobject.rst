@@ -1072,7 +1072,7 @@ lookdict
 
 1. 搜索函数一定会返回empty或者error
 
-2. 但是返回的hashops会优先返回找到的第一个free_slot, 也就是dummy的槽位, 而freeslot=-1, 说明之前找到的槽位是被占据的
+2. 但是返回的hashops会优先返回找到的第一个freeslot, 也就是dummy的槽位, 而freeslot=-1, 说明之前找到的槽位是被占据的
 
 3. 代码中槽的位置是保存在hashops中, 并且声明的时候是Py_ssize_t, 所以初始值是0, 不是NULL, 所以代码中很多if hashops == NULL这个判断感觉有点~~~怪怪    的
 

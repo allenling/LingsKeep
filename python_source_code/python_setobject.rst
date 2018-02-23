@@ -13,7 +13,7 @@ set
 
 6. resize之后, 如果原来的fill包含了dummy的个数, 那么新的set的fill会变小. 也就是新的set只会包含used的元素.
 
-7. 删除元素并不会缩减hash表. 这个和dict一样, 并且dict的resize目标是key数组.
+7. 删除元素并不会缩减hash表. 这个和dict一样
 
 8. pop操作是按hash顺序找到第一个可用的key, 然后弹出.
 

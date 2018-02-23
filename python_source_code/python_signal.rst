@@ -15,6 +15,10 @@ signal
 
 6. python并不是把信号的handler加入队列, 然后一个个调用的形式, 而是受到信号之后, 尽可能的立马执行.
 
+7. linux中signal的handler是保存到进程的, 所以使用kill发送信号的时候, 内核回去选择一个满足条件的线程去唤醒, 具体看下面.
+
+8. linux中signal的分发: http://pubs.opengroup.org/onlinepubs/009695399/functions/xsh_chap02_04.html
+   这里: https://unix.stackexchange.com/questions/225687/what-happens-to-a-multithreaded-linux-process-if-it-gets-a-signal
 
 ----
 
@@ -205,7 +209,30 @@ signal_handler
             // 调用trip_signal
             trip_signal(sig_num);
         }
-        // 下面是SIGCHD的处理
+        
+    #ifndef HAVE_SIGACTION
+    #ifdef SIGCHLD
+        /* To avoid infinite recursion, this signal remains
+           reset until explicit re-instated.
+           Don't clear the 'func' field as it is our pointer
+           to the Python handler... */
+        if (sig_num != SIGCHLD)
+    #endif
+        /* If the handler was not set up with sigaction, reinstall it.  See
+         * Python/pylifecycle.c for the implementation of PyOS_setsig which
+         * makes this true.  See also issue8354. */
+         // 这里注意一下
+        PyOS_setsig(sig_num, signal_handler);
+    #endif
+
+        /* Issue #10311: asynchronously executing signal handlers should not
+           mutate errno under the feet of unsuspecting C code. */
+        errno = save_errno;
+
+    #ifdef MS_WINDOWS
+        if (sig_num == SIGINT)
+            SetEvent(sigint_event);
+    #endif
     }
 
 trip_signal
@@ -430,4 +457,172 @@ PyErr_CheckSignals
     
     }
 
+linux的kill
+================
 
+一般我们是用kill向进程发送信号的, 那么哪个线程被唤醒呢?
+
+https://elixir.bootlin.com/linux/v4.15/source/kernel/signal.c#L892
+
+.. code-block:: c
+
+    /**
+     *  sys_kill - send a signal to a process
+     *  @pid: the PID of the process
+     *  @sig: signal to be sent
+     */
+    SYSCALL_DEFINE2(kill, pid_t, pid, int, sig)
+    {
+        struct siginfo info;
+
+        info.si_signo = sig;
+        info.si_errno = 0;
+        info.si_code = SI_USER;
+        info.si_pid = task_tgid_vnr(current);
+        info.si_uid = from_kuid_munged(current_user_ns(), current_uid());
+
+        return kill_something_info(sig, &info, pid);
+    }
+
+
+更具体的流程, 参考这里: http://kernel.meizu.com/linux-signal.html
+
+pid结构参考: http://www.cnblogs.com/parrynee/archive/2010/01/14/1648152.html
+
+**最终, 挑选线程是在complete_signal函数**
+
+.. code-block:: c
+
+    // https://elixir.bootlin.com/linux/v4.15/source/kernel/signal.c#L892
+
+
+    static void complete_signal(int sig, struct task_struct *p, int group)
+    {
+        struct signal_struct *signal = p->signal;
+        struct task_struct *t;
+
+        /*
+         * Now find a thread we can wake up to take the signal off the queue.
+         *
+         * If the main thread wants the signal, it gets first crack.
+         * Probably the least surprising to the average bear.
+         */
+         // 注意看注释
+         // 优先检查主线程
+        if (wants_signal(sig, p))
+            t = p;
+        else if (!group || thread_group_empty(p))
+            /*
+             * There is just one thread and it does not need to be woken.
+             * It will dequeue unblocked signals before it runs again.
+             */
+            return;
+        else {
+            /*
+             * Otherwise try to find a suitable thread.
+             */
+             // 否则, 遍历, 找到一个可以处理信号的线程
+             // 然后终止遍历
+            t = signal->curr_target;
+            while (!wants_signal(sig, t)) {
+                t = next_thread(t);
+                if (t == signal->curr_target)
+                    // 这里说明循环了一圈
+                    /*
+                     * No thread needs to be woken.
+                     * Any eligible threads will see
+                     * the signal in the queue soon.
+                     */
+                    return;
+            }
+            signal->curr_target = t;
+        }
+
+        /*
+         * Found a killable thread.  If the signal will be fatal,
+         * then start taking the whole group down immediately.
+         */
+         // 如果KILL这种杀死类型的信号(fatal)
+        if (sig_fatal(p, sig) &&
+            !(signal->flags & SIGNAL_GROUP_EXIT) &&
+            !sigismember(&t->real_blocked, sig) &&
+            (sig == SIGKILL || !p->ptrace)) {
+            /*
+             * This signal will be fatal to the whole group.
+             */
+            if (!sig_kernel_coredump(sig)) {
+                /*
+                 * Start a group exit and wake everybody up.
+                 * This way we don't have other threads
+                 * running and doing things after a slower
+                 * thread has the fatal signal pending.
+                 */
+                 // 退出所有的线程
+                signal->flags = SIGNAL_GROUP_EXIT;
+                signal->group_exit_code = sig;
+                signal->group_stop_count = 0;
+                t = p;
+                do {
+                    task_clear_jobctl_pending(t, JOBCTL_PENDING_MASK);
+                    sigaddset(&t->pending.signal, SIGKILL);
+                    signal_wake_up(t, 1);
+                } while_each_thread(p, t);
+                return;
+            }
+        }
+
+        /*
+         * The signal is already in the shared-pending queue.
+         * Tell the chosen thread to wake up and dequeue it.
+         */
+         // 否则唤醒线程
+        signal_wake_up(t, sig == SIGKILL);
+        return;
+    }
+    
+所以基本上是先判断主线程是否会处理信号, 然后去遍历, 找到第一个会去处理信号的线程, 如果没有线程想要处理信号, 直接return
+
+wants_signal
+=================
+
+这个函数是判断一个线程是否想要处理信号
+
+.. code-block:: c
+
+    /*
+     * Test if P wants to take SIG.  After we've checked all threads with this,
+     * it's equivalent to finding no threads not blocking SIG.  Any threads not
+     * blocking SIG were ruled out because they are not running and already
+     * have pending signals.  Such threads will dequeue from the shared queue
+     * as soon as they're available, so putting the signal on the shared queue
+     * will be equivalent to sending it to one such thread.
+     */
+    static inline int wants_signal(int sig, struct task_struct *p)
+    {
+        if (sigismember(&p->blocked, sig))
+            return 0;
+        if (p->flags & PF_EXITING)
+            return 0;
+        if (sig == SIGKILL)
+            return 1;
+        if (task_is_stopped_or_traced(p))
+            return 0;
+        return task_curr(p) || !signal_pending(p);
+    }
+
+1. sigismember作用是: *test wehether signum is a member of set.(&p->blocked, sig)* , 也就是是否线程是否block了信号.
+   因为线程可以调用sigprocmask/pthread_sigmask去block指定的信号, 如果结果为真, 表示线程屏蔽了信号.
+   可以参考 `这里 <http://devarea.com/linux-handling-signals-in-a-multithreaded-application/#.WpAhGINuaUk>`_
+   
+2. PF_EXITING表示进程退出状态
+
+3. SIGKILL这个信号是要传递给所有的线程的(这样才能达到kill的目的), 所以返回1
+
+4. task_is_stopped_or_traced线程是否是终止状态
+
+5. task_curr是判断当前线程是否占用cpu
+
+6. signal_pending: 检查当前进程是否有信号处理，返回不为0表示有信号需要处理.
+
+   参考 `这里 <http://blog.csdn.net/hitxiaotao/article/details/1479196>`_
+   

@@ -117,9 +117,6 @@ resize流程
     '''
 
 
-跟dict不太一样, dict不会占用dummy的槽位的.
-
-
 ----
 
 

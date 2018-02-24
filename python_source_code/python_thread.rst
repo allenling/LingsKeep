@@ -5,7 +5,7 @@ python代码实现
 =================
 
 _active_limbo_lock
-----------------------
+======================
 
 threading中的_active_limbo_lock是一个模块级别的变量, 也就是说每一次对 **进程中任一thread状态** 的操作都要加锁, 同一时间只有操作一个thread的active/limbo状态
 
@@ -18,7 +18,7 @@ threading中的_active_limbo_lock是一个模块级别的变量, 也就是说每
    1.1.3 那么把thread对象从_limbo字典移除, 然后加入到_active字典中
 
 self._tstate_lock
-------------------
+==================
 
 这是每一个线程的 **状态锁**, 这个锁是一旦thread状态需要变更了, 那么这个锁就会被设置上, 然后thread终止, 底层C代码会
 
@@ -52,7 +52,7 @@ self._stop和self.join参考下面
 
 
 daemon
-----------
+==========
 
 1. 只能等所有的非daemon线程都完成之后, 整个python进程才会退出, 比如非daemon子线程还在sleep, 那么就算主线程已经return了, 那么整个进程还是会等那个子线程完成才退出的
 
@@ -70,7 +70,7 @@ daemon
 
 
 start
-----------
+==========
 
 开启一个pthread
 
@@ -114,7 +114,7 @@ start
             self._started.wait()
 
 _bootstrap
--------------
+=============
 
 这个方法是thread被os调度的时候执行的方法
 
@@ -158,7 +158,7 @@ daemon线程被调度的时候发现解释器环境已经被回收清除了(find
 
 
 _bootstrap_inner
--------------------
+===================
 
 真正执行逻辑的地方
 
@@ -241,14 +241,13 @@ _bootstrap_inner
 
 
 _stop
---------
+========
 
 **py2的threading.Thread.__stop方法已经在py3中被删除了**
 
-_stop不应该被主动调用的, 因为没有办法或者主动stop一个线程是不好的
+_stop是检查线程是否是终止状态, 并不是去终止异常, 并且如果线程没有终止, 调用这个函数会报错的
 
 调用_stop的时候如果发现self._tstate_lock没有被释放, 那么会报错, 说明不允许主动stop一个thread
-
 
 注释上意思就是self._stop调用的时候, self._tstate_lock一定是被释放掉的状态
 
@@ -279,8 +278,22 @@ _stop不应该被主动调用的, 因为没有办法或者主动stop一个线程
         self._is_stopped = True
         self._tstate_lock = None
 
+主动stop
+============
 
 关于stop子线程嘛: https://stackoverflow.com/questions/323972/is-there-any-way-to-kill-a-thread-in-python
+
+就是调用python的c接口: PyThreadState_SetAsyncExc去给线程发送一个异常, 当线程执行的时候发现有异常了, 就退出或者用户就捕获到了.
+
+**但是有个问题, 就算调用PyThreadState_SetAsyncExc设置了线程异常, 如果线程没有被唤醒, 那么也不会退出的.**
+
+比如比如time.sleep, 或者socket.recv, 就算你添加了异常exc, 但是由于线程已经处于等待中断状态,
+
+那么未被中断唤醒之前线程是不会被调度的, 那么这个exc在python代码也不会被raise, 所以就出现了为线程添加了exc异常, 但
+
+是由于阻塞在系统调用, 在系统调用返回之前是catch不到这样异常的, 也就是说你超时10s, 然后你函数执行time.sleep(30),
+
+那么这个异常依然是在30s的时候才会被catch到, 因为此时time.sleep才结束, 线程才会被os调度, 然后解释器发现有异常, 才会raise异常
 
 其实这个思路和curio的cancel差不多, 都是往task(thread/coroutine)里面加入excpetion, 当被调度到的时候, 检查下当前
 
@@ -290,9 +303,43 @@ _stop不应该被主动调用的, 因为没有办法或者主动stop一个线程
 
 这样引发异常的好处是可以让线程可以在异常的时候去clean up.
 
+线程判断异常
+==============
+
+从c接口的PyThreadState_SetAsyncExc发送进来的异常什么时候被检查呢?
+
+是在执行每一步opcode的时候都会去检查的, 函数是_PyEval_EvalFrameDefault
+
+
+.. code-block:: 
+
+    PyObject* _Py_HOT_FUNCTION
+    _PyEval_EvalFrameDefault(PyFrameObject *f, int throwflag)
+    {
+    
+        // 省略了很多代码
+    
+        // 这里查看是否有调用c接口把异常给发送进来
+    
+        /* Check for asynchronous exceptions. */
+        if (tstate->async_exc != NULL) {
+            PyObject *exc = tstate->async_exc;
+            tstate->async_exc = NULL;
+            UNSIGNAL_ASYNC_EXC();
+            PyErr_SetNone(exc);
+            Py_DECREF(exc);
+            goto error;
+        }
+    
+        // 省略了很多代码
+    
+    }
+
+
+_PyEval_EvalFrameDefault餐卡: python_gil.rst
 
 join
--------
+=======
 
 join其实就是等待self._tstate_lock这个锁被释放, 然后调用下_stop, 设置终止状态
 
@@ -333,11 +380,13 @@ join其实就是等待self._tstate_lock这个锁被释放, 然后调用下_stop,
             # 调用下_stop下设置终止状态
             self._stop()
 
-线程C代码实现
+----
+
+下面线程C代码实现
 =============================
 
 bootstate结构体
-----------------------
+======================
 
 bootstate是当前线程和解释器状态, 以及线程要执行的python函数及其参数
 
@@ -361,7 +410,7 @@ bootstate是当前线程和解释器状态, 以及线程要执行的python函数
 
 
 _thread._start_new_thread
--------------------------------
+===============================
 
 threading.Thread.start调用的是_thread._start_new_thread, 指向函数thread_PyThread_start_new_thread
 
@@ -420,7 +469,7 @@ cpython/Modules/_threadmodule.c
 
 
 PyEval_InitThreads
------------------------
+=======================
 
 cpython/Python/ceval.c
 
@@ -447,7 +496,7 @@ cpython/Python/ceval.c
 
 
 PyThread_start_new_thread
-------------------------------
+==============================
 
 cpython/Python/thread_pthread.h
 
@@ -484,7 +533,7 @@ cpython/Python/thread_pthread.h
     }
 
 PyThread_init_thread 
------------------------
+=======================
 
 这个函数最终调用到PyThread__init_thread, 不过一般都直接退出的
 
@@ -504,7 +553,7 @@ cpython/Python/thread_pthread.h
     }
 
 pthread执行的t_bootstrap
----------------------------
+===========================
 
 t_bootstrap中会运行boot结构中的记录的python函数, 在python代码中就是self._bootstrap
 
@@ -578,19 +627,19 @@ cpython/Modules/_threadmodule.c
 2. PyEval_AcquireThread这个函数最终是调用take_gil去获取gil
 
 PyObject_Call
-----------------
+================
 
 这个调用_PyEval_EvalFrameDefault去是执行opcode的过程, 参考: python_gil.rst
 
 PyThreadState_Clear
--------------------------------
+===============================
 
 这个函数是清理tstate: cpython/Python/pystate.c
 
 是把tstate的结构给释放掉了, 情况tstate结构, 没什么好看的
 
 PyThreadState_DeleteCurrent
-------------------------------
+==============================
 
 主要是删除tstate中的锁, 这样py代码的join会返回
 
@@ -619,7 +668,7 @@ PyThreadState_DeleteCurrent
     }
 
 tstate_delete_common
-----------------------
+======================
 
 删除tstate的锁
 
@@ -658,7 +707,7 @@ HEAD_LOCK定义是:
 
 
 self._tstate_lock
---------------------
+====================
 
 在python代码中, 调用self._bootstrap_inner的时候会首先调用self._set_tstate_lock来设置self._tstate_lock这个锁
 
@@ -714,7 +763,7 @@ cpython/Modules/_threadmodule.c
     }
 
 release_sentinel
-~~~~~~~~~~~~~~~~~~
+==================
 
 cpython/Modules/_threadmodule.c
 

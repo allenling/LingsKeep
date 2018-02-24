@@ -802,3 +802,20 @@ PyThread_release_lock这个函数的用户是释放掉锁, 详细实现参考: p
 
 这个函数调用完成之后, python代码里面的join所调用的self._wait_for_tstate_lock会返回, 此时thread的生命周期已经完全结束
 
+
+终止线程
+===========
+
+函数PyThread_exit_thread只是调用pthread_exit去终止pthread而已
+
+.. code-block:: c
+
+    PyThread_exit_thread(void)
+    {
+        dprintf(("PyThread_exit_thread called\n"));
+        if (!initialized)
+            exit(0);
+        pthread_exit(0);
+    }
+
+

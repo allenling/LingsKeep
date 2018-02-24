@@ -18,7 +18,10 @@ signal
 7. linux中signal的handler是保存到进程的, 所以使用kill发送信号的时候, 内核回去选择一个满足条件的线程去唤醒, 具体看下面.
 
 8. linux中signal的分发: http://pubs.opengroup.org/onlinepubs/009695399/functions/xsh_chap02_04.html
+
    这里: https://unix.stackexchange.com/questions/225687/what-happens-to-a-multithreaded-linux-process-if-it-gets-a-signal
+
+9. linux内核会挑选哪个线程? 参考: https://stackoverflow.com/questions/6949025/how-are-asynchronous-signal-handlers-executed-on-linux
 
 ----
 
@@ -210,30 +213,33 @@ signal_handler
             trip_signal(sig_num);
         }
         
-    #ifndef HAVE_SIGACTION
-    #ifdef SIGCHLD
-        /* To avoid infinite recursion, this signal remains
-           reset until explicit re-instated.
-           Don't clear the 'func' field as it is our pointer
-           to the Python handler... */
-        if (sig_num != SIGCHLD)
-    #endif
-        /* If the handler was not set up with sigaction, reinstall it.  See
-         * Python/pylifecycle.c for the implementation of PyOS_setsig which
-         * makes this true.  See also issue8354. */
-         // 这里注意一下
-        PyOS_setsig(sig_num, signal_handler);
-    #endif
+        
+        // 下面的代码是如果没有定义sigaction调用的时候执行的
+        #ifndef HAVE_SIGACTION
+        #ifdef SIGCHLD
+            /* To avoid infinite recursion, this signal remains
+               reset until explicit re-instated.
+               Don't clear the 'func' field as it is our pointer
+               to the Python handler... */
+            if (sig_num != SIGCHLD)
+        #endif
+            /* If the handler was not set up with sigaction, reinstall it.  See
+             * Python/pylifecycle.c for the implementation of PyOS_setsig which
+             * makes this true.  See also issue8354. */
+            PyOS_setsig(sig_num, signal_handler);
+        #endif
 
-        /* Issue #10311: asynchronously executing signal handlers should not
-           mutate errno under the feet of unsuspecting C code. */
-        errno = save_errno;
+            /* Issue #10311: asynchronously executing signal handlers should not
+               mutate errno under the feet of unsuspecting C code. */
+            errno = save_errno;
 
-    #ifdef MS_WINDOWS
-        if (sig_num == SIGINT)
-            SetEvent(sigint_event);
-    #endif
+        #ifdef MS_WINDOWS
+            if (sig_num == SIGINT)
+                SetEvent(sigint_event);
+        #endif
     }
+
+
 
 trip_signal
 ============
@@ -585,7 +591,19 @@ pid结构参考: http://www.cnblogs.com/parrynee/archive/2010/01/14/1648152.html
 wants_signal
 =================
 
-这个函数是判断一个线程是否想要处理信号
+这个函数是判断一个线程是否想要处理信号, 可以结合man clone中的文档来了解:
+
+*If kill(2) is used to send a signal to a thread group, and the thread group has installed a handler for the signal, then the handler will be invoked in exactly one, arbitrarily selected mem‐
+ber of the thread group that has not blocked the signal.  If multiple threads in a group are waiting to accept the same signal using sigwaitinfo(2), the kernel will arbitrarily select one of
+these threads to receive a signal sent using kill(2).*
+
+文档说, 如果使用kill发送了信号, 那么会 *任意选择一个未阻塞在该信号的* 线程执行信号的handler
+
+以及stackoverflow的答案: https://stackoverflow.com/questions/6949025/how-are-asynchronous-signal-handlers-executed-on-linux
+
+*An available thread is one that doesn't block the signal and has no other signals in its queue. The code happens to check the main thread first, then it checks the other threads in some order unknown to me. If no thread is available, then the signal is stuck until some thread unblocks the signal or empties its queue.*
+
+
 
 .. code-block:: c
 

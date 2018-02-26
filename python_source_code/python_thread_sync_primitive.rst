@@ -674,11 +674,11 @@ queue.Queue
 
 其中not_full, not_empty, all_tasks_done这三个Condition的锁都是指向一个互斥锁self.mutex, 但是其中会有条件的去wait, 所以可以有
 
-多个线程去进行get, put. join操作的wait, 但是只有一个能成功, 也就是说可以有2个线程a, b去get, a, b都会wait,
+多个线程去进行get, put. join操作的wait, 但是只有一个能成功.
 
-然后有2个线程c, d去put, c, d都会去wait, 但是同一时间a, b, c, d只有一个可以成功.
+就是说可以有2个线程a, b去get, a, b都会wait, 后有2个线程c, d去put, c, d都会去wait, 但是同一时间a, b, c, d只有一个可以成功.
 
-**意味着: 获取三个Condition中的任意(只能一个)一个, 也隐式的拿到了其他两个Condition!!**
+**意味着: 获取三个Condition中的任意(只能一个)一个, 也隐式的拿到了其他两个Condition!! 以你为三个Condition的lock都是同一个self.mutex**
 
 **但是由于Condition的waiters不一样, 所以notify的时候可以通知到不同目的(get/put/join)的线程**
 

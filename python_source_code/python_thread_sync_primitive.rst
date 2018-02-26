@@ -487,7 +487,7 @@ Condition
 
 notify是FIFO顺序释放一个(semaphore), notify_all就是就是释放全部(event)
 
-这里需要借助其他同步变量来理解
+这里需要借助其他同步变量来理解, 看下面
 
 Event
 ======
@@ -672,7 +672,7 @@ queue.Queue
 
 初始化包括存储数据的deque(fifo结构), 以及get, put, not_full, not_empty, all_tasks_done等所需要的Condition.
 
-其中not_full, not_empty, all_tasks_done这三个Condition的锁都是指向一个互斥锁, 但是其中会有条件的去wait, 所以可以有
+其中not_full, not_empty, all_tasks_done这三个Condition的锁都是指向一个互斥锁self.mutex, 但是其中会有条件的去wait, 所以可以有
 
 多个线程去进行get, put. join操作的wait, 但是只有一个能成功, 也就是说可以有2个线程a, b去get, a, b都会wait,
 

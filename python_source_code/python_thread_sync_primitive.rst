@@ -487,7 +487,7 @@ Condition
 
 notify是FIFO顺序释放一个(semaphore), notify_all就是就是释放全部(event)
 
-这里需要借助其他同步变量来理解
+这里需要借助其他同步变量来理解, 看下面
 
 Event
 ======
@@ -672,15 +672,29 @@ queue.Queue
 
 初始化包括存储数据的deque(fifo结构), 以及get, put, not_full, not_empty, all_tasks_done等所需要的Condition.
 
-其中not_full, not_empty, all_tasks_done这三个Condition的锁都是指向一个互斥锁, 但是其中会有条件的去wait, 所以可以有
+其中not_full, not_empty, all_tasks_done这三个Condition的锁都是指向一个互斥锁self.mutex, 但是其中会有条件的去wait, wait的时候是释放
+self.mutex, 所以可以有多个线程去进行get, put. join操作的wait, 但是只有一个能成功.
 
-多个线程去进行get, put. join操作的wait, 但是只有一个能成功, 也就是说可以有2个线程a, b去get, a, b都会wait,
+就是说可以有2个线程a, b去get, a, b都会wait, 后有2个线程c, d去put, c, d都会去wait, 但是同一时间a, b, c, d只有一个可以成功.
 
-然后有2个线程c, d去put, c, d都会去wait, 但是同一时间a, b, c, d只有一个可以成功.
+**意味着: 获取三个Condition中的任意(只能一个)一个, 也隐式的拿到了其他两个Condition!! 因为三个Condition的lock都是同一个self.mutex!!**
 
-**意味着: 获取三个Condition中的任意(只能一个)一个, 也隐式的拿到了其他两个Condition!!**
+**但是由于是互相调用notify, 所以notify的时候可以通知到不同目的(get/put/join)的线程**
 
-**但是由于Condition的waiters不一样, 所以notify的时候可以通知到不同目的(get/put/join)的线程**
+1. a线程去put, 获取了self.not_full这个Cond, 由于not_full这个Cond的lock是self.mutex，所以b线程要get的时候, 要获取not_empty, 由于
+   not_empty的lock也是self.mutex, 所以b会被阻塞住
+
+2. a发现deque没有满, 则直接append, 然后释放not_full, 也就是释放self.mutex, 退出, b此时拿到了not_empty, 发现deque不是空, 则直接从deque中拿到数据
+
+3. 假设现在deque是满的, 那么当a要去put的时候, 拿到not_full, 发现deque是满的, 那么在not_full这个Con上等待, 然后释放self.mutex.
+   注意, 在not_fully上的Cond上等待, 意味着a是加入到not_full上的waiters上, 释放not_full的时候, b线程的get也拿到锁, 是因为
+   not_empty的lock也是self.mutex, 释放not_full就是释放了self.mutext, 而b线程等待的not_empty的lock也是self.mutex, 所以b才能拿到锁
+   
+4. b拿到not_empty, 然后发现deque不是空, 直接拿一个数据, 然后调用not_full.notify去通知在not_full上等待的线程, 可以put了
+
+5. 由于a是在not_full上等待的, 所以b在get之后调用的not_full.notify就是通知到a, a返回, 说明可以put了.
+
+6. 在deque是空的情况, 就是b在not_empty上等待, 然后a则调用not_empty.notify去通知b可以get了.
 
 .. code-block:: python
 

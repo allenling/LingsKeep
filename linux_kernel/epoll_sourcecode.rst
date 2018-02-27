@@ -74,12 +74,16 @@ epoll的man手册里面的例子(man epoll):
        }
 
 
+1. select每次调用都要拷贝数据到内核, epoll不是
+
+2. select每次都需要自己去遍历列表, 哪些fd受信了, epoll会返回给你已受信的fd, 并且还有受信的event是什么.
+
 
 epoll在大多数情况是空闲的时候, 比起select快很多, 若fd大多数都是就绪的时候, 跟select比起来, 差不多, 因为此时内核需要遍历的就绪列表跟全部fd就差不多了.
 
 一颗红黑树，一张准备就绪fd链表，少量的内核cache，就帮我们解决了大并发下的fd处理问题。
 
-1. 执行epoll_create时，创建了红黑树和就绪list链表(ready list).
+1. 执行epoll_create时，创建了红黑树和就绪链表(ready list).
 
 2. 执行epoll_ctl时，如果增加fd则检查在红黑树中是否存在，存在立即返回，不存在则添加到红黑树上，然后向内核注册回调函数，用于当中断事件来临时向准备就绪list链表中插入数据.
 
@@ -118,11 +122,11 @@ A *wait queue* is exactly that -- a queue of processes that are waiting for an e
 也就是前者必须得等到设置到的时间/或者等待的event受信的时候会"醒过来", 而后者则是可以在没有到设定时间的时候, 发送一个中断, 让其"醒过来".
 
 
-参考1: https://stackoverflow.com/questions/19942702/the-difference-between-wait-queue-head-and-wait-queue-in-linux-kernel
+1. https://stackoverflow.com/questions/19942702/the-difference-between-wait-queue-head-and-wait-queue-in-linux-kernel
 
-参考2: http://www.xml.com/ldd/chapter/book/ch05.html, Going to Sleep and Awakening和A Deeper Look at Wait Queues这两节
+2. http://www.xml.com/ldd/chapter/book/ch05.html, Going to Sleep and Awakening和A Deeper Look at Wait Queues这两节
 
-参考3: http://guojing.me/linux-kernel-architecture/posts/wait-queue/
+3. http://guojing.me/linux-kernel-architecture/posts/wait-queue/
 
 
 linux schedule
@@ -484,7 +488,7 @@ http://elixir.free-electrons.com/linux/v4.15/source/fs/eventpoll.c#L186
 
 2. poll_wait, 根据注释, 就是epoll自己的poll实现使用的wait_queue, 因为epoll也实现了poll操作, 所以是支持poll行为的. 可类比于socket的wait_queue, 具体下面有解释
 
-有两个rdllist, rdllist和ovflist
+有两个就绪链表, rdllist和ovflist
 
 1. rdlist是把epoll把受信的event发送给用户态的时候, 遍历的已受信的链表
 
@@ -736,7 +740,7 @@ http://elixir.free-electrons.com/linux/v4.15/source/fs/eventpoll.c#L1992
     	struct eventpoll *tep = NULL;
     
     	error = -EFAULT;
-        // 注意, 这里会把用户态的epoll_event复制到这里, 也就是内核态
+        // 注意, 这里会把用户态的epoll_event复制到epds中, 是一个epoll_event结构
         // ep_op_has_event操作是判断op是否是删除操作, 不是的话复制
     	if (ep_op_has_event(op) &&
     	    copy_from_user(&epds, event, sizeof(struct epoll_event)))
@@ -773,12 +777,26 @@ http://elixir.free-electrons.com/linux/v4.15/source/fs/eventpoll.c#L1992
         // 这里是判断
         // 1. 操作的fd不能是epoll本身
         // 2. is_file_epoll是检查是否file的接口和event_poll_fops一样
-        // 所以就是检查fd对应的file是否有效, 并且是否支持poll的操作
+        // 所以就是检查fd对应是否也是epoll本身
         error = -EINVAL;
         if (f.file == tf.file || !is_file_epoll(f.file))
         	goto error_tgt_fput;
             
-        // 下面是关于exclusive的判断, 没看懂, 省略
+        /*
+         * epoll adds to the wakeup queue at EPOLL_CTL_ADD time only,
+         * so EPOLLEXCLUSIVE is not allowed for a EPOLL_CTL_MOD operation.
+         * Also, we do not currently supported nested exclusive wakeups.
+         */
+        // 第一个判断是op是否不是删除操作, 第二个判断是用户是否加入了EPOLLEXCLUSIVE标志
+        // 这里的操作就是modify不能使用EPOLLEXCLUSIVE标志
+        // 并且add操作不支持嵌套的exclusive唤醒
+        if (ep_op_has_event(op) && (epds.events & EPOLLEXCLUSIVE)) {
+        	if (op == EPOLL_CTL_MOD)
+        		goto error_tgt_fput;
+        	if (op == EPOLL_CTL_ADD && (is_file_epoll(tf.file) ||
+        			(epds.events & ~EPOLLEXCLUSIVE_OK_BITS)))
+        		goto error_tgt_fput;
+        }
 
     
     	/*
@@ -1078,6 +1096,7 @@ http://elixir.free-electrons.com/linux/v4.15/source/fs/eventpoll.c#L1412
     
     		/* Notify waiting tasks that events are available */
     		if (waitqueue_active(&ep->wq))
+                        // 唤醒wq中休眠的进程
     			wake_up_locked(&ep->wq);
     		if (waitqueue_active(&ep->poll_wait))
     			pwake++;
@@ -1098,7 +1117,8 @@ http://elixir.free-electrons.com/linux/v4.15/source/fs/eventpoll.c#L1412
     	return error;
     }
 
-关于waitqueue_active和ep_poll_safewake调用, 后面说.
+所以, ep_insert就是设置各种回调, 然后插入红黑树的过程, 最后去判断下就绪链表是否有值, 有值的话就去唤醒wq中的进程
+
 
 init_poll_funcptr
 ====================
@@ -1147,7 +1167,9 @@ https://elixir.bootlin.com/linux/v4.15/source/include/linux/poll.h#L70
 ep_item_poll
 ================
 
-这里其实是调用ep_ptable_queue_proc去设置wait_queue, 然后调用ep_scan_ready_list去扫描就绪链表
+这里其实是主要作用是, 调用传入的epi对应的file的poll实现.
+
+比如, 如果epi对应的是一个socket, 那么这里基本上就是调用socket的file的poll实现了
 
 https://elixir.bootlin.com/linux/v4.15/source/fs/eventpoll.c#L877
 
@@ -1179,7 +1201,7 @@ https://elixir.bootlin.com/linux/v4.15/source/fs/eventpoll.c#L877
     				  locked) & epi->event.events;
     }
 
-**注意的是: 如果对应epi的file不是eventpoll结构, 则调用其file的poll实现**, 比如epi对应的file是socket的话, 那么就直接调用poll实现了.
+**注意的是: 如果对应epi的file不是eventpoll结构, 则直接调用其file的poll实现然后返回**, 比如epi对应的file是socket的话, 那么就直接调用poll实现了.
 
 **is_file_epoll** 这个函数是判断: f->f_op == &eventpoll_fops的, 所以, 比如socket, 那么必然不相等, 所以, 比如是调用if中的return语句, 也就是调用file对应的poll操作.
 
@@ -1225,7 +1247,7 @@ poll_wait
     		wait_queue_head_t *wait_address, poll_table *p)
     {
     	if (!poll_does_not_wait(p) && wait_address) {
-                // 又回到了poll_wait这个函数
+                // ---------------又回到了poll_wait这个函数
     		poll_wait(filp, wait_address, p);
     		/* We need to be sure we are in sync with the
     		 * socket flags modification.
@@ -1237,9 +1259,7 @@ poll_wait
     }
 
 
-而poll_wait则是一个linux中poll实现的通用接口, 实际上就是调用对应poll_table中的回调函数
-
-对于epoll, 也就是ep_ptable_queue_proc这个函数
+而poll_wait则是一个linux中poll实现的通用接口, 实际上就是调用传入的poll_table中的设置回调函数
 
 https://elixir.bootlin.com/linux/v4.15/source/include/linux/poll.h#L43
 
@@ -1250,6 +1270,9 @@ https://elixir.bootlin.com/linux/v4.15/source/include/linux/poll.h#L43
     	if (p && p->_qproc && wait_address)
     		p->_qproc(filp, wait_address, p);
     }
+
+对于epoll, p->_qproc就是ep_ptable_queue_proc这个函数
+
 
 ep_ptable_queue_proc
 ======================
@@ -1270,11 +1293,11 @@ https://elixir.bootlin.com/linux/v4.15/source/fs/eventpoll.c#L1231
     	struct eppoll_entry *pwq;
     
     	if (epi->nwait >= 0 && (pwq = kmem_cache_alloc(pwq_cache, GFP_KERNEL))) {
-                // 初始化eppoll_entry中wait这个wait_queue_entry的回调
+                // ------------初始化eppoll_entry中wait这个wait_queue_entry的回调
     		init_waitqueue_func_entry(&pwq->wait, ep_poll_callback);
     		pwq->whead = whead;
     		pwq->base = epi;
-                // 下面是把pwq中的wait_queue_entry加入到epoll结构的wait_queue列表中
+                // ----------下面是把pwq中的wait_queue_entry加入到epoll结构的wait_queue列表中
     		if (epi->event.events & EPOLLEXCLUSIVE)
     			add_wait_queue_exclusive(whead, &pwq->wait);
     		else
@@ -1295,14 +1318,14 @@ https://elixir.bootlin.com/linux/v4.15/source/fs/eventpoll.c#L1231
     '''
                                     whead
                                     
-                                    |whead是这个wait
+                                    |whead是下面的wait
                                     |
     
            sock -+-->socket_wq +--->wait(wait_queue)
     
     '''
 
-init_waitqueue_func_entry是把ep_poll_callback设置为pwq中wait属性, 是一个wait_queue_entry, 的回调函数
+init_waitqueue_func_entry是把ep_poll_callback设置为pwq的wait的回调函数, pwq->wait是一个wait_queue_entry结构 
 
 https://elixir.bootlin.com/linux/v4.15/source/include/linux/wait.h#L87
 
@@ -1374,7 +1397,7 @@ https://elixir.bootlin.com/linux/v4.15/source/include/linux/wait.h#L87
     '''
 
 
-**所以, 每当事件受信, 那么调用的就是ep_poll_callback**
+**所以, 每当file受信, 唤醒file对应的wait_queue中的wait_queue_entry, 调唤醒的操作是调用wait_queue_entry的回调, epoll中, 回调是ep_poll_callback**
 
 **所以整体的epoll_insert就是查找fd, 然后操作各种wait_queue, 然后判断当前fd是否受信, 受信就加入到就绪列表中**
 
@@ -1445,9 +1468,9 @@ https://elixir.bootlin.com/linux/v4.15/source/fs/eventpoll.c#L923
 用socket作为例子
 
 
-在socket中, 当有数据到来的时候, 会调用到sock_def_readable, 而sock_def_readable会去调用
+在socket中, 当socket可读的时候, 会调用到sock_def_readable, 而sock_def_readable会去唤醒
 
-wait_queue中的wait_queue_entry的回调, 也就是之前设置的ep_poll_callback
+wait_queue中的wait_queue_entry, 也就是调用wait_queue_entry的回调, 这里回调是之前设置的ep_poll_callback
 
 https://elixir.bootlin.com/linux/v4.15/source/net/core/sock.c#L2620
 
@@ -1476,8 +1499,8 @@ https://elixir.bootlin.com/linux/v4.15/source/include/linux/wait.h#L215
 
 .. code-block:: c
 
-   #define wake_up_interruptible_sync_poll(x, m)					\
-	__wake_up_sync_key((x), TASK_INTERRUPTIBLE, 1, (void *) (m))
+    #define wake_up_interruptible_sync_poll(x, m)					\
+         __wake_up_sync_key((x), TASK_INTERRUPTIBLE, 1, (void *) (m))
 
 
 注意下TASK_INTERRUPTIBLE这个进程状态的要求
@@ -1546,16 +1569,14 @@ __wake_up_common
 
 *If it's an exclusive wakeup (nr_exclusive == small +venumber) then we wake all the non-exclusive tasks and one exclusive task.*
 
-而epoll中, 基本上都是把wait_queue_entry设置上了exclusive标识(WQ_FLAG_EXCLUSIVE).
-
-该函数会遍历wait_queue, 然后调用wait_queue_entry中的func这个回调函数, 而在epoll中, 基本上就是ep_poll_callback这个函数了
-
-
+**而epoll中, ep_insert的时候, 都把wait_queue_entry设置上了exclusive标识(WQ_FLAG_EXCLUSIVE).**
 
 ep_poll_callback
 ====================
 
-这个是对应的file受信之后, 调用的回调, 这个是在ep_insert的时候调用的poll_wait函数中, 调用的ep_ptable_queue_proc中设置的:
+这个是对应的file受信之后, 调用的回调, 这个是在ep_insert的时候调用的poll_wait函数中, 调用的ep_ptable_queue_proc中设置的
+
+https://elixir.bootlin.com/linux/v4.15/source/fs/eventpoll.c#L1114
 
 .. code-block:: c
 
@@ -1685,13 +1706,13 @@ ep_poll_callback
     }
 
 
-ovflist是一个无锁情况下, 为了性能所使用的一个临时链表.
+**ovflist是一个无锁情况下, 为了性能所使用的一个临时链表.**
 
 比如当前有事件发生, 但是同时epoll正在把rdllist中的event赋值到用户态, 那么此时rdlist应该是允许操作的, 同时为了性能, 遍历
 
 rdlist的时候, 是不加锁的, 所以此时的event受信不能操作rdlist, 所以只好放到另一一个备用的链表中了.
 
-当epoll复制数据到用户态只好, ovflist就会被置为EP_UNACTIVE_PTR, 然后把ovflist中的epi添加到rdllist中.
+当epoll复制数据到用户态之后, ovflist就会被置为EP_UNACTIVE_PTR, 然后把ovflist中的epi添加到rdllist中.
 
 
 而唤醒的过程是wake_up_locked这个函数, 是唤醒epoll->wq这个wait_queue的, 而wake_up_locked最后还是会跑到之前说的
@@ -1704,6 +1725,12 @@ __wake_up_common, 也就是遍历wait_queue, 然后调用wait_queue_entry中的f
 所以, 插入一个fd的时候, 调用改fd对应的file的poll实现的作用是:
 
 **调用poll_table的func, ep_ptable_queue_proc, 把一个wait_queue_entry加入到该file的wait_queue中, 并且这个wait_queue_entry的回调func是ep_poll_callback**
+
+**而ep_poll_callback的作用是判断是否唤醒epoll->wq中的进程**
+
+ep_insert的时候, 每一个wait_queue_entry都是加入了WQ_FLAG_EXCLUSIVE标识, 所以只会有一个wait_queue_entry被唤醒, 但是, ep_poll_callback中唤醒
+
+epoll->wq的时候, 是否是唤醒多个, 取决于加入epoll->wq时候的是否有WQ_FLAG_EXCLUSIVE了, 看下面
 
 
 
@@ -1839,9 +1866,9 @@ https://elixir.bootlin.com/linux/v4.15/source/fs/eventpoll.c#L1736
     }
 
 
-1. 把当前进程组成一个wait_queue_entry结构, 其func是default_wake_function, 然后被加入到当前epoll结构的wq(wait_queue_head_t)中, 这样epoll受信的时候会唤醒对应的进程
+1. 把当前进程组成一个wait_queue_entry结构, 其func是default_wake_function, 然后被加入到当前epoll结构的wq(wait_queue_head_t)中, 这样有fd受信的时候, 会唤醒wq中的进程
 
-2. schedule_hrtimeout_range是sleep until timeout的作用, 如果进程的状态被设置为TASK_UNINTERRUPTIBLE, 则不会被撞断唤醒，如果TASK_INTERRUPTIBLE, 则收到中断, 那么也会被唤醒
+2. schedule_hrtimeout_range是sleep until timeout的作用, 如果进程的状态被设置为TASK_UNINTERRUPTIBLE, 则不会被中断唤醒，如果TASK_INTERRUPTIBLE, 则收到中断, 那么也会被唤醒
 
 3. ep_send_events会把对应的的就绪event发送到用户态缓冲区.
 
@@ -1898,7 +1925,7 @@ https://elixir.bootlin.com/linux/v4.15/source/kernel/sched/core.c#L3625
 ep_send_events
 ==================
 
-将ep_send_events_proc传入给ep_scan_ready_list, 调用调用
+将ep_send_events_proc传入给ep_scan_ready_list
 
 .. code-block:: c
 
@@ -1913,18 +1940,19 @@ ep_send_events
     	return ep_scan_ready_list(ep, ep_send_events_proc, &esed, 0, false);
     }
 
-从名字上来看, ep_scan_ready_list作用是:
+ep_scan_ready_list
+======================
+
+ep_scan_ready_list作用是:
 
 1. 把ovflist设置不为EP_UNACTIVE_PTR状态, 这样是保护就绪链表的. 因为如果遍历就绪链表的时候, 同时有event受信, 那么为了不污染就绪链表, 受信的event会查看ovflist
    是否是EP_UNACTIVE_PTR, 如果不是, 那么不操作就绪链表而是暂时添加到ovflist链表中.
    
 2. 但是对就绪链表的采取什么操作, 可以通过传入函数来指定.
 
-3. ep_send_events_proc就是负责复制操作的
+3. 传入的ep_send_events_proc就是负责拷贝到用户态操作
 
-
-ep_scan_ready_list
-======================
+4. 赋拷贝到用户态的时候同时又有受信发生, 再次唤醒
 
 看注释:
 
@@ -2149,20 +2177,22 @@ https://elixir.bootlin.com/linux/v4.15/source/kernel/sched/wait.c#L72
     				 poll_table *pt)
     {
         if (epi->nwait >= 0 && (pwq = kmem_cache_alloc(pwq_cache, GFP_KERNEL))) {
+            // 省略一些代码
+
             // EPOLLEXCLUSIVE是1<<28, 所以这个if必然是真
             if (epi->event.events & EPOLLEXCLUSIVE)
-    	    add_wait_queue_exclusive(whead, &pwq->wait);
-    	else
-    	    add_wait_queue(whead, &pwq->wait);
-        }
+    	        add_wait_queue_exclusive(whead, &pwq->wait);
+    	    else
+    	        add_wait_queue(whead, &pwq->wait);
+            }
+            // 省略一些代码
     }
 
-2. 目标的file的wait_queue_entry的func是ep_poll_callback, 其中向__wake_up_common传入的nr_exclusive是1!!!
+2. 目标的file的wait_queue_entry的func是ep_poll_callback, 其中调用的时候, 向__wake_up_common传入的nr_exclusive是1!!!
 
 **所以socket受信的时候, 只会唤醒一个wait_queue_entry!!**
 
 而在ep_poll_callback中, 会调用wake_up_locked去唤醒epoll->wq中的进程:
-
 
 .. code-block:: c
 
@@ -2185,14 +2215,17 @@ https://elixir.bootlin.com/linux/v4.15/source/kernel/sched/wait.c#L72
     	__wake_up_common(wq_head, mode, nr, 0, NULL, NULL);
     }
 
-**可以看到传入__wake_up_common的nr_exclusive参数也是1**, 所以__wake_up_common中的判断:
+**可以看到, 调用传入__wake_up_common的nr_exclusive参数也是1**, 所以__wake_up_common中的判断:
 
 .. code-block:: c
 
     if (ret && (flags & WQ_FLAG_EXCLUSIVE) && !--nr_exclusive)
         break
 
-就只需要看看flag是否是WQ_FLAG_EXCLUSIVE了, 也就是把当前进程加入到epoll->wq时候的flag了, 看下面
+是否是只唤醒一个进程, 只需要看看flag是否是WQ_FLAG_EXCLUSIVE了.
+
+所以, 即使只唤醒了一个wait_queue_entry, 在wait_queue_entry的回调中, 唤醒epoll->wq的时候还是可能会唤醒多个进程的, 取决于进程加入到epoll->wq时候的flag了
+
 
 关于唤醒进程的exclusive
 -------------------------

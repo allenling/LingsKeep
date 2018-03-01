@@ -3,9 +3,14 @@ unicode
 
 1. python3中, str和unicode合并了, 只存在unicode
 
-2. inter缓存机制
+2. unicode的缓存(intern), is操作, intern手动缓存, 编译缓存和优化
+
+3. 缓存长度为20其实是, 使用\*重复20次以上的, python不会编译时求值, 而是运行时求值
 
 3. find算法(BM和Horspool的综合)
+
+
+缓存参考: http://guilload.com/python-string-interning/
 
 
 ----
@@ -15,42 +20,181 @@ PyUnicodeObject
 
 
 
-sys.intern手动缓存
+缓存机制
 ===================
 
-参考: http://guilload.com/python-string-interning/
+is操作的区别
 
-简单来说, intern会把字符串当成全局唯一一个, 然后可以减少内存分配.
+.. code-block:: python
 
-cpython/Python/sysmodule.c
+    In [124]: x='foo!'
+    
+    In [125]: y='foo!'
+    
+    In [126]: x is y
+    Out[126]: False
+    
+    In [127]: x='awd'
+    
+    In [128]: y='awd'
+    
+    In [129]: x is y
+    Out[129]: True
+
+
+在编译中看看foo!和awd的区别, 每一个语句都会编译成一个codeobject, 然后其中常量会保存在codeobject.consts中
+
 
 .. code-block:: c
 
-    static PyObject *
-    sys_intern(PyObject *self, PyObject *args)
+    PyCodeObject *
+    PyCode_New(int argcount, int kwonlyargcount,
+               int nlocals, int stacksize, int flags,
+               PyObject *code, PyObject *consts, PyObject *names,
+               PyObject *varnames, PyObject *freevars, PyObject *cellvars,
+               PyObject *filename, PyObject *name, int firstlineno,
+               PyObject *lnotab)
     {
-        // s是解析传入参数之后的对象
-        PyObject *s;
-        if (!PyArg_ParseTuple(args, "U:intern", &s))
-            return NULL;
-        if (PyUnicode_CheckExact(s)) {
-            Py_INCREF(s);
-            // 这里调用一下
-            PyUnicode_InternInPlace(&s);
-            // 然后返回
-            return s;
-        }
-        else {
-            PyErr_Format(PyExc_TypeError,
-                            "can't intern %.400s", s->ob_type->tp_name);
-            return NULL;
-        }
+    
+        // 省略代码
+        
+        // 这里回去操作consts
+        intern_string_constants(consts);
+        
+        // 省略代码
+    
     }
 
-PyUnicode_InternInPlace
-==========================
+而intern_string_constants会去根据一定的规则去缓存unicode
 
-这里是intern的流程
+
+cpython/Objects/codeobject.c
+
+.. code-block:: c
+
+    static int
+    intern_string_constants(PyObject *tuple)
+    {
+        // 省略代码
+
+        // all_name_chars则是缓存的判断条件
+        if (all_name_chars(v)) {
+          // 省略代码
+          PyUnicode_InternInPlace(&v);
+        }
+        // 省略代码
+    }
+
+all_name_chars
+=================
+
+all_name_chars是判断一个字符是否需要缓存的地方
+
+.. code-block:: c
+
+    #define NAME_CHARS \
+        "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcdefghijklmnopqrstuvwxyz"
+
+    /* all_name_chars(s): true iff all chars in s are valid NAME_CHARS */
+    static int
+    all_name_chars(PyObject *o)
+    {
+        static char ok_name_char[256];
+        static const unsigned char *name_chars = (unsigned char *)NAME_CHARS;
+        const unsigned char *s, *e;
+    
+        // 非ascii码字符串不缓存
+        if (!PyUnicode_IS_ASCII(o))
+            return 0;
+    
+        // 这里将常规字符的缓存位置设置为1
+        if (ok_name_char[*name_chars] == 0) {
+            const unsigned char *p;
+            for (p = name_chars; *p; p++)
+                ok_name_char[*p] = 1;
+        }
+        s = PyUnicode_1BYTE_DATA(o);
+        e = s + PyUnicode_GET_LENGTH(o);
+        // 下面的循环会一个字符一个字符去判断是否
+        // 是常规字符
+        while (s != e) {
+            // *s就是当前位置的字符
+            if (ok_name_char[*s++] == 0)
+                return 0;
+        }
+        return 1;
+    }
+
+其中判断流程是:
+
+1. 非ascii字符不缓存, 比如'abc我'带有中文就不会缓存了
+
+2. 创建长度为256的数组ok_name_char
+
+3. 拿到常规字符串NAME_CHARS, 也就是0-9, 26个字母的大小写,也就是所有的长度为0和1的字符都默认被缓存掉了
+
+4. 然后把NAME_CHARS在ok_name_char的位置设置为1
+
+5. 逐个字符去判断是否是常规字符, 也就是其ok_name_char中缓存位是否是１, 如果是0, 退出
+
+所以:
+
+1. 常规字符默认是缓存的, 0-9和26个字母大小写
+
+2. 除了常规字符之外都是特殊字符, 都不会缓存, 包括unicode字符
+
+3. all_name_chars中没有长度判断, 所以
+
+.. code-block:: python
+
+    In [1]: x='aaaaaaaaaaaaaaaaaaaa'
+    
+    In [2]: y='aaaaaaaaaaaaaaaaaaaa'
+    
+    In [3]: x is y
+    Out[3]: True
+    
+    In [4]: z='aaaaaaaaaaaaaaaaaaaa'
+    
+    In [5]: x is z
+    Out[5]: True
+    
+    In [6]: x='aaaaaaaaaaaaaaaaaaaab'
+    
+    In [7]: y='aaaaaaaaaaaaaaaaaaaab'
+    
+    In [8]: x is y
+    Out[8]: True
+
+
+第一次的x, y, z赋值是20个a, 然后第二次的x, y赋值是20个a加上一个b, 一共21的长度
+
+但是, 为什么:
+
+.. code-block:: python
+
+    In [16]: x='a' * 20
+    
+    In [17]: y='a' * 20
+    
+    In [18]: x is y
+    Out[18]: True
+    
+    In [19]: y='a' * 21
+    
+    In [20]: x='a' * 21
+    
+    In [21]: x is y
+    Out[21]: False
+
+**看下面的长度部分**
+
+
+PyUnicode_InternInPlace
+========================
+
+而PyUnicode_InternInPlace则是处理缓存的具体函数
+
 
 .. code-block:: c
 
@@ -95,8 +239,8 @@ PyUnicode_InternInPlace
             PyErr_Clear();
             return;
         }
-        // 注意, 这里是interned中的t不等于s
-        // 那么把p指针指向的unicode指向interned中的t
+        // -----------注意, 这里是interned中的t不等于s
+        // -----------那么把p指针指向的unicode指向interned中的t
         if (t != s) {
             Py_INCREF(t);
             Py_SETREF(*p, t);
@@ -108,53 +252,53 @@ PyUnicode_InternInPlace
         _PyUnicode_STATE(s).interned = SSTATE_INTERNED_MORTAL;
     }
 
+**缓存的时候, 会指向同一个对象**
 
-默认的, 所有的长度为0和1的字符都默认被缓存掉了, 比如常用的0-9, 26个字母的大小写
+foo!这个字符串:
 
-cpython/Python/codeobject.c
+1. 一开始ok_name_char是256空数组
+   
+2. 然后经过第一个循环之后, ok_name_char赋值了, 比如f这个字符的ascii数值是102, 也就是 *ok_name_char[102] = 1*
 
-.. code-block:: c
+3. 然后逐个循环foo!, 循环到!这个字符的时候, 发现!的ascii值是33, 并且ok_name_char[33] == 0, 所以返回0, 不缓存
 
-    #define NAME_CHARS \
-        "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcdefghijklmnopqrstuvwxyz"
+awd这个字符串
 
-编译时缓存
-==============
+1. 第一个x='awd', ok_name_char返回1, 所以调用PyUnicode_InternInPlace, 缓存了awd
 
-python会在编译成字节码的时候把常量和常量计算的结果给intern掉, 带计算的, 运行时计算的结果并不会的, 比如x='a', y='b', c = x + y, c就是运行时计算的.
+2. 第二个y='awd', ok_name_char返回1, 所以调用PyUnicode_InternInPlace去缓存awd
 
-在交互模式下, 比如ipython, 有
+3. **而PyUnicode_InternInPlace的作用是会把y指向x指向的awd**
 
-.. code-block:: python
+4. 所以is操作返回True
 
-    In [47]: p='foo!'
-    
-    In [48]: q='foo!'
-    
-    In [49]: p is q
-    Out[49]: False
 
-显然, 执行的时候是p和q分两部分去编译的, 所以是先编译执行p, 再编译执行q, 然后由于带了特殊符号, 所以p, q都没有intern(看下一节)
 
-然后如果我们在函数中呢?
+那么在函数中呢?
+
+函数中的consts
+==================
 
 .. code-block:: python
 
-    In [50]: def test():
-        ...:     a = 'foo!'
-        ...:     b = 'foo!'
-        ...:     print(a is b)
-        ...:     return
-        ...: 
+    In [137]: def test():
+         ...:     a = 'foo!'
+         ...:     b = 'foo!'
+         ...:     print(a is b)
+         ...:     return
+         ...: 
     
-    In [51]: test()
+    In [137]: test()
     True
 
-我们看看dis的结果:
+按照之前的说法, foo!不满足缓存条件, 那么a, b调用is操作应该是不同的呀, 为什么会相同呢?
+
+
+先看看dis的结果
 
 .. code-block:: python
 
-    In [52]: dis.dis(test)
+    In [138]: dis.dis(test)
       2           0 LOAD_CONST               1 ('foo!')
                   2 STORE_FAST               0 (a)
     
@@ -170,147 +314,61 @@ python会在编译成字节码的时候把常量和常量计算的结果给inter
     
       5          20 LOAD_CONST               0 (None)
                  22 RETURN_VALUE
-
-显然, 'foo!'这个字符串都是从codeobject的const中拿到的, 而const这个属性是在主键codeobject的时候生成的:
-
-cpython/Objects/codeobject.c
-
-.. code-block:: c
-
-    PyCodeObject *
-    PyCode_New(int argcount, int kwonlyargcount,
-               int nlocals, int stacksize, int flags,
-               PyObject *code, PyObject *consts, PyObject *names,
-               PyObject *varnames, PyObject *freevars, PyObject *cellvars,
-               PyObject *filename, PyObject *name, int firstlineno,
-               PyObject *lnotab)
-    {
-    // 省略代码
     
-    intern_string_constants(consts);
-    
-    // 省略代码
 
-    // 这里把缓存的常量保存到co_consts这个变量中
-    co->co_consts = consts;
-
-    // 省略代码
-    
-    }
-
-而在intern_string_constants中会调用PyUnicode_InternInPlace去intern掉常量
-
-cpython/Objects/codeobject.c
-
-.. code-block:: c
-
-    static int
-    intern_string_constants(PyObject *tuple)
-    {
-        // 省略代码
-        if (all_name_chars(v)) {
-          // 省略代码
-          PyUnicode_InternInPlace(&v);
-        }
-        // 省略代码
-    }
-
-缓存条件是all_name_chars
-
-.. code-block:: c
-
-    #define NAME_CHARS \
-        "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcdefghijklmnopqrstuvwxyz"
-
-    /* all_name_chars(s): true iff all chars in s are valid NAME_CHARS */
-    static int
-    all_name_chars(PyObject *o)
-    {
-        static char ok_name_char[256];
-        static const unsigned char *name_chars = (unsigned char *)NAME_CHARS;
-        const unsigned char *s, *e;
-    
-        // 非ascii码字符串不缓存
-        if (!PyUnicode_IS_ASCII(o))
-            return 0;
-    
-        if (ok_name_char[*name_chars] == 0) {
-            const unsigned char *p;
-            for (p = name_chars; *p; p++)
-                ok_name_char[*p] = 1;
-        }
-        s = PyUnicode_1BYTE_DATA(o);
-        e = s + PyUnicode_GET_LENGTH(o);
-        while (s != e) {
-            if (ok_name_char[*s++] == 0)
-                return 0;
-        }
-        return 1;
-    }
-
-
-所以, 编译的时候会把常量去保存到codeobject的consts属性中, LOAD_CONST会从codeobject中拿到const:
+看到带有LOAD_CONST语句, 看看LOAD_CONST是干嘛的
 
 
 .. code-block:: c
 
+    // cpython/Python/ceval.c
     PyObject *
     _PyEval_EvalFrameDefault(PyFrameObject *f, int throwflag)
-    
     {
-    
-    // 省略很多代码
-    
-    // 拿到frame上的codeobject
-    // co是codeobject结构
-    co = f->f_code;
-    // 拿到const
-    consts = co->co_consts;
-    
-    // 省略很多代码
-    
+        // 省略了很多代码
+
+        PyObject *consts;
+
+        // 拿到先当前的frame对象
+        tstate->frame = f;
+
+        // 拿到co_consts对象
+        consts = co->co_consts;
+
+            PREDICTED(LOAD_CONST);
             TARGET(LOAD_CONST) {
-                // 从consts中拿到对象
+                // 从consts拿到对象
                 PyObject *value = GETITEM(consts, oparg);
                 Py_INCREF(value);
                 PUSH(value);
                 FAST_DISPATCH();
             }
-    
-    
-    // 省略很多代码
-    
     }
 
-看起来codeobject中自己保存了consts, 所以consts是针对每一个codeobject的, 但是, 有个问题:
-
+然后我们看看test函数的codeobject的consts属性
 
 .. code-block:: python
 
-    In [106]: def test():
-         ...:     return 'qreg!'
-         ...: 
+    In [139]: x=test.__code__
     
-    In [107]: 
+    In [140]: x
+    Out[140]: <code object test at 0x7f1847bebed0, file "<ipython-input-136-22e7d50e9716>", line 1>
     
-    In [107]: def otest():
-         ...:     return 'qreg!'
-         ...: 
-    
-    In [108]: otest() == test()
-    Out[108]: True
+    In [141]: x.co_consts
+    Out[141]: (None, 'foo!')
 
+我们看到, consts包含了一个foo!字符串(虽然我们赋值了两次, 但是只有一个), 然后保存到consts中, 所以当LOAD_CONST执行的时候,
 
-otest和test明显是两个codeobject, 但是consts中的对象是一样的, 所以
+从consts拿到的是同一个foo!
 
-codeobject中的consts中的对象其实在创建的时候拿的就是一个对象了, 比如'qreg'这个字符串已经是被unicode被intern起来了的
+**所以, 虽然foo!没有被缓存掉(intern), 但是由于codeobject中只存储了一个foo!, 但是LOAD_CONST拿到的是同一个对象, 搜易is返回True**
 
-所以两个codeobject中的consts指向的对象是同一个!!!
-
-
+**这里跟缓存没关系, 只是说函数中拿到的foo!是同一个.**
 
 运行时的缓存(编译优化)
 ==============================
+
+python会在编译成字节码的时候把常量和常量计算的结果给缓存掉, 带计算的, 运行时计算的结果并不会的, 比如x='a', y='b', c = x + y, c就是运行时计算的.
 
 比如
 
@@ -352,46 +410,100 @@ x+y 和 'a' + 'b'的区别就是, 后一句是编译的时候可以直接执行�
 可以看到, 在编译的时候, 已经执行了'foo' + 'bar'的计算结果了
 
 
-特殊符号intern
-================
-
-不带特殊符号(!, _等等)的字符串会被intern掉, 带特殊符号的不会.
 
 
-回到上一节foo!的例子
+
+intern手动缓存
+====================
+
+
+sys.intern调用到PyUnicode_InternInPlace, 手动缓存指定的字符
+
+cpython/Python/sysmodule.c
+
+.. code-block:: c
+
+    static PyObject *
+    sys_intern(PyObject *self, PyObject *args)
+    {
+        // s是解析传入参数之后的对象
+        PyObject *s;
+        if (!PyArg_ParseTuple(args, "U:intern", &s))
+            return NULL;
+        if (PyUnicode_CheckExact(s)) {
+            Py_INCREF(s);
+            // 这里调用一下
+            PyUnicode_InternInPlace(&s);
+            // 然后返回
+            return s;
+        }
+        else {
+            PyErr_Format(PyExc_TypeError,
+                            "can't intern %.400s", s->ob_type->tp_name);
+            return NULL;
+        }
+    }
+
+字符串的长度和缓存
+====================
+
+在all_name_chars那部分中, 针对长度的例子:
+
 
 .. code-block:: python
 
-    In [47]: p='foo!'
+    In [1]: x='a' * 20
     
-    In [48]: q='foo!'
+    In [2]: y='a' * 20
     
-    In [49]: p is q
-    Out[49]: False
-
-但是我们可以有不同的结果:
-
-.. code-block:: python
-
-    In [66]: p = 'awd'
+    In [3]: x is y
+    Out[3]: True
     
-    In [67]: q = 'awd'
+    In [4]: x='a' * 21
     
-    In [68]: p is q
-    Out[68]: True
-
-
-区别就是foo!中带了特殊符号, 而awd没有.
-
-并且长度是有限制的, 大于20的不会自动intern
-
-.. code-block:: python
-
-    In [71]: 'a' * 20 is 'aaaaaaaaaaaaaaaaaaaa'
-    Out[71]: True
+    In [5]: y='a' * 21
     
-    In [72]: 'a' * 21 is 'aaaaaaaaaaaaaaaaaaaa'
-    Out[72]: False
+    In [6]: x is y
+    Out[6]: False
+    
+    In [7]: x='aaaaaaaaaaaaaaaaaaaab'
+    
+    In [8]: y='aaaaaaaaaaaaaaaaaaaab'
+    
+    In [9]: len(x), len(y)
+    Out[9]: (21, 21)
+    
+    In [10]: x is y
+    Out[10]: True
+
+使用\*操作符号, 产生长度21的字符串是不能缓存的, 但是使用常量的21个字符串是可以缓存的, 为什么呢?
+
+看看dis结果:
+
+.. code-block:: c
+
+    In [12]: dis.dis("x='a' * 20")
+      1           0 LOAD_CONST               3 ('aaaaaaaaaaaaaaaaaaaa')
+                  2 STORE_NAME               0 (x)
+                  4 LOAD_CONST               2 (None)
+                  6 RETURN_VALUE
+    
+    In [13]: dis.dis("x='a' * 21")
+      1           0 LOAD_CONST               0 ('a')
+                  2 LOAD_CONST               1 (21)
+                  4 BINARY_MULTIPLY
+                  6 STORE_NAME               0 (x)
+                  8 LOAD_CONST               2 (None)
+                 10 RETURN_VALUE
+    
+    In [14]: dis.dis("x='aaaaaaaaaaaaaaaaaaaab'")
+      1           0 LOAD_CONST               0 ('aaaaaaaaaaaaaaaaaaaab')
+                  2 STORE_NAME               0 (x)
+                  4 LOAD_CONST               1 (None)
+                  6 RETURN_VALUE
+
+看起来, \*重复20以上次数的操作, 不是拿常量了, 而是运行时计算, 所以, x='a'\*20不是编译时候求值
+
 
 
 

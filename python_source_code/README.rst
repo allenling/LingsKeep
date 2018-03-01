@@ -46,6 +46,7 @@ python中执行语句之前, 会把语法转成codeobject(这里先跳过语法�
 
 1. 创建codeobject
 
+任何一个语句执行之前都会被编译成codeobject, 比如你使用def定义函数, class定义类等等.
 
 比如 **x[1] = 'a'** 这个代码, 执行之前, 会编译生成一个codeobject
 

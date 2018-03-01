@@ -10,20 +10,16 @@ task结构参考: https://tampub.uta.fi/bitstream/handle/10024/96864/GRADU-14284
 user-thread/lwp
 ======================
 
-内核中调度的单位是task, task对应一个process还是thread? 不会是process, 但是对于thread, 还有内核的light weight process(lwp)这个概念
+内核中调度的单位是task, task对应一个process还是thread? 这首先是一个历史问题了.
 
-一个用户的thread对应一个lwp? 还是1对多? 多对多?
+POSIX, process, thread, light weight process(lwp), user-space-thread, green thread这些关系(历史), 参考http://blog.csdn.net/u010154760/article/details/45310513
 
-在https://stackoverflow.com/questions/8639150/is-pthread-library-actually-a-user-thread-solution中, 提到关于内核的nptl:
+而在https://stackoverflow.com/questions/8639150/is-pthread-library-actually-a-user-thread-solution中, 提到关于内核的nptl:
 
 *NPTL is a so-called 1×1 threads library, in that threads created by the user (via the pthread_create() library function) are in 1-1 correspondence with schedulable entities in the kernel (tasks, in the Linux case). This is the simplest possible threading implementation.*
 
 --- nptl的维基
 
-
-所以, 看起来pthread_create的线程和内核的lwp是一一对应关系的
-
-关于lwp, linux thread, POSIX, 可以看看http://blog.csdn.net/u010154760/article/details/45310513
 
 task结构
 =========

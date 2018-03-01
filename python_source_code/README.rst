@@ -186,22 +186,40 @@ python中执行语句之前, 会把语法转成codeobject(这里先跳过语法�
     PyObject *
     _PyEval_EvalFrameDefault(PyFrameObject *f, int throwflag)
     {
+        // 拿到codeobject和它的属性
+        co = f->f_code;
+        names = co->co_names;
+        consts = co->co_consts;
+        fastlocals = f->f_localsplus;
+        freevars = f->f_localsplus + co->co_nlocals;
+
         // 省略代码
-        TARGET(STORE_SUBSCR) {
-            PyObject *sub = TOP();
-            PyObject *container = SECOND();
-            PyObject *v = THIRD();
-            int err;
-            STACKADJ(-3);
-            /* container[sub] = v */
-            err = PyObject_SetItem(container, sub, v);
-            Py_DECREF(v);
-            Py_DECREF(container);
-            Py_DECREF(sub);
-            if (err != 0)
-                goto error;
-            DISPATCH();
+
+        // 无限循环去执行codeobject的字节码
+        for (;;) {
+
+            // 省略代码
+
+            TARGET(STORE_SUBSCR) {
+                PyObject *sub = TOP();
+                PyObject *container = SECOND();
+                PyObject *v = THIRD();
+                int err;
+                STACKADJ(-3);
+                /* container[sub] = v */
+                err = PyObject_SetItem(container, sub, v);
+                Py_DECREF(v);
+                Py_DECREF(container);
+                Py_DECREF(sub);
+                if (err != 0)
+                    goto error;
+                DISPATCH();
+            }
+
+            // 省略代码
+
         }
+
         // 省略代码
     }
 

@@ -20,7 +20,7 @@ POSIX, process, thread, light weight process(lwp), user-space-thread, green thre
 
 --- nptl的维基
 
-看起来glibc中nptl实现的user-space-thread和lwp是1对1关系.
+看起来glibc中nptl实现的pthread和lwp是1对1关系.
 
 
 task结构

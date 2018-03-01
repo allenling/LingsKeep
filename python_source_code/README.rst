@@ -38,11 +38,130 @@ python接口分层
     '''
 
 
-编译层
+编译过程
 ==============
 
+python中执行语句之前, 会把语法转成codeobject(这里先跳过语法解析什么的), 然后根据codeobject中的字节码去执行程序.
 
-把python语法转成具体的字节操作码, 比如 **x[1] = 'a'** 这个代码, 通过dis查到这个操作码S是STORE_SUBSCR:
+
+1. 创建codeobject
+
+
+比如 **x[1] = 'a'** 这个代码, 执行之前, 会编译生成一个codeobject
+
+.. code-block:: c
+
+    PyCodeObject *
+    PyCode_New(int argcount, int kwonlyargcount,
+               int nlocals, int stacksize, int flags,
+               PyObject *code, PyObject *consts, PyObject *names,
+               PyObject *varnames, PyObject *freevars, PyObject *cellvars,
+               PyObject *filename, PyObject *name, int firstlineno,
+               PyObject *lnotab)
+    {
+    
+        // 省略代码
+    
+    }
+
+
+2. 运行codeobject
+ 
+然后运行codeobjetc中的字节码(下面代码是在shell模式下):
+
+.. code-block:: c
+
+    // cpython/Python/pythonrun.c
+    static PyObject *
+    run_mod(mod_ty mod, PyObject *filename, PyObject *globals, PyObject *locals,
+                PyCompilerFlags *flags, PyArena *arena)
+    {
+    
+        // 省略代码
+        
+        // 这一句就是调用上面的PyCode_New去生成返回codeobject
+        co = PyAST_CompileObject(mod, filename, flags, -1, arena);
+        
+        // 执行codeobject
+        v = PyEval_EvalCode((PyObject*)co, globals, locals);
+        
+        // 省略代码
+    
+    }
+
+3. 创建frame
+
+执行的时候, 根据当前线程的状态和codeobject, 创建需要执行的frame, 然后执行frame
+
+
+.. code-block:: c
+
+    // 这个函数是被上面的PyEval_EvalCode调用
+    static PyObject *
+    _PyEval_EvalCodeWithName(PyObject *_co, PyObject *globals, PyObject *locals,
+               PyObject **args, Py_ssize_t argcount,
+               PyObject **kwnames, PyObject **kwargs,
+               Py_ssize_t kwcount, int kwstep,
+               PyObject **defs, Py_ssize_t defcount,
+               PyObject *kwdefs, PyObject *closure,
+               PyObject *name, PyObject *qualname)
+    {
+    
+    // 省略代码
+    
+        /* Create the frame */
+        // 线程状态
+        tstate = PyThreadState_GET();
+        assert(tstate != NULL);
+        // 执行的frame
+        f = PyFrame_New(tstate, co, globals, locals);
+
+        // 省略代码
+
+        // 这里执行frame
+        retval = PyEval_EvalFrameEx(f,0);
+    
+        // 省略代码
+    
+    }
+
+
+4. 执行frame
+
+执行frame是使用当前解释器去执行
+
+
+.. code-block:: c
+
+
+    // cpython/Python/ceval.c
+    PyObject *
+    PyEval_EvalFrameEx(PyFrameObject *f, int throwflag)
+    {
+        // 当前线程状态
+        PyThreadState *tstate = PyThreadState_GET();
+        // 解释器对象去执行frame
+        return tstate->interp->eval_frame(f, throwflag);
+    }
+
+
+而interp->eval_frame函数是指向(默认)_PyEval_EvalFrameDefault
+
+.. code-block:: c
+
+    // cpython/Python/ceval.c
+    PyObject *
+    _PyEval_EvalFrameDefault(PyFrameObject *f, int throwflag)
+    {
+
+        这里就是具体执行字节码的地方
+        
+    }
+
+执行字节码
+==============
+
+通过dis查到这个操作码是STORE_SUBSCR:
 
 .. code-block:: python
 
@@ -56,10 +175,15 @@ python接口分层
                   8 LOAD_CONST               2 (None)
                  10 RETURN_VALUE
 
-然后在ceval.c中:
+然后在_PyEval_EvalFrameDefault中:
 
 .. code-block:: c
 
+    // cpython/Python/ceval.c
+    PyObject *
+    _PyEval_EvalFrameDefault(PyFrameObject *f, int throwflag)
+    {
+        // 省略代码
         TARGET(STORE_SUBSCR) {
             PyObject *sub = TOP();
             PyObject *container = SECOND();
@@ -75,9 +199,11 @@ python接口分层
                 goto error;
             DISPATCH();
         }
+        // 省略代码
+    }
 
 
-编译层中调用的接口不是具体的实现, 而是一个通用的接口, 比如PyObject_SetItem, 这个接口负责根据对象不同调用不同的实现.
+执行中调用的接口不是具体的实现, 而是一个通用的接口, 比如PyObject_SetItem, 这个接口负责根据对象不同调用不同的实现.
 
 
 中间层接口

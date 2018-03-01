@@ -51,6 +51,7 @@ python中执行语句之前, 会把语法转成codeobject(这里先跳过语法�
 
 .. code-block:: c
 
+    // cpython/Objects/codeobject.c
     PyCodeObject *
     PyCode_New(int argcount, int kwonlyargcount,
                int nlocals, int stacksize, int flags,
@@ -96,6 +97,7 @@ python中执行语句之前, 会把语法转成codeobject(这里先跳过语法�
 
 .. code-block:: c
 
+    // cpython/Python/ceval.c
     // 这个函数是被上面的PyEval_EvalCode调用
     static PyObject *
     _PyEval_EvalCodeWithName(PyObject *_co, PyObject *globals, PyObject *locals,
@@ -256,9 +258,7 @@ python中执行语句之前, 会把语法转成codeobject(这里先跳过语法�
 对象层/gc/内存管理
 ====================
 
-
 负责实现具体的操作, 比如上面的PyObject_SetItem, 在dict对象中, 有:
-
 
 
 .. code-block:: c

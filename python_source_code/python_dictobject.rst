@@ -508,6 +508,8 @@ lookdict_unicode_nodummy
         }
     }
 
+**lookdict_unicode_nodummy比起lookdict_unicode则是少了对于dummy状态的槽位的判断**
+
 删除的时候替换掉look函数
 
 cpython/Objects/dictobject.c

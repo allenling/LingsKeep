@@ -23,6 +23,8 @@ user-thread/lwp
 
 所以, 看起来pthread_create的线程和内核的lwp是一一对应关系的
 
+关于lwp, linux thread, POSIX, 可以看看http://blog.csdn.net/u010154760/article/details/45310513
+
 task结构
 =========
 

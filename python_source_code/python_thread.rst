@@ -17,6 +17,12 @@ threading中的_active_limbo_lock是一个模块级别的变量, 也就是说每
 
    1.1.3 那么把thread对象从_limbo字典移除, 然后加入到_active字典中
 
+3. start的时候会阻塞在一个event上, 一旦线程被调度, 那么信号受信, start才会返回
+
+4. python的thread就是一个pthread(调用pthread_create去创建线程), 依赖于底层库实现
+
+5. join的时候, 如果线程状态锁被删除, 则证明已经停止, 直接返回, 否则去抢锁, 抢到锁之后设置线程为终止状态
+
 self._tstate_lock
 ==================
 
@@ -336,7 +342,7 @@ _stop是检查线程是否是终止状态, 并不是去终止异常, 并且如�
     }
 
 
-_PyEval_EvalFrameDefault餐卡: python_gil.rst
+_PyEval_EvalFrameDefault参考: python_gil.rst
 
 join
 =======
@@ -512,7 +518,6 @@ cpython/Python/thread_pthread.h
         //下面省略了很多#if
         if (!initialized)
             // 是否初始化了, 这个initialized是否是全局的, 只是主线程start的时候会初始化一次
-            // 还是说每次新创建线程的时候都会初始化一次?
             PyThread_init_thread();
         // 又省略了一些#if
  
@@ -569,22 +574,21 @@ cpython/Modules/_threadmodule.c
     t_bootstrap(void *boot_raw)
     {
         struct bootstate *boot = (struct bootstate *) boot_raw;
-        // 声明下thread的tstate结构
         PyThreadState *tstate;
         PyObject *res;
     
         tstate = boot->tstate;
         tstate->thread_id = PyThread_get_thread_ident();
-        // 未清楚目的
         _PyThreadState_Init(tstate);
+
         // 这里是拿gil, 最终调用的是take_gil这个函数
         PyEval_AcquireThread(tstate);
 
-        // 当前进程(解释器)的总线程数+1
-        tstate->interp->num_threads++;
-
-        // 这里调用python的函数, 包含了gil的竞争!!!
-        res = PyObject_Call(boot->func, boot->args, boot->keyw);
+        // 全局线程数加1
+        nb_threads++;
+        // 调用callable对象
+        res = PyEval_CallObjectWithKeywords(
+            boot->func, boot->args, boot->keyw);
         if (res == NULL) {
             if (PyErr_ExceptionMatches(PyExc_SystemExit))
                 PyErr_Clear();
@@ -606,37 +610,57 @@ cpython/Modules/_threadmodule.c
         }
         else
             Py_DECREF(res);
-        // 清理python函数和参数
+
         Py_DECREF(boot->func);
         Py_DECREF(boot->args);
         Py_XDECREF(boot->keyw);
         // 释放掉boot结构
         PyMem_DEL(boot_raw);
         // 减少进程的总线程数
-        tstate->interp->num_threads--;
+        nb_threads--;
         // 清理掉tstate这个thread state
         PyThreadState_Clear(tstate);
         // 删除当前进程的state
         PyThreadState_DeleteCurrent();
         // 终止线程
         PyThread_exit_thread();
+
     }
 
 1. _PyThreadState_Init这个作用没有完全清楚, 跟_PyRuntime.gilstate.autoTSSkey结构有关
 
 2. PyEval_AcquireThread这个函数最终是调用take_gil去获取gil
 
-PyObject_Call
-================
+PyEval_AcquireThread
+=======================
 
-这个调用_PyEval_EvalFrameDefault去是执行opcode的过程, 参考: python_gil.rst
+.. code-block:: c
+
+    void
+    PyEval_AcquireThread(PyThreadState *tstate)
+    {
+        if (tstate == NULL)
+            Py_FatalError("PyEval_AcquireThread: NULL new thread state");
+        /* Check someone has called PyEval_InitThreads() to create the lock */
+        assert(gil_created());
+        // 获取gil
+        take_gil(tstate);
+        if (PyThreadState_Swap(tstate) != NULL)
+            Py_FatalError(
+                "PyEval_AcquireThread: non-NULL old thread state");
+    }
+
+PyEval_CallObjectWithKeywords
+=================================
+
+这个函数最终调用_PyEval_EvalFrameDefault去是执行opcode的过程, 参考: python_gil.rst
 
 PyThreadState_Clear
 ===============================
 
 这个函数是清理tstate: cpython/Python/pystate.c
 
-是把tstate的结构给释放掉了, 情况tstate结构, 没什么好看的
+是把tstate的结构给释放掉了, 清空tstate结构, 没什么好看的
 
 PyThreadState_DeleteCurrent
 ==============================
@@ -806,7 +830,7 @@ PyThread_release_lock这个函数的用户是释放掉锁, 详细实现参考: p
 终止线程
 ===========
 
-函数PyThread_exit_thread只是调用pthread_exit去终止pthread而已
+函数PyThread_exit_thread调用pthread_exit去终止pthread
 
 .. code-block:: c
 

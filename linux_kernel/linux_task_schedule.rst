@@ -116,6 +116,20 @@ KThread
 
 https://elixir.bootlin.com/linux/v4.15/source/include/linux/kthread.h
 
+.. code-block:: c
+
+    struct task_struct *kthread_create_on_node(int (*threadfn)(void *data),
+    					   void *data,
+    					   int node,
+    					   const char namefmt[], ...);
+
+    struct task_struct *kthread_create_on_cpu(int (*threadfn)(void *data),
+    					  void *data,
+    					  unsigned int cpu,
+    					  const char *namefmt);   
+    
+看到kthread_create_on_node和kthread_create_on_cpu返回的依然是task结构
+
 
 调度的周期/策略
 ================
@@ -173,5 +187,41 @@ task结构参考:
     unsigned int		rt_priority;
     const struct sched_class	*sched_class;
     struct sched_entity		se;
+
+
+load weight
+==============
+
+task获取到多少的timeslice, 取决于优先级(调度策略), 但是具体到多少的timeslice, 或者说timeslice的大小, 取决于load weight.
+
+
+调度类
+==========
+
+*The kernel decides, which tasks go to which scheduling classes based on their scheduling policy(SCHED_*) and calls the corresponding functions*
+
+内核会根据task的属性去决定task的调度类, 然后调用调度类的指定函数. 这就是解耦了嘛
+
+/kernel/sched/文件夹是调度的源码, 其中:
+
+1. core.c中定义了调度类必须实现的一般性接口
+
+2. fair.c实现了一般(normal)task的调度策略, 也就是CFS(Completely fair Scheduler), 也就是完全公平
+
+3. rt.c实现了实时(real time)任务的调度策略
+
+4. idle.c实现了空闲(idle)task的调度策略
+
+
+
+当一个task处于运行状态的时候, 内核调用enqueue_task, 该函数的作用是把指定的task加入到cpu的runqueue里面(优先级插入?)
+
+*Each CPU(core) in the system has its own runqueue, and any task can be included in at most one runqueue;*
+
+*A process scheduler’s job is to pick one task from a queue and assign it to run on a respective CPU(core).*
+
+
+
+比如a, b两个task都是使用A这个调度类, 则有:
 
 

@@ -11,6 +11,8 @@
 
 5. https://docs.python.org/3/c-api/memory.html
 
+python中的pool/arena的内存策略很想linux内核的slab机制
+
 C语言中malloc/calloc
 =======================
 

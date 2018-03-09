@@ -43,6 +43,8 @@ python接口分层
 
 python中执行语句之前, 会把语法转成codeobject(这里先跳过语法解析什么的), 然后根据codeobject中的字节码去执行程序.
 
+python启动的时候并没有去创建所谓的"主线程", 而只是就是一个进程而已, 更多请参考pthread的资料
+
 
 1. 创建codeobject
 

@@ -24,9 +24,9 @@
 pthread/task
 =============
 
-内核的调度单位是task, 无论是进程还是线程, 都会映射到task结构中, 也就是lwp(Light Weight Process)
+内核的调度单位是task, 无论是进程还是线程, 都会映射到task结构中, 也就是lwp(Light Weight Process).
 
-具体参考: glibc_nptl.rst
+而linux的线程的实现是glibc下的nptl实现的, 具体参考: glibc_nptl.rst
 
 
 KThread

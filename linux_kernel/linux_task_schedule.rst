@@ -89,11 +89,7 @@ frequently. I/O bound tasks, in turn, possess the processor more often, but for 
 task结构
 =============
 
-参考 [3]_ 和参考 [4]_
-
-
-task结构参考: 
-
+参考 [3]_
 
 
 

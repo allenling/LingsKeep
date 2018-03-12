@@ -205,7 +205,7 @@ fork调用的是clone而不是原生的fork调用, 这是因为clone支持新建
 
 所以, 我们使用glibc下的fork并不是系统调用fork, 而是glibc实现的一个wrap, 使用起来更容易, 并且内部是调用clone这个系统调用, 可以支持线程(lwp)的创建.
 
-Linux Thread/nptl
+LinuxThread/nptl
 ===================
 
 linux下POSIX线程的实现有两种: LinuxThread和nptl.

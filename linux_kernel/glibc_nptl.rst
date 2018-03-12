@@ -17,6 +17,8 @@ glibc中的thread
 
 .. [8] https://www.jianshu.com/p/ea692d4f5e27
 
+.. [9] https://casatwy.com/pthreadde-ge-chong-tong-bu-ji-zhi.html (pthread下的同步机制)
+
 参考6有Linux下Thread的详细介绍
 
 参考7中对pthread的创建过程源码有一部分跟4.15的有区别, 注意一下
@@ -358,4 +360,245 @@ pthread_create会调用到createthread去实际创建线程
 参考 [8]_有比较多的解释
 
 
+clone/task
+==============
+
+pthread到task的关键代码, 其实就是clone系统调用新建task.
+
+https://elixir.bootlin.com/linux/v4.15/source/kernel/fork.c#L2132
+
+.. code-block:: c
+
+    #ifdef __ARCH_WANT_SYS_CLONE
+    #ifdef CONFIG_CLONE_BACKWARDS
+    SYSCALL_DEFINE5(clone, unsigned long, clone_flags, unsigned long, newsp,
+    		 int __user *, parent_tidptr,
+    		 unsigned long, tls,
+    		 int __user *, child_tidptr)
+    #elif defined(CONFIG_CLONE_BACKWARDS2)
+    SYSCALL_DEFINE5(clone, unsigned long, newsp, unsigned long, clone_flags,
+    		 int __user *, parent_tidptr,
+    		 int __user *, child_tidptr,
+    		 unsigned long, tls)
+    #elif defined(CONFIG_CLONE_BACKWARDS3)
+    SYSCALL_DEFINE6(clone, unsigned long, clone_flags, unsigned long, newsp,
+    		int, stack_size,
+    		int __user *, parent_tidptr,
+    		int __user *, child_tidptr,
+    		unsigned long, tls)
+    #else
+    SYSCALL_DEFINE5(clone, unsigned long, clone_flags, unsigned long, newsp,
+    		 int __user *, parent_tidptr,
+    		 int __user *, child_tidptr,
+    		 unsigned long, tls)
+    #endif
+    {
+        // 看这里!!!!!!!!!!!!!!!
+    	return _do_fork(clone_flags, newsp, 0, parent_tidptr, child_tidptr, tls);
+    }
+    #endif
+
+clone也会调用_do_fork, 根据上一节, 传入了很多clone_flags, 其中有CLONE_THREAD, 然后_do_fork有
+
+https://elixir.bootlin.com/linux/v4.15/source/kernel/fork.c#L2015
+
+.. code-block:: c
+
+
+    long _do_fork(unsigned long clone_flags,
+    	      unsigned long stack_start,
+    	      unsigned long stack_size,
+    	      int __user *parent_tidptr,
+    	      int __user *child_tidptr,
+    	      unsigned long tls)
+    {
+        // 一个新的task结构
+    	struct task_struct *p;
+    	int trace = 0;
+    	long nr;
+    
+    	/*
+    	 * Determine whether and which event to report to ptracer.  When
+    	 * called from kernel_thread or CLONE_UNTRACED is explicitly
+    	 * requested, no event is reported; otherwise, report if the event
+    	 * for the type of forking is enabled.
+    	 */
+        // 这里暂时看不懂
+    	if (!(clone_flags & CLONE_UNTRACED)) {
+    		if (clone_flags & CLONE_VFORK)
+    			trace = PTRACE_EVENT_VFORK;
+    		else if ((clone_flags & CSIGNAL) != SIGCHLD)
+    			trace = PTRACE_EVENT_CLONE;
+    		else
+    			trace = PTRACE_EVENT_FORK;
+    
+    		if (likely(!ptrace_event_enabled(current, trace)))
+    			trace = 0;
+    	}
+    
+        // --------注意, 这里我们复制task了!!!!
+        p = copy_process(clone_flags, stack_start, stack_size,
+    			 child_tidptr, NULL, trace, tls, NUMA_NO_NODE);
+    	add_latent_entropy();
+    	/*
+    	 * Do this prior waking up the new thread - the thread pointer
+    	 * might get invalid after that point, if the thread exits quickly.
+    	 */
+    	if (!IS_ERR(p)) {
+    		struct completion vfork;
+    		struct pid *pid;
+    
+    		trace_sched_process_fork(current, p);
+    
+    		pid = get_task_pid(p, PIDTYPE_PID);
+    		nr = pid_vnr(pid);
+    
+    		if (clone_flags & CLONE_PARENT_SETTID)
+    			put_user(nr, parent_tidptr);
+    
+    		if (clone_flags & CLONE_VFORK) {
+    			p->vfork_done = &vfork;
+    			init_completion(&vfork);
+    			get_task_struct(p);
+    		}
+    
+                // 没有错误, 我们就启动task了
+    		wake_up_new_task(p);
+    
+    		/* forking complete and child started to run, tell ptracer */
+    		if (unlikely(trace))
+    			ptrace_event_pid(trace, pid);
+    
+    		if (clone_flags & CLONE_VFORK) {
+    			if (!wait_for_vfork_done(p, &vfork))
+    				ptrace_event_pid(PTRACE_EVENT_VFORK_DONE, pid);
+    		}
+    
+    		put_pid(pid);
+    	} else {
+    		nr = PTR_ERR(p);
+    	}
+    	return nr;
+    }
+
+copy_process
+===============
+
+这里是复制的操作, 太长, 先暂时省略很多很多很多代码
+
+https://elixir.bootlin.com/linux/v4.15/source/kernel/fork.c#L1534
+
+.. code-block:: c
+
+    /*
+     * This creates a new process as a copy of the old one,
+     * but does not actually start it yet.
+     *
+     * It copies the registers, and all the appropriate
+     * parts of the process environment (as per the clone
+     * flags). The actual kick-off is left to the caller.
+     */
+    static __latent_entropy struct task_struct *copy_process(
+    					unsigned long clone_flags,
+    					unsigned long stack_start,
+    					unsigned long stack_size,
+    					int __user *child_tidptr,
+    					struct pid *pid,
+    					int trace,
+    					unsigned long tls,
+    					int node)
+    {
+    
+        // 省略代码
+        
+        // 你看, 复制task结构了
+        p = dup_task_struct(current, node);
+        
+        // 省略代码
+
+        p->pid = pid_nr(pid);
+
+        // 下面是针对线程, 赋值task结构里面的属性
+        // 包括什么tgid呀
+        if (clone_flags & CLONE_THREAD) {
+        	p->exit_signal = -1;
+        	p->group_leader = current->group_leader;
+        	p->tgid = current->tgid;
+        } else {
+        	if (clone_flags & CLONE_PARENT)
+        		p->exit_signal = current->group_leader->exit_signal;
+        	else
+        		p->exit_signal = (clone_flags & CSIGNAL);
+        	p->group_leader = p;
+        	p->tgid = p->pid;
+        }
+
+        // 省略代码
+    
+    
+    }
+
+
+wake_up_new_task
+======================
+
+注释上说就是唤醒新建的task
+
+https://elixir.bootlin.com/linux/v4.15/source/kernel/sched/core.c#L2447
+
+
+.. code-block:: c
+
+    /*
+     * wake_up_new_task - wake up a newly created task for the first time.
+     *
+     * This function will do some initial scheduler statistics housekeeping
+     * that must be done for every newly created context, then puts the task
+     * on the runqueue and wakes it.
+     */
+    void wake_up_new_task(struct task_struct *p)
+    {
+    	struct rq_flags rf;
+    	struct rq *rq;
+    
+    	raw_spin_lock_irqsave(&p->pi_lock, rf.flags);
+        // task的状态
+    	p->state = TASK_RUNNING;
+    #ifdef CONFIG_SMP
+    	/*
+    	 * Fork balancing, do it here and not earlier because:
+    	 *  - cpus_allowed can change in the fork path
+    	 *  - any previously selected CPU might disappear through hotplug
+    	 *
+    	 * Use __set_task_cpu() to avoid calling sched_class::migrate_task_rq,
+    	 * as we're not fully set-up yet.
+    	 */
+
+         // 把task放到cpu的runqueue中
+    	__set_task_cpu(p, select_task_rq(p, task_cpu(p), SD_BALANCE_FORK, 0));
+    #endif
+    	rq = __task_rq_lock(p, &rf);
+    	update_rq_clock(rq);
+    	post_init_entity_util_avg(&p->se);
+    
+    	activate_task(rq, p, ENQUEUE_NOCLOCK);
+    	p->on_rq = TASK_ON_RQ_QUEUED;
+    	trace_sched_wakeup_new(p);
+    	check_preempt_curr(rq, p, WF_FORK);
+    #ifdef CONFIG_SMP
+    	if (p->sched_class->task_woken) {
+    		/*
+    		 * Nothing relies on rq->lock after this, so its fine to
+    		 * drop it.
+    		 */
+    		rq_unpin_lock(rq, &rf);
+    		p->sched_class->task_woken(rq, p);
+    		rq_repin_lock(rq, &rf);
+    	}
+    #endif
+    	task_rq_unlock(rq, p, &rf);
+    }
+
+
+关于task调度, 参考linux_kernel/linux_task_schedule.rst
 

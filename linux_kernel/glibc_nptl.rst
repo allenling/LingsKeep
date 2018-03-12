@@ -19,7 +19,7 @@ glibc中的thread
 
 参考6有Linux下Thread的详细介绍
 
-参考7中对pthread的创建过程源码有一部分跟4.15的有区别, 注意一下, 然后被阿里云社区抄袭过去了~~~~
+参考7中对pthread的创建过程源码有一部分跟4.15的有区别, 注意一下
 
 参考8有关于ARCH_CLONE的解释, 以及clone_flags等其他参数的一些解释
 
@@ -323,7 +323,39 @@ pthread_create会调用到createthread去实际创建线程
   
   -- 参考8
 
-其他源码参考 [8]_有比较多的解释
+关于各种flag, 注释上有
+
+.. code-block:: c
+
+    /*
+    
+         CLONE_VM, CLONE_FS, CLONE_FILES
+    	These flags select semantics with shared address space and
+    	file descriptors according to what POSIX requires.
+    
+         CLONE_SIGHAND, CLONE_THREAD
+    	This flag selects the POSIX signal semantics and various
+    	other kinds of sharing (itimers, POSIX timers, etc.).
+    
+         CLONE_SETTLS
+    	The sixth parameter to CLONE determines the TLS area for the
+    	new thread.
+    
+         CLONE_PARENT_SETTID
+    	The kernels writes the thread ID of the newly created thread
+    	into the location pointed to by the fifth parameters to CLONE.
+    
+    	Note that it would be semantically equivalent to use
+    	CLONE_CHILD_SETTID but it is be more expensive in the kernel.
+    
+         CLONE_CHILD_CLEARTID
+    	The kernels clears the thread ID of a thread that has called
+    	sys_exit() in the location pointed to by the seventh parameter
+    	to CLONE.
+    */
+
+
+参考 [8]_有比较多的解释
 
 
 

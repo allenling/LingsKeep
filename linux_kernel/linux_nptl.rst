@@ -1,5 +1,5 @@
-glibc中的thread
-=================
+Linux的pthread(nptl)
+======================
 
 .. [1] https://www.gnu.org/gnu/linux-and-gnu.en.html
 
@@ -17,13 +17,27 @@ glibc中的thread
 
 .. [8] https://www.jianshu.com/p/ea692d4f5e27
 
-.. [9] https://casatwy.com/pthreadde-ge-chong-tong-bu-ji-zhi.html (pthread下的同步机制)
+.. [9] https://casatwy.com/pthreadde-ge-chong-tong-bu-ji-zhi.html
 
-参考6有Linux下Thread的详细介绍
+.. [10] https://stackoverflow.com/questions/18904292/is-it-true-that-fork-calls-clone-internally
+
+.. [11] http://kernel.meizu.com/linux-signal.html
+
+.. [12] http://www.cnblogs.com/parrynee/archive/2010/01/14/1648152.html
+
+参考4是fork的一些解释
+
+参考6有Linux下Thread的历史介绍
 
 参考7中对pthread的创建过程源码有一部分跟4.15的有区别, 注意一下
 
 参考8有关于ARCH_CLONE的解释, 以及clone_flags等其他参数的一些解释
+
+参考9是pthread下的同步机制
+
+参考11则是信号处理(kill等)的代码流程
+
+参考12是task结构中, pids这个属性的一些解释. 注意的是4.15类型变成了pid_link而不是文章中的pid_type, 但是都是使用hash表结构.
 
 GNU
 ====
@@ -184,6 +198,43 @@ fork系统调用基本上没有传参, 没什么灵活性.
   By providing a wrapper around certain system calls glibc makes it a lot easier and portable for developers to use system calls. There is still the possibility to use syscall(2) to call system calls somewhat more directly.*
   
   --- 参考4
+
+而glibc中的fork怎么实现的? 
+
+sysdeps/nptl/fork.c
+
+.. code-block:: c
+
+    pid_t
+    __libc_fork (void)
+    {
+    
+    // 省略代码
+    
+    // 这里调用平台相关的fork
+    #ifdef ARCH_FORK
+      pid = ARCH_FORK ();
+    #else
+    # error "ARCH_FORK must be defined so that the CLONE_SETTID flag is used"
+      pid = INLINE_SYSCALL (fork, 0);
+    #endif
+    
+    // 省略代码
+    
+    }
+
+然后在linux x86_64平台下, ARCH_FORK有
+
+sysdeps/unix/sysv/linux/x86_64/arch-fork.h
+
+.. code-block:: c
+
+    #define ARCH_FORK() \
+      INLINE_SYSCALL (clone, 4,                                                   \
+                      CLONE_CHILD_SETTID | CLONE_CHILD_CLEARTID | SIGCHLD, 0,     \
+                      NULL, &THREAD_SELF->tid)
+
+linux(x86_64)下fork是去调用clone, 传入的clone_flag主要区别是SIGCHLD
 
 所以, glibc下的fork是不会去调用fork系统调用, 而是自己实现了一层wrap. 这是因为直接调用fork系统调用的话, 需要自己设置
 
@@ -359,9 +410,123 @@ pthread_create会调用到createthread去实际创建线程
 
 参考 [8]_有比较多的解释
 
+----
 
-clone/task
-==============
+task和thread
+=================
+
+从信号处理流程去看task中的结构信息的作用
+
+这里不涉及调度, 调度参考linux_task_schedule.rst
+
+下面信号处理的代码参考 [11]_
+
+
+kill发送信号
+================
+
+
+https://elixir.bootlin.com/linux/v4.15/source/kernel/signal.c#L2936
+
+.. code-block:: c
+
+    /**
+     *  sys_kill - send a signal to a process
+     *  @pid: the PID of the process
+     *  @sig: signal to be sent
+     */
+    SYSCALL_DEFINE2(kill, pid_t, pid, int, sig)
+    {
+        struct siginfo info;
+
+        info.si_signo = sig;
+        info.si_errno = 0;
+        info.si_code = SI_USER;
+        info.si_pid = task_tgid_vnr(current);
+        info.si_uid = from_kuid_munged(current_user_ns(), current_uid());
+
+        return kill_something_info(sig, &info, pid);
+    }
+
+这里传入的pid是pid_t类型, 而这个pid_t的定义是在
+
+.. code-block:: c
+
+    // https://elixir.bootlin.com/linux/v4.15/source/include/linux/types.h#L22
+    typedef __kernel_pid_t		pid_t;
+
+
+然后搜索一下, 看到似乎这个__kernel_pid_t是跟平台有关的, 没找到x86_64的, 就看到什么安腾(ia)的, 所以
+
+只能以在posix_types下的定义为准了, 是一个int类型
+
+.. code-block:: c
+
+    // https://elixir.bootlin.com/linux/v4.15/source/include/uapi/asm-generic/posix_types.h#L28
+    #ifndef __kernel_pid_t
+    typedef int		__kernel_pid_t;
+    #endif
+
+kill_something_info
+======================
+
+https://elixir.bootlin.com/linux/v4.15/source/kernel/signal.c#L1399
+
+.. code-block:: c
+
+    /*
+     * kill_something_info() interprets pid in interesting ways just like kill(2).
+     *
+     * POSIX specifies that kill(-1,sig) is unspecified, but what we have
+     * is probably wrong.  Should make it like BSD or SYSV.
+     */
+    
+    static int kill_something_info(int sig, struct siginfo *info, pid_t pid)
+    {
+    	int ret;
+    
+        // 如果pid大于0, 那么会发送到对应的进程中
+    	if (pid > 0) {
+    		rcu_read_lock();
+    		ret = kill_pid_info(sig, info, find_vpid(pid));
+    		rcu_read_unlock();
+    		return ret;
+    	}
+    
+    	/* -INT_MIN is undefined.  Exclude this case to avoid a UBSAN warning */
+    	if (pid == INT_MIN)
+    		return -ESRCH;
+    
+    	read_lock(&tasklist_lock);
+        // (pid <= 0) && (pid != -1), 发送信号给pid进程所在进程组中的每一个线程组
+    	if (pid != -1) {
+    		ret = __kill_pgrp_info(sig, info,
+    				pid ? find_vpid(-pid) : task_pgrp(current));
+    	} else {
+                // pid = -1, 发送信号给所有进程的进程组，除了pid=1和当前进程自己
+    		int retval = 0, count = 0;
+    		struct task_struct * p;
+    
+    		for_each_process(p) {
+    			if (task_pid_vnr(p) > 1 &&
+    					!same_thread_group(p, current)) {
+    				int err = group_send_sig_info(sig, info, p);
+    				++count;
+    				if (err != -EPERM)
+    					retval = err;
+    			}
+    		}
+    		ret = count ? retval : -ESRCH;
+    	}
+    	read_unlock(&tasklist_lock);
+    
+    	return ret;
+    }
+
+
+
+task结构
+============
 
 pthread到task的关键代码, 其实就是clone系统调用新建task.
 
@@ -516,6 +681,16 @@ https://elixir.bootlin.com/linux/v4.15/source/kernel/fork.c#L1534
         
         // 省略代码
 
+        // 这里会根据是否是线程去决定是否公用
+        // 信号结构
+        retval = copy_signal(clone_flags, p);
+        if (retval)
+        	goto bad_fork_cleanup_sighand;
+
+        // 省略代码
+
+        // 这里的pid则是task结构的pid
+        // 和我们通常称的pid是不太一样
         p->pid = pid_nr(pid);
 
         // 下面是针对线程, 赋值task结构里面的属性
@@ -523,6 +698,7 @@ https://elixir.bootlin.com/linux/v4.15/source/kernel/fork.c#L1534
         if (clone_flags & CLONE_THREAD) {
         	p->exit_signal = -1;
         	p->group_leader = current->group_leader;
+                // 如果是线程, 那么tgid则是统一的tgid
         	p->tgid = current->tgid;
         } else {
         	if (clone_flags & CLONE_PARENT)
@@ -530,10 +706,13 @@ https://elixir.bootlin.com/linux/v4.15/source/kernel/fork.c#L1534
         	else
         		p->exit_signal = (clone_flags & CSIGNAL);
         	p->group_leader = p;
+                // 如果不是线程, tgid就是其自己的pid
         	p->tgid = p->pid;
         }
 
-        // 省略代码
+
+    // 省略代码
+
     
     
     }

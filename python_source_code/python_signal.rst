@@ -468,7 +468,7 @@ linux的kill
 
 一般我们是用kill向进程发送信号的, 那么哪个线程被唤醒呢?
 
-https://elixir.bootlin.com/linux/v4.15/source/kernel/signal.c#L892
+https://elixir.bootlin.com/linux/v4.15/source/kernel/signal.c#L2936
 
 .. code-block:: c
 
@@ -641,6 +641,11 @@ these threads to receive a signal sent using kill(2).*
 5. task_curr是判断当前线程是否占用cpu
 
 6. signal_pending: 检查当前进程是否有信号处理，返回不为0表示有信号需要处理.
-
-   参考 `这里 <http://blog.csdn.net/hitxiaotao/article/details/1479196>`_
+   参考 `这里 <http://blog.csdn.net/hitxiaotao/article/details/1479196>`_
    
+
+线程的信号处理
+====================
+
+参考linux_source_code/glic_nptl.rst
+

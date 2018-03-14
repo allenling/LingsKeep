@@ -156,7 +156,7 @@ HAVE_SIGACTION定义在pyconfig.h
     /* Define to 1 if you have the `sigaction' function. */
     #define HAVE_SIGACTION 1
 
-linux下存在sigaction, sigaction的作用是改变对应signal的handler(man sigaction).
+linux下的sigaction(严格来说是glibc下的sigaction), sigaction的作用是改变对应signal的handler(man sigaction).
 
 cpython/Python/pylifecycle.c
 
@@ -270,7 +270,7 @@ trip_signal
         // 通知vm的
         _PyEval_SignalReceived();
     
-        // 这一大串注释也没怎么看懂
+        // 这一大串注释解释的是使用了wakup_fd会重复唤醒的情况
         /* And then write to the wakeup fd *after* setting all the globals and
            doing the _PyEval_SignalReceived. We used to write to the wakeup fd
            and then set the flag, but this allowed the following sequence of events
@@ -493,6 +493,8 @@ https://elixir.bootlin.com/linux/v4.15/source/kernel/signal.c#L2936
 
 更具体的流程, 参考这里: http://kernel.meizu.com/linux-signal.html
 
+关于nptl下的线程以及其信号处理的详细流程, 参考linux_source_code/glic_nptl.rst
+
 pid结构参考: http://www.cnblogs.com/parrynee/archive/2010/01/14/1648152.html
 
 **最终, 挑选线程是在complete_signal函数**
@@ -643,9 +645,3 @@ these threads to receive a signal sent using kill(2).*
 6. signal_pending: 检查当前进程是否有信号处理，返回不为0表示有信号需要处理.
    参考 `这里 <http://blog.csdn.net/hitxiaotao/article/details/1479196>`_
    
-
-线程的信号处理
-====================
-
-参考linux_source_code/glic_nptl.rst
-

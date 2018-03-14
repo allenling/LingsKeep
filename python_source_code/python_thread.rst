@@ -535,7 +535,31 @@ cpython/Python/thread_pthread.h
                              (void* (*)(void *))func,
                              (void *)arg
                              );
+        #if defined(THREAD_STACK_SIZE) || defined(PTHREAD_SYSTEM_SCHED_SUPPORTED)
+            pthread_attr_destroy(&attrs);
+        #endif
+            if (status != 0)
+                return -1;
+        
+            // 这里做了一个detach的操作
+            pthread_detach(th);
+        
+        #if SIZEOF_PTHREAD_T <= SIZEOF_LONG
+            return (long) th;
+        #else
+            return (long) *(long *) &th;
+        #endif
     }
+
+关于pthread_detach
+
+  *The pthread_detach() function marks the thread identified by thread as detached.  When a detached thread terminates, its resources are automatically released back to the system without the need for
+  another thread to join with the terminated thread.*
+  
+  --- pthread_detach的man手册
+
+也就是该线程终止的时候, 内核会自动回收资源而不需要另外一个线程进行join操作. 这个是和内核有关, 和下面的release操作不同.
+
 
 PyThread_init_thread 
 =======================

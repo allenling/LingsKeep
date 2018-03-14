@@ -25,6 +25,8 @@ Linux的pthread(nptl)
 
 .. [12] http://www.cnblogs.com/parrynee/archive/2010/01/14/1648152.html
 
+.. [13] http://cs-pub.bu.edu/fac/richwest/cs591_w1/notes/wk3_pt2.PDF
+
 参考4是fork的一些解释
 
 参考6有Linux下Thread的历史介绍
@@ -415,9 +417,13 @@ pthread_create会调用到createthread去实际创建线程
 task和thread
 =================
 
-从信号处理流程去看task中的结构信息的作用
+下面从信号处理流程去看task中的结构信息的作用, 这里不涉及调度, 调度参考linux_task_schedule.rst
 
-这里不涉及调度, 调度参考linux_task_schedule.rst
+    *理解信号异步机制的关键是信号的响应时机，我们对一个进程发送一个信号以后，其实并没有硬中断发生，只是简单把信号挂载到目标进程的信号 pending 队列上去，信号真正得到执行的时机是进程执行完异常/中断返回到用户态的时刻。
+    
+    让信号看起来是一个异步中断的关键就是，正常的用户进程是会频繁的在用户态和内核态之间切换的（这种切换包括：系统调用、缺页异常、系统中断…），所以信号能很快的能得到执行。但这也带来了一点问题，内核进程是不响应信号的，除非它刻意的去查询。所以通常情况下我们无法通过kill命令去杀死一个内核进程。*
+    
+    --- 参考11
 
 下面信号处理的代码参考 [11]_
 
@@ -522,6 +528,716 @@ https://elixir.bootlin.com/linux/v4.15/source/kernel/signal.c#L1399
     
     	return ret;
     }
+
+kill_pid_info
+==================
+
+
+https://elixir.bootlin.com/linux/v4.15/source/kernel/signal.c#L1313
+
+.. code-block:: c
+
+    int kill_pid_info(int sig, struct siginfo *info, struct pid *pid)
+    {
+    	int error = -ESRCH;
+    	struct task_struct *p;
+    
+    	for (;;) {
+    		rcu_read_lock();
+    		p = pid_task(pid, PIDTYPE_PID);
+                // 这里通过pid获取对应的task结构
+    		if (p)
+                        // 把信号发送到进程
+                        // 也就是把信号发送到线程组
+    			error = group_send_sig_info(sig, info, p);
+    		rcu_read_unlock();
+    		if (likely(!p || error != -ESRCH))
+    			return error;
+    
+    		/*
+    		 * The task was unhashed in between, try again.  If it
+    		 * is dead, pid_task() will return NULL, if we race with
+    		 * de_thread() it will find the new leader.
+    		 */
+    	}
+    }
+
+
+https://elixir.bootlin.com/linux/v4.15/source/kernel/signal.c#L1279
+
+.. code-block:: c
+
+    int group_send_sig_info(int sig, struct siginfo *info, struct task_struct *p)
+    {
+    	int ret;
+    
+    	rcu_read_lock();
+    	ret = check_kill_permission(sig, info, p);
+    	rcu_read_unlock();
+    
+    	if (!ret && sig)
+                // 最后还是调用do_send_sig_info
+                // !!!!!注意, 这里最后一个参数是true!!!
+    		ret = do_send_sig_info(sig, info, p, true);
+    
+    	return ret;
+    }
+
+https://elixir.bootlin.com/linux/v4.15/source/kernel/signal.c#L1155
+
+.. code-block:: c
+
+    int do_send_sig_info(int sig, struct siginfo *info, struct task_struct *p,
+    			bool group)
+    {
+    	unsigned long flags;
+    	int ret = -ESRCH;
+    
+    	if (lock_task_sighand(p, &flags)) {
+                // !!!!这里, 上面最后一个参数是group, 传参的时候传的是true!!!
+    		ret = send_signal(sig, info, p, group);
+    		unlock_task_sighand(p, &flags);
+    	}
+    
+    	return ret;
+    }
+
+
+__send_signal
+================
+
+上面的do_send_sig_info->send_signal最后会调用到__send_signal
+
+
+https://elixir.bootlin.com/linux/v4.15/source/kernel/signal.c#L994
+
+
+.. code-block:: c
+
+    static int __send_signal(int sig, struct siginfo *info, struct task_struct *t,
+    			int group, int from_ancestor_ns)
+    {
+    
+    
+    	struct sigpending *pending;
+    	struct sigqueue *q;
+    	int override_rlimit;
+    	int ret = 0, result;
+    
+    	assert_spin_locked(&t->sighand->siglock);
+    
+    	result = TRACE_SIGNAL_IGNORED;
+        // !!!判断是否可以忽略信号
+    	if (!prepare_signal(sig, t,
+    			from_ancestor_ns || (info == SEND_SIG_FORCED)))
+    		goto ret;
+
+        // !!注意这里, 这里如果group是true的话
+        // 那么pending是t->signal->shared_pendding, 说明是拿线程组中共享的信号队列
+        // 如果group不是true, 那么拿的是task自己的pending
+    	pending = group ? &t->signal->shared_pending : &t->pending;
+
+        /*
+         * Short-circuit ignored signals and support queuing
+         * exactly one non-rt signal, so that we can get more
+         * detailed information about the cause of the signal.
+         */
+        result = TRACE_SIGNAL_ALREADY_PENDING;
+
+        // 这里legacy_queue判断, 如果sig是常规信号, 那么是否已经在队列中了, 如果在了就过
+        // 如果sig是实时信号, 则可以重复入队
+        // 另外一方面也说明了，如果是实时信号，尽管信号重复，但还是要加入pending队列
+        // 实时信号的多个信号都需要能被接收到
+        if (legacy_queue(pending, sig))
+        	goto ret;
+        
+        result = TRACE_SIGNAL_DELIVERED;
+        /*
+         * fast-pathed signals for kernel-internal things like SIGSTOP
+         * or SIGKILL.
+         */
+        // 如果是一些强制信号, 那么直接处理
+        // 如果是强制信号(SEND_SIG_FORCED)，不走挂载pending队列的流程，直接快速路径优先处理
+        if (info == SEND_SIG_FORCED)
+            goto out_set;    
+        
+        /*
+         * Real-time signals must be queued if sent by sigqueue, or
+         * some other real-time mechanism.  It is implementation
+         * defined whether kill() does so.  We attempt to do so, on
+         * the principle of least surprise, but since kill is not
+         * allowed to fail with EAGAIN when low on memory we just
+         * make sure at least one signal gets delivered and don't
+         * pass on the info struct.
+         */
+
+        // 符合条件的特殊信号可以突破siganl pending队列的大小限制(rlimit)
+        // 否则在队列满的情况下，丢弃信号
+        // signal pending队列大小rlimit的值可以通过命令"ulimit -i"查看
+        if (sig < SIGRTMIN)
+        	override_rlimit = (is_si_special(info) || info->si_code >= 0);
+        else
+        	override_rlimit = 0;
+        
+        // 没有ignore的信号，加入到pending队列中
+        // pending队列的每一个元素都是sigqueue结构
+        q = __sigqueue_alloc(sig, t, GFP_ATOMIC, override_rlimit);
+
+        // 加入pending队列
+        if (q) {
+        	list_add_tail(&q->list, &pending->list);
+        	switch ((unsigned long) info) {
+        	case (unsigned long) SEND_SIG_NOINFO:
+        		q->info.si_signo = sig;
+        		q->info.si_errno = 0;
+        		q->info.si_code = SI_USER;
+        		q->info.si_pid = task_tgid_nr_ns(current,
+        						task_active_pid_ns(t));
+        		q->info.si_uid = from_kuid_munged(current_user_ns(), current_uid());
+        		break;
+        	case (unsigned long) SEND_SIG_PRIV:
+        		q->info.si_signo = sig;
+        		q->info.si_errno = 0;
+        		q->info.si_code = SI_KERNEL;
+        		q->info.si_pid = 0;
+        		q->info.si_uid = 0;
+        		break;
+        	default:
+        		copy_siginfo(&q->info, info);
+        		if (from_ancestor_ns)
+        			q->info.si_pid = 0;
+        		break;
+        	}
+        
+        	userns_fixup_signal_uid(&q->info, t);
+        
+        } else if (!is_si_special(info)) {
+        	if (sig >= SIGRTMIN && info->si_code != SI_USER) {
+        		/*
+        		 * Queue overflow, abort.  We may abort if the
+        		 * signal was rt and sent by user using something
+        		 * other than kill().
+        		 */
+        		result = TRACE_SIGNAL_OVERFLOW_FAIL;
+        		ret = -EAGAIN;
+        		goto ret;
+        	} else {
+        		/*
+        		 * This is a silent loss of information.  We still
+        		 * send the signal, but the *info bits are lost.
+        		 */
+        		result = TRACE_SIGNAL_LOSE_INFO;
+        	}
+        }
+    
+    
+
+        out_set:
+        	signalfd_notify(t, sig);
+        	sigaddset(&pending->signal, sig);
+                // 选择合适的进程来响应信号，如果需要并唤醒对应的进程
+        	complete_signal(sig, t, group);
+        ret:
+        	trace_signal_generate(sig, info, t, group, result);
+        	return ret;
+            
+    }
+
+complete_signal
+==================
+
+这里会选择合适的task去唤醒, 调用wants_signal去检查task是否可以处理信号
+
+.. code-block:: c
+
+    static void complete_signal(int sig, struct task_struct *p, int group)
+    {
+    	struct signal_struct *signal = p->signal;
+    	struct task_struct *t;
+    
+    	/*
+    	 * Now find a thread we can wake up to take the signal off the queue.
+    	 *
+    	 * If the main thread wants the signal, it gets first crack.
+    	 * Probably the least surprising to the average bear.
+    	 */
+        // 注释上说, 先检查主线程是否可以处理信号
+        // 如果可以, 主线程处理
+    	if (wants_signal(sig, p))
+    		t = p;
+    	else if (!group || thread_group_empty(p))
+    		/*
+    		 * There is just one thread and it does not need to be woken.
+    		 * It will dequeue unblocked signals before it runs again.
+    		 */
+    		return;
+    	else {
+    		/*
+    		 * Otherwise try to find a suitable thread.
+    		 */
+    		t = signal->curr_target;
+                // 否则一个一个去遍历线程, 直到找到一个
+                // 线程可以处理信号
+    		while (!wants_signal(sig, t)) {
+    			t = next_thread(t);
+    			if (t == signal->curr_target)
+    				/*
+    				 * No thread needs to be woken.
+    				 * Any eligible threads will see
+    				 * the signal in the queue soon.
+    				 */
+    				return;
+    		}
+    		signal->curr_target = t;
+    	}
+    
+    	/*
+    	 * Found a killable thread.  If the signal will be fatal,
+    	 * then start taking the whole group down immediately.
+    	 */
+        // 注释上说, 如果信号是一些致命的信号
+        // 那么遍历所有的task, 每个task的pending队列设置上SIGKILL标志位
+        // 然后唤醒task, 也就是杀死task
+        if (sig_fatal(p, sig) &&
+    	    !(signal->flags & SIGNAL_GROUP_EXIT) &&
+    	    !sigismember(&t->real_blocked, sig) &&
+    	    (sig == SIGKILL || !p->ptrace)) {
+    		/*
+    		 * This signal will be fatal to the whole group.
+    		 */
+    		if (!sig_kernel_coredump(sig)) {
+    			/*
+    			 * Start a group exit and wake everybody up.
+    			 * This way we don't have other threads
+    			 * running and doing things after a slower
+    			 * thread has the fatal signal pending.
+    			 */
+    			signal->flags = SIGNAL_GROUP_EXIT;
+    			signal->group_exit_code = sig;
+    			signal->group_stop_count = 0;
+    			t = p;
+    			do {
+                                // 逐个杀死task
+    				task_clear_jobctl_pending(t, JOBCTL_PENDING_MASK);
+    				sigaddset(&t->pending.signal, SIGKILL);
+    				signal_wake_up(t, 1);
+    			} while_each_thread(p, t);
+    			return;
+    		}
+    	}
+    
+    	/*
+    	 * The signal is already in the shared-pending queue.
+    	 * Tell the chosen thread to wake up and dequeue it.
+    	 */
+        // 唤醒task
+    	signal_wake_up(t, sig == SIGKILL);
+    	return;
+    }
+
+next_thread
+===============
+
+获取task中线程组中的下一个线程
+
+https://elixir.bootlin.com/linux/v4.15/source/include/linux/sched/signal.h#L558
+
+.. code-block:: c
+
+    static inline struct task_struct *next_thread(const struct task_struct *p)
+    {
+    	return list_entry_rcu(p->thread_group.next,
+    			      struct task_struct, thread_group);
+    }
+
+下一个线程就是thread_group.next了, 所以可以推测线程都是通过thread_group连接起来的
+
+wants_signal
+==============
+
+判断线程是否可以处理进程
+
+
+.. code-block:: c
+
+    /*
+     * Test if P wants to take SIG.  After we've checked all threads with this,
+     * it's equivalent to finding no threads not blocking SIG.  Any threads not
+     * blocking SIG were ruled out because they are not running and already
+     * have pending signals.  Such threads will dequeue from the shared queue
+     * as soon as they're available, so putting the signal on the shared queue
+     * will be equivalent to sending it to one such thread.
+     */
+    static inline int wants_signal(int sig, struct task_struct *p)
+    {
+        if (sigismember(&p->blocked, sig))
+            return 0;
+        if (p->flags & PF_EXITING)
+            return 0;
+        if (sig == SIGKILL)
+            return 1;
+        if (task_is_stopped_or_traced(p))
+            return 0;
+        return task_curr(p) || !signal_pending(p);
+    }
+
+1. sigismember作用是: *test wehether signum is a member of set.(&p->blocked, sig)* , 也就是是否线程是否block了信号.
+   因为线程可以调用sigprocmask/pthread_sigmask去block指定的信号, 如果结果为真, 表示线程屏蔽了信号.
+   可以参考 `这里 <http://devarea.com/linux-handling-signals-in-a-multithreaded-application/#.WpAhGINuaUk>`_
+   
+2. PF_EXITING表示进程退出状态
+
+3. SIGKILL这个信号是要传递给所有的线程的(这样才能达到kill的目的), 所以返回1
+
+4. task_is_stopped_or_traced线程是否是终止状态
+
+5. task_curr是判断当前线程是否占用cpu, *task_curr - is this task currently executing on a CPU?*
+
+signal_pending
+================
+
+先看看函数调用过程
+
+.. code-block:: c
+
+    // https://elixir.bootlin.com/linux/v4.15/source/include/linux/sched/signal.h#L313
+    static inline int signal_pending(struct task_struct *p)
+    {
+    	return unlikely(test_tsk_thread_flag(p,TIF_SIGPENDING));
+    }
+
+    // https://elixir.bootlin.com/linux/v4.15/source/include/linux/sched.h#L1536
+    static inline int test_tsk_thread_flag(struct task_struct *tsk, int flag)
+    {
+        // 这里调用task_thread_info去拿task结构的thread_info
+    	return test_ti_thread_flag(task_thread_info(tsk), flag);
+    }
+
+    // https://elixir.bootlin.com/linux/v4.15/source/include/linux/thread_info.h#L77
+    static inline int test_ti_thread_flag(struct thread_info *ti, int flag)
+    {
+    	return test_bit(flag, (unsigned long *)&ti->flags);
+    }
+
+而task_thread_info函数则是一般去拿task结构的thread_info
+
+https://elixir.bootlin.com/linux/v4.15/source/include/linux/sched.h#L1456
+
+.. code-block:: c
+
+    #ifdef CONFIG_THREAD_INFO_IN_TASK
+    static inline struct thread_info *task_thread_info(struct task_struct *task)
+    {
+    	return &task->thread_info;
+    }
+    #elif !defined(__HAVE_THREAD_FUNCTIONS)
+    # define task_thread_info(task)	((struct thread_info *)(task)->stack)
+    #endif
+
+所以, signal_pending则是去寻找task对应的thread_info是否有设置上了TIF_SIGPENDING标志位
+
+
+唤醒的是哪个线程?
+===================
+
+经过测试, 无论主线程是一直占着cpu还是陷入等待(sleep), signal一般唤醒的都是主线程. 下面是测试源码
+
+.. code-block:: c
+
+    #include<stdio.h>
+    #include<unistd.h>
+    #include<pthread.h>
+    #include <sys/mman.h>
+    #include <stdlib.h>
+    #include <sys/prctl.h>
+    #include <sys/types.h>
+    #include <sys/wait.h>
+    #include <sys/stat.h>
+    #include <fcntl.h>
+    #include <sys/ioctl.h>
+     
+    void *threadfn1(void *p)
+    {
+    	while(1){
+    		printf("thread1\n");
+    		sleep(2);
+    	}
+    	return 0;
+    }
+     
+    void *threadfn2(void *p)
+    {
+        pthread_t   tid;
+        tid = pthread_self();
+    	while(1){
+    		printf("thread2: %ld\n", (long) tid);
+    		sleep(2);
+    	}
+    	return 0;
+    }
+     
+    void *threadfn3(void *p)
+    {
+        pthread_t   tid;
+        tid = pthread_self();
+    	while(1){
+    		printf("thread3: %ld\n", (long) tid);
+    		sleep(2);
+    	}
+    	return 0;
+    }
+     
+     
+    void handler(int signo, siginfo_t *info, void *extra) 
+    {
+    	int i;
+        pthread_t   tid;
+        tid = pthread_self();
+    	for(i=0;i<10;i++)
+    	{
+    		puts("signal");
+            printf("in %ld\n", (long) tid);
+    		sleep(2);
+    	}
+    }
+     
+    void set_sig_handler(void)
+    {
+            struct sigaction action;
+     
+     
+            action.sa_flags = SA_SIGINFO; 
+            action.sa_sigaction = handler;
+    
+            if (sigaction(SIGRTMIN + 3, &action, NULL) == -1) { 
+                perror("sigusr: sigaction");
+                _exit(1);
+            }
+     
+    }
+     
+    int main()
+    {
+    	pthread_t t1,t2,t3;
+        pthread_t   tid;
+        tid = pthread_self();
+        printf("main thread: %ld\n", (long)tid);
+    	set_sig_handler();
+    	// pthread_create(&t1,NULL,threadfn1,NULL);
+    	pthread_create(&t2,NULL,threadfn2,NULL);
+    	pthread_create(&t3,NULL,threadfn3,NULL);
+        int count = 0;
+        // 下面的while可以换成sleep
+        while (1){
+            count += 1;
+        }
+    	pthread_exit(NULL);
+    	return 0;
+    }
+
+在main中, 无论是while 1计算还是sleep, 发送signal(*sudo kill -s 37 pid*)之后总是唤醒的总是主线程!!!
+
+也就是对主线程调用wants_signal之后, 总是ture.
+
+所以, complete_signal->signal_wake_up->signal_wake_up_state会发中断, 让线程去执行信号处理, 如果线程正在计算, 也会处理这个中断的.
+
+根据参考 [13]_的一些解释:
+
+*CPU checks for interrupts after executing each instruction.*
+
+cpu每一执行一个指令之后, 都会去检查中断
+
+*If interrupt occurred, control unit: Determines vector i, corresponding to interrupt, (省略一些步骤), If necessary, switches to new stack by
+
+Loading ss & esp regs with values found in the task state segment (TSS) of current process, (省略一些步骤), Interrupt handler is then executed!*
+
+简单来说就是拿到signal handler的栈什么的和参数, 然后执行.
+
+根据参考 [12]_中的解释, 会保存当前执行函数的栈信息什么的, 切换到用户态执行signal handler, 然后回到内核, 然后再执行之前保存的函数.
+
+
+block信号
+=============
+
+可以使用sigprocmask/pthread_sigmask去block指定的信号, 前者是线程组, 后者是指定的线程.
+
+
+signal_wake_up
+=================
+
+唤醒task
+
+
+.. code-block:: c
+
+    // https://elixir.bootlin.com/linux/v4.15/source/include/linux/sched/signal.h#L349
+    static inline void signal_wake_up(struct task_struct *t, bool resume)
+    {
+    	signal_wake_up_state(t, resume ? TASK_WAKEKILL : 0);
+    }
+
+
+    // https://elixir.bootlin.com/linux/v4.15/source/kernel/signal.c#L661
+    /*
+     * Tell a process that it has a new active signal..
+     *
+     * NOTE! we rely on the previous spin_lock to
+     * lock interrupts for us! We can only be called with
+     * "siglock" held, and the local interrupt must
+     * have been disabled when that got acquired!
+     *
+     * No need to set need_resched since signal event passing
+     * goes through ->blocked
+     */
+    void signal_wake_up_state(struct task_struct *t, unsigned int state)
+    {
+        // 这里设置task的thread_info的flag是TIF_SIGPENDING
+    	set_tsk_thread_flag(t, TIF_SIGPENDING);
+    	/*
+    	 * TASK_WAKEKILL also means wake it up in the stopped/traced/killable
+    	 * case. We don't check t->state here because there is a race with it
+    	 * executing another processor and just now entering stopped state.
+    	 * By using wake_up_state, we ensure the process will wake up and
+    	 * handle its death signal.
+    	 */
+        // wake_up_state则是去唤醒task!!!!
+    	if (!wake_up_state(t, state | TASK_INTERRUPTIBLE))
+    		kick_process(t);
+    }
+
+
+
+sigaction
+============
+
+  *The original Linux system call was named sigaction().  However, with the addition of real-time signals in Linux 2.2, the fixed-size, 32-bit sigset_t type supported by that system call was no longer
+  fit  for  purpose.  Consequently, a new system call, rt_sigaction(), was added to support an enlarged sigset_t type.  The new system call takes a fourth argument, size_t sigsetsize, which specifies
+  the size in bytes of the signal sets in act.sa_mask and oldact.sa_mask.  This argument is currently required to have the value sizeof(sigset_t) (or the error EINVAL results).  The glibc sigaction()
+  wrapper function hides these details from us, transparently calling rt_sigaction() when the kernel provides it.*
+  
+  --- sigaction的man手册
+
+根据man手册上的说明, rt_sigaction这个系统调用是取代旧的sigaction系统调用, 并且glibc中的sigaction函数将会调用rt_sigaction这个系统调用
+
+所以, 我们调用sigaction的时候, 其实是调用glibc的sigaction, glibc对一些系统调用进行了wrap, 比如fork和clone.
+
+
+linux的x86_64架构下的sigaction
+
+sysdeps/unix/sysv/linux/x86_64/sigaction.c
+
+
+.. code-block:: c
+
+    int
+    __libc_sigaction (int sig, const struct sigaction *act, struct sigaction *oact)
+    {
+      int result;
+      struct kernel_sigaction kact, koact;
+    
+      if (act)
+        {
+          kact.k_sa_handler = act->sa_handler;
+          memcpy (&kact.sa_mask, &act->sa_mask, sizeof (sigset_t));
+          kact.sa_flags = act->sa_flags | SA_RESTORER;
+    
+          kact.sa_restorer = &restore_rt;
+        }
+    
+      /* XXX The size argument hopefully will have to be changed to the
+         real size of the user-level sigset_t.  */
+      // 这里!!!调用了系统调用rt_sigaction
+      result = INLINE_SYSCALL (rt_sigaction, 4,
+    			   sig, act ? &kact : NULL,
+    			   oact ? &koact : NULL, _NSIG / 8);
+      if (oact && result >= 0)
+        {
+          oact->sa_handler = koact.k_sa_handler;
+          memcpy (&oact->sa_mask, &koact.sa_mask, sizeof (sigset_t));
+          oact->sa_flags = koact.sa_flags;
+          oact->sa_restorer = koact.sa_restorer;
+        }
+      return result;
+    }
+
+
+glibc的sigaction函数只是帮我们组装了sigaction结构, 然后调用rt_sigaction系统调用.
+
+而rt_sigaction的系统调用是在https://elixir.bootlin.com/linux/v4.15/source/kernel/signal.c找到, 其中会根据宏定义的不同去有不同的实现.
+
+但是本质上, 最终调用的还是do_sigaction这个函数
+
+
+do_sigaction
+================
+
+这个函数的作用是把current, 也就是当前task, 的信号处理函数替换成用户指定的函数
+
+
+.. code-block:: c
+
+    int do_sigaction(int sig, struct k_sigaction *act, struct k_sigaction *oact)
+    {
+    	struct task_struct *p = current, *t;
+    	struct k_sigaction *k;
+    	sigset_t mask;
+    
+    	if (!valid_signal(sig) || sig < 1 || (act && sig_kernel_only(sig)))
+    		return -EINVAL;
+    
+        // !!!拿到当前task的信号处理函数!!!!!
+    	k = &p->sighand->action[sig-1];
+    
+    	spin_lock_irq(&p->sighand->siglock);
+    	if (oact)
+    		*oact = *k;
+    
+    	sigaction_compat_abi(act, oact);
+    
+    	if (act) {
+    		sigdelsetmask(&act->sa.sa_mask,
+    			      sigmask(SIGKILL) | sigmask(SIGSTOP));
+                // !!!这里替换掉用户指定的信号函数
+    		*k = *act;
+    		/*
+    		 * POSIX 3.3.1.3:
+    		 *  "Setting a signal action to SIG_IGN for a signal that is
+    		 *   pending shall cause the pending signal to be discarded,
+    		 *   whether or not it is blocked."
+    		 *
+    		 *  "Setting a signal action to SIG_DFL for a signal that is
+    		 *   pending and whose default action is to ignore the signal
+    		 *   (for example, SIGCHLD), shall cause the pending signal to
+    		 *   be discarded, whether or not it is blocked"
+    		 */
+                // 下面这个判断是该信号是否被ignore
+                // sig_handler这个拿到sig的handler, 如果handler是SIG_IGN
+                // 那么表示忽略
+                // 忽略的时候把所有线程的中的该signale从pending移除
+    		if (sig_handler_ignored(sig_handler(p, sig), sig)) {
+    			sigemptyset(&mask);
+    			sigaddset(&mask, sig);
+    			flush_sigqueue_mask(&mask, &p->signal->shared_pending);
+    			for_each_thread(p, t)
+    				flush_sigqueue_mask(&mask, &t->pending);
+    		}
+    	}
+    
+    	spin_unlock_irq(&p->sighand->siglock);
+    	return 0;
+    }
+
+
+flush_sigqueue_mask的注释是: Remove signals in mask from the pending set and queue.
+
+----
+
+task和线程部分
+================
+
+
+通过上面的信号处理流程知道, 在创建线程的时候, 有几个关键的属性
+
 
 
 

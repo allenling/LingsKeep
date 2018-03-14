@@ -1027,6 +1027,7 @@ https://elixir.bootlin.com/linux/v4.15/source/include/linux/sched.h#L1456
     	pthread_create(&t2,NULL,threadfn2,NULL);
     	pthread_create(&t3,NULL,threadfn3,NULL);
         int count = 0;
+        // sleep(3600);
         // 下面的while可以换成sleep
         while (1){
             count += 1;
@@ -1035,9 +1036,13 @@ https://elixir.bootlin.com/linux/v4.15/source/include/linux/sched.h#L1456
     	return 0;
     }
 
-在main中, 无论是while 1计算还是sleep, 发送signal(*sudo kill -s 37 pid*)之后总是唤醒的总是主线程!!!
+在main中
 
-也就是对主线程调用wants_signal之后, 总是ture.
+1. 无论是while 1计算, 还是sleep, 发送signal(*sudo kill -s 37 pid*)之后总是唤醒的总是主线程
+
+2. 只开启一个子线程, 比如子线程2, 然后子线程2中密集计算(while count += 1), 然后主线程sleep, 依然是唤醒主线程.
+
+**所以, 也就是对主线程调用wants_signal之后, 总是ture.**
 
 所以, complete_signal->signal_wake_up->signal_wake_up_state会发中断, 让线程去执行信号处理, 如果线程正在计算, 也会处理这个中断的.
 

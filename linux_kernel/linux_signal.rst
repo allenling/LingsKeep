@@ -37,8 +37,9 @@ task, 进程, 线程, lwp的概念参考linux_nptl.rst
 
 **最后, 一定要等待signal handler执行完, 无论之前的程序是什么操作, 比如计算, 比如等待事件发生, 都会被终止执行, signal handler返回之后, 之前的程序才能执行!!!**
 
+关于signal handler阻塞当前程序的代码例子在下面.
 
-下面信号处理的流程参考 [1]_
+下面关于信号处理的流程参考 [1]_
 
 
 kill发送信号
@@ -554,6 +555,8 @@ https://elixir.bootlin.com/linux/v4.15/source/include/linux/sched.h#L1456
 ===================
 
 经过测试, 无论主线程是一直占着cpu还是陷入等待(sleep), signal一般唤醒的都是主线程. 下面是测试源码
+
+启动三个线程, 然后main里面分别做计算和等待操作, 对比两者的情况.
 
 .. code-block:: c
 

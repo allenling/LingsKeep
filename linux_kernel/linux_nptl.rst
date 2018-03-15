@@ -1042,9 +1042,12 @@ https://elixir.bootlin.com/linux/v4.15/source/include/linux/sched.h#L1456
 
 2. 只开启一个子线程, 比如子线程2, 然后子线程2中密集计算(while count += 1), 然后主线程sleep, 依然是唤醒主线程.
 
-**所以, 也就是对主线程调用wants_signal之后, 总是ture.**
+所以
 
-所以, complete_signal->signal_wake_up->signal_wake_up_state会发中断, 让线程去执行信号处理, 如果线程正在计算, 也会处理这个中断的.
+1. 也就是对主线程调用wants_signal之后, 总是ture.
+
+2. 无论被选择的task正在进行计算或者等待系统调用返回(sleep/select等等),
+   内核(complete_signal->signal_wake_up->signal_wake_up_state)总是直接发送中断, 让task执行signal.
 
 根据参考 [13]_的一些解释:
 
@@ -1056,9 +1059,400 @@ cpu每一执行一个指令之后, 都会去检查中断
 
 Loading ss & esp regs with values found in the task state segment (TSS) of current process, (省略一些步骤), Interrupt handler is then executed!*
 
-简单来说就是拿到signal handler的栈什么的和参数, 然后执行.
+简单来说就是拿到signal handler的栈什么的和参数, 然后切换执行.
 
 根据参考 [12]_中的解释, 会保存当前执行函数的栈信息什么的, 切换到用户态执行signal handler, 然后回到内核, 然后再执行之前保存的函数.
+
+**所以, 一旦有信号发生, 并且task定义了自己的handler, 那么内核就将让task执行(强制)signal, 然后再切换到signal之前的程序.**
+
+**强制执行是通过发送中断, 无论目标task是否正在运行还是陷入等待状态, 都会收到中断, 然后检查pending的信号, 然后执行.**
+
+signal handler中有系统调用
+==============================
+
+1. 主线程read等待端口a数据
+
+2. 主线程注册signal handler, 该handler则会去read另外一个端口b, 等待数据
+
+3. 然后发送信号给pid
+
+4. signal handler被执行, 进入read等待b
+
+5. 此时a有数据, 那么主线程的read会被唤醒吗?也就是进入等待之后, 只跟哪个系统调用被唤醒有关?也就是就算
+   signal handler进入等待系统调用的状态, 依然是哪个系统调用有返回, 则唤醒哪个程序?
+
+客户端可以在发送信号之前或者之后connect到a, 有两个情况, recv是否是阻塞, 使用recv或者epoll这种.
+
+1. 阻塞的recv调用
+
+下面是一个阻塞的recv函数
+
+.. code-block:: c
+
+    #define MAXLINE 1024
+    
+    int read_wait(int port) {
+        int server_sockfd;//服务器端套接字  
+        int client_sockfd;//客户端套接字  
+        int len;  
+        struct sockaddr_in my_addr;   //服务器网络地址结构体  
+        struct sockaddr_in remote_addr; //客户端网络地址结构体  
+        int sin_size;  
+        char buf[BUFSIZ];  //数据传送的缓冲区  
+        memset(&my_addr,0,sizeof(my_addr)); //数据初始化--清零  
+        my_addr.sin_family=AF_INET; //设置为IP通信  
+        my_addr.sin_addr.s_addr=INADDR_ANY;//服务器IP地址--允许连接到所有本地地址上  
+        my_addr.sin_port=htons(port); //服务器端口号  
+          
+        /*创建服务器端套接字--IPv4协议，面向连接通信，TCP协议*/  
+        if((server_sockfd=socket(PF_INET,SOCK_STREAM,0))<0)  
+        {    
+            perror("socket");  
+            return 1;  
+        }  
+       
+            /*将套接字绑定到服务器的网络地址上*/  
+        if (bind(server_sockfd,(struct sockaddr *)&my_addr,sizeof(struct sockaddr))<0)  
+        {  
+            perror("bind");  
+            return 1;  
+        }  
+          
+        /*监听连接请求--监听队列长度为5*/  
+        printf("listen in %d\n", port);
+        listen(server_sockfd, 1);  
+          
+        sin_size=sizeof(struct sockaddr_in);  
+          
+        /*等待客户端连接请求到达*/  
+        if((client_sockfd=accept(server_sockfd,(struct sockaddr *)&remote_addr,&sin_size))<0)  
+        {  
+            perror("accept");  
+            printf("error in %d\n", port);
+            return 1;  
+        }  
+        printf("accept client %s:%d\n",inet_ntoa(remote_addr.sin_addr), (int)remote_addr.sin_port);  
+        len=send(client_sockfd,"Welcome to my server\n",21,0);//发送欢迎信息  
+          
+        /*接收客户端的数据并将其发送给客户端--recv返回接收到的字节数，send返回发送的字节数*/  
+        while(1){
+            int len = recv(client_sockfd,buf,BUFSIZ,0);
+            if (len >= 0){
+                buf[len]='\0';  
+                printf("recv %s\n",buf);  
+                if(send(client_sockfd,buf,len,0)<0)  
+                {  
+                    perror("write");  
+                    return 1;  
+                }  
+            }else{
+                perror("recv"); 
+                printf("%d recv got 0!!\n", port);
+                break;
+            }
+        }  
+        close(client_sockfd);  
+        close(server_sockfd); 
+        printf("close %d\n", port);
+        return 0;  
+    }
+
+
+然后在main和signal handler上指定recv不同的端口
+
+
+.. code-block:: c
+
+    #include <stdio.h>
+    #include <unistd.h>
+    #include <pthread.h>
+    #include <sys/mman.h>
+    #include <stdlib.h>
+    #include <sys/prctl.h>
+    #include <sys/types.h>
+    #include <sys/wait.h>
+    #include <sys/stat.h>
+    #include <fcntl.h>
+    #include <sys/ioctl.h>
+    #include <stdio.h>
+    #include <sys/socket.h>
+    #include <sys/types.h>
+    #include <string.h>
+    #include <netinet/in.h>
+    #include <stdlib.h>
+    #include <errno.h>
+    #include <unistd.h>
+    #include <arpa/inet.h>
+    
+    
+    void handler(int signo, siginfo_t *info, void *extra) 
+    {
+    	int i;
+        pthread_t   tid;
+        tid = pthread_self();
+        printf("handler in %ld \n", (long) tid);
+        int port = 10005;
+        // 这里进入等待系统调用
+        // 监听10005端口
+        read_wait(port);
+    }
+    
+    
+    void set_sig_handler(void)
+    {
+            struct sigaction action;
+     
+     
+            action.sa_flags = SA_SIGINFO; 
+            action.sa_sigaction = handler;
+    
+            if (sigaction(SIGRTMIN + 3, &action, NULL) == -1) { 
+                perror("sigusr: sigaction");
+                _exit(1);
+            }
+     
+    }
+    
+    int main()
+    {
+        pthread_t   tid;
+        tid = pthread_self();
+        printf("main thread: %ld\n", (long)tid);
+        set_sig_handler();
+        int port = 10004;
+        // 监听1004端口
+        read_wait(port);
+        printf("main return\n");
+        return 0;
+    }
+
+结果是: 一旦进入了signal handler, 那么就会一直执行signal handler, 然后直到signal handler处理完. 然后再进入到
+
+main, 但是main的recv或者accept(取决于你的客户端是先connect之后再发送37信号还是发送信号之后再connect)都会报错, 然后直接结束main
+
+下面是输出
+
+.. code-block:: python
+
+    '''
+    main thread: 140464972683008
+    listen in 10004
+    accept client 127.0.0.1:63195
+    handler in 140464972683008 
+    listen in 10005
+    accept client 127.0.0.1:40075
+    recv a                         # 这是signal handler中收到的数据
+    recv: Connection reset by peer
+    10005 recv got 0!!close 10005  # signal handler执行完毕
+    recv: Interrupted system call  # main函数的accept/recv报错
+    10004 recv got 0!!close 10004
+    main return
+    '''
+
+所以内核强行切换到了signal handler, 并且直到signal handler执行完毕才切换到之前的执行程序.
+
+2. 如果recv是select/epoll这种呢?
+
+测试下来也是一样的, signal handler中退出之后会导致之前的程序发生Interrupted system call异常
+
+下面是epoll的处理函数
+
+
+.. code-block:: c
+
+    int epoll_fun(int port) {
+        struct epoll_event ev, events[MAX_EVENTS];
+        int nfds, epollfd;
+    
+        int server_sockfd;//服务器端套接字  
+        int client_sockfd;//客户端套接字  
+        int len;  
+        struct sockaddr_in my_addr;   //服务器网络地址结构体  
+        struct sockaddr_in remote_addr; //客户端网络地址结构体  
+        int sin_size;  
+        // char buf[BUFSIZ];  //数据传送的缓冲区  
+        memset(&my_addr,0,sizeof(my_addr)); //数据初始化--清零  
+        my_addr.sin_family=AF_INET; //设置为IP通信  
+        my_addr.sin_addr.s_addr=INADDR_ANY;//服务器IP地址--允许连接到所有本地地址上  
+        my_addr.sin_port=htons(port); //服务器端口号  
+    
+    
+        // read的buffer
+        char read_buf[1024];
+          
+        /*创建服务器端套接字--IPv4协议，面向连接通信，TCP协议*/  
+        if((server_sockfd=socket(PF_INET, SOCK_STREAM,0))<0)  
+        {    
+            perror("socket create");  
+            return 1;  
+        }
+        printf("socket created\n");
+       
+            /*将套接字绑定到服务器的网络地址上*/  
+        if (bind(server_sockfd,(struct sockaddr *)&my_addr,sizeof(struct sockaddr))<0)  
+        {  
+            perror("socket bind");  
+            return 1;  
+        }
+        printf("socket binded\n");
+          
+        /*监听连接请求--监听队列长度为5*/  
+        printf("listen in %d\n", port);
+        listen(server_sockfd, 1);  
+          
+        sin_size=sizeof(struct sockaddr_in);  
+    
+        client_sockfd = accept(server_sockfd,(struct sockaddr *)&remote_addr, &sin_size);
+        if (client_sockfd == -1) {
+            perror("accept error");
+            exit(EXIT_FAILURE);
+        }
+        printf("%d accepted\n", port);
+        setNonblocking(client_sockfd);
+    
+        epollfd = epoll_create1(0);
+        if (epollfd == -1) {
+            perror("epoll_create1");
+            exit(EXIT_FAILURE);
+        }
+    
+        ev.events = EPOLLIN;
+        ev.data.fd = client_sockfd;
+        if (epoll_ctl(epollfd, EPOLL_CTL_ADD, client_sockfd, &ev) == -1) {
+            perror("epoll_ctl EPOLLIN: client_sockfd");
+            exit(EXIT_FAILURE);
+        }
+        int can_return = 0;
+        for (;;) {
+            if (can_return == 1) {
+                break;
+            }
+            printf("%d epoll wait-----\n", port);
+            nfds = epoll_wait(epollfd, events, MAX_EVENTS, -1);
+            if (nfds == -1) {
+                printf("%d epoll_wait error: \n", port);
+                perror("epoll_wait");
+                exit(EXIT_FAILURE);
+            }
+            printf("%d epoll wait return!\n", port);
+    
+            for (int n = 0; n < nfds; ++n) {
+                if (events[n].data.fd == client_sockfd) {
+                    printf("%d recv: ", port);
+                    int real_len = read(events[n].data.fd, read_buf, sizeof(read_buf)-1);
+                    if (real_len > 0) {
+                        for (int i=0; i<real_len; i ++) {
+                            printf("%c", read_buf[i]);
+                        }
+                        printf("\n");
+                    }else{
+                        printf("%d recv 0\n", port);
+                        perror("epoll recv"); 
+                        can_return = 1;
+                        break;
+                    }
+                }
+            }
+        }
+        close(client_sockfd);  
+        close(server_sockfd); 
+        printf("%d return\n", port);
+        return 0;  
+    }
+
+
+然后合并到main中
+
+
+.. code-block:: c
+
+    #include <sys/epoll.h>
+    #include <stdio.h>
+    #include <unistd.h>
+    #include <sys/mman.h>
+    #include <stdlib.h>
+    #include <sys/prctl.h>
+    #include <sys/types.h>
+    #include <sys/wait.h>
+    #include <sys/stat.h>
+    #include <fcntl.h>
+    #include <sys/ioctl.h>
+    #include <stdio.h>
+    #include <sys/socket.h>
+    #include <sys/types.h>
+    #include <string.h>
+    #include <netinet/in.h>
+    #include <stdlib.h>
+    #include <errno.h>
+    #include <unistd.h>
+    #include <arpa/inet.h>
+
+    void handler(int signo, siginfo_t *info, void *extra) 
+    {
+    	int i;
+        // 这里进入等待系统调用
+        printf("in signal handler\n");
+        int port = 10005;
+        // 调用epoll
+        epoll_fun(port);
+    }
+     
+    void set_sig_handler(void)
+    {
+            struct sigaction action;
+     
+     
+            action.sa_flags = SA_SIGINFO; 
+            action.sa_sigaction = handler;
+    
+            if (sigaction(SIGRTMIN + 3, &action, NULL) == -1) { 
+                perror("sigusr: sigaction");
+                _exit(1);
+            }
+     
+    }
+    
+    
+    int
+    main(void)
+    {
+    	set_sig_handler();
+        int port = 10004;
+        epoll_fun(port);
+        return 0;
+    }
+
+
+下面是输出
+
+.. code-block:: python
+
+    '''
+    socket created
+    socket binded
+    listen in 10004
+    10004 accepted
+    10004 epoll wait-----
+    10004 epoll wait return!
+    10004 recv: 1004
+    10004 epoll wait-----
+    in signal handler
+    socket created
+    socket binded
+    listen in 10005
+    10005 accepted
+    10005 epoll wait-----
+    10005 epoll wait return!
+    10005 recv: 1005
+    10005 epoll wait-----
+    10005 epoll wait return!
+    10005 recv: 10005 recv 0
+    epoll recv: Success
+    10005 return                         # 这里, signal handler返回了
+    10004 epoll_wait error:              # 然后main里面的epoll报粗了
+    epoll_wait: Interrupted system call  # main报错的信息
+    '''
+
 
 
 block信号

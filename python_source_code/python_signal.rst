@@ -23,6 +23,8 @@ signal
 
 9. linux内核会挑选哪个线程? 参考: https://stackoverflow.com/questions/6949025/how-are-asynchronous-signal-handlers-executed-on-linux
 
+10. 更详细的linux信号处理, 参考linux_kernrl/linux_nptl.rst
+
 ----
 
 

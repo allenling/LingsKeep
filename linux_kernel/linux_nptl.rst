@@ -21,11 +21,7 @@ Linux的pthread(nptl)
 
 .. [10] https://stackoverflow.com/questions/18904292/is-it-true-that-fork-calls-clone-internally
 
-.. [11] http://kernel.meizu.com/linux-signal.html
-
-.. [12] http://www.cnblogs.com/parrynee/archive/2010/01/14/1648152.html
-
-.. [13] http://cs-pub.bu.edu/fac/richwest/cs591_w1/notes/wk3_pt2.PDF
+.. [11] http://www.cnblogs.com/parrynee/archive/2010/01/14/1648152.html
 
 参考4是fork的一些解释
 
@@ -37,7 +33,7 @@ Linux的pthread(nptl)
 
 参考9是pthread下的同步机制
 
-参考12是task结构中, pids这个属性的一些解释. 注意的是4.15类型变成了pid_link而不是文章中的pid_type, 但是都是使用hash表结构.
+参考11是task结构中, pids这个属性的一些解释. 注意的是4.15类型变成了pid_link而不是文章中的pid_type, 但是都是使用hash表结构.
 
 GNU
 ====

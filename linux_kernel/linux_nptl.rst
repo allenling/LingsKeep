@@ -406,9 +406,14 @@ pthread_create会调用到createthread去实际创建线程
 
 参考 [8]_有比较多的解释
 
-
 task结构
 ============
+
+task结构属性很多, 下面借助clone的代码去了解创建线程的时候, task结构属性的赋值流程.
+
+
+clone中新建task结构
+=====================
 
 pthread到task的关键代码, 其实就是clone系统调用新建task.
 

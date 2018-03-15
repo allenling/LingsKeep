@@ -41,6 +41,8 @@ Linux的pthread(nptl)
 
 参考12是task结构中, pids这个属性的一些解释. 注意的是4.15类型变成了pid_link而不是文章中的pid_type, 但是都是使用hash表结构.
 
+*下面会通过signal的操作过程去看task结构的一些属性在clone的时候如何赋值的.*
+
 GNU
 ====
 
@@ -221,7 +223,7 @@ sysdeps/nptl/fork.c
       pid = INLINE_SYSCALL (fork, 0);
     #endif
     
-    // 省略代码
+    // 省略代码, 一堆属性设置
     
     }
 
@@ -414,8 +416,8 @@ pthread_create会调用到createthread去实际创建线程
 
 ----
 
-task和thread
-=================
+task/thread/signal
+=====================
 
 下面从信号处理流程去看task中的结构信息的作用, 这里不涉及调度, 调度参考linux_task_schedule.rst
 
@@ -1067,8 +1069,8 @@ Loading ss & esp regs with values found in the task state segment (TSS) of curre
 
 **强制执行是通过发送中断, 无论目标task是否正在运行还是陷入等待状态, 都会收到中断, 然后检查pending的信号, 然后执行.**
 
-signal handler中有系统调用
-==============================
+signal handler和main中的程序切换
+===================================
 
 1. 主线程read等待端口a数据
 
@@ -1454,6 +1456,81 @@ main, 但是main的recv或者accept(取决于你的客户端是先connect之后�
     '''
 
 
+所以, 之前的程序只会在signal handler返回之后才能继续, 比如下面的例子
+
+main中一直计算, 然后signal handler一个循环, 我们可以看到:
+
+1. 没有发送信号之前, 有一个cpu是100%使用率
+
+2. 发送信号之后, 则计算代码终止, cpu没有100%使用率, 此时进入signal handler
+
+3. signal handler返回, 计算代码继续, cpu又变成了100%使用率
+
+.. code-block:: c
+
+    #include <stdio.h>
+    #include <unistd.h>
+    #include <pthread.h>
+    #include <sys/mman.h>
+    #include <stdlib.h>
+    #include <sys/prctl.h>
+    #include <sys/types.h>
+    #include <sys/wait.h>
+    #include <sys/stat.h>
+    #include <fcntl.h>
+    #include <sys/ioctl.h>
+    #include <stdio.h>
+    #include <sys/socket.h>
+    #include <sys/types.h>
+    #include <string.h>
+    #include <netinet/in.h>
+    #include <stdlib.h>
+    #include <errno.h>
+    #include <unistd.h>
+    #include <arpa/inet.h>
+     
+     
+    void handler(int signo, siginfo_t *info, void *extra) 
+    {
+    	int i;
+        pthread_t   tid;
+        tid = pthread_self();
+    	for(i=0;i<20;i++)
+    	{
+            printf("signal in %ld\n", (long) tid);
+    		sleep(2);
+    	}
+    }
+     
+    void set_sig_handler(void)
+    {
+            struct sigaction action;
+     
+     
+            action.sa_flags = SA_SIGINFO; 
+            action.sa_sigaction = handler;
+    
+            if (sigaction(SIGRTMIN + 3, &action, NULL) == -1) { 
+                perror("sigusr: sigaction");
+                _exit(1);
+            }
+     
+    }
+     
+    int main()
+    {
+        pthread_t   tid;
+        tid = pthread_self();
+        printf("main thread: %ld\n", (long)tid);
+    	set_sig_handler();
+        int count = 0;
+        while (1){
+            count += 1;
+        }
+        printf("main return\n");
+    	return 0;
+    }
+
 
 block信号
 =============
@@ -1504,6 +1581,75 @@ signal_wake_up
     		kick_process(t);
     }
 
+
+do_signal/handle_signal
+==========================
+
+在内核去唤醒对应的task的时候, task会收到中断, 然后内核判断是信号的话, 则再返回用户态的时候, 把执行的栈什么的信息切换成signal handler, 同时保存当前执行的程序.
+
+切换到用户态的时候会直接执行signal handler.
+
+当收到中断, 返回用户态之前, 调用exit_to_usermode_loop->do_signal->handle_signal
+
+.. code-block:: c
+
+    static void exit_to_usermode_loop(struct pt_regs *regs, u32 cached_flags)
+    {
+    	/*
+    	 * In order to return to user mode, we need to have IRQs off with
+    	 * none of EXIT_TO_USERMODE_LOOP_FLAGS set.  Several of these flags
+    	 * can be set at any time on preemptable kernels if we have IRQs on,
+    	 * so we need to loop.  Disabling preemption wouldn't help: doing the
+    	 * work to clear some of the flags can sleep.
+    	 */
+    	while (true) {
+    		/* We have work to do. */
+    		local_irq_enable();
+    
+    		if (cached_flags & _TIF_NEED_RESCHED)
+    			schedule();
+    
+    		if (cached_flags & _TIF_UPROBE)
+    			uprobe_notify_resume(regs);
+    
+    		/* deal with pending signal delivery */
+                // 去查看是否有信号
+    		if (cached_flags & _TIF_SIGPENDING)
+    			do_signal(regs);
+                    // 省略代码
+                    }
+            // 省略代码
+    }
+
+注意看到_TIF_SIGPENDING这个标志位和TIF_SIGPENDING:
+
+.. code-block:: c
+
+    // https://elixir.bootlin.com/linux/v4.15/source/arch/x86/include/asm/thread_info.h#L80
+    #define TIF_SIGPENDING		2	/* signal pending */
+    
+    // https://elixir.bootlin.com/linux/v4.15/source/arch/x86/include/asm/thread_info.h#L106
+    #define _TIF_SIGPENDING		(1 << TIF_SIGPENDING)
+
+而之前signal_wake_up_state函数中调用的 *set_tsk_thread_flag(t, TIF_SIGPENDING);*, 则是最后调用到set_bit, 看起来是把t这个task
+
+的thread_info中的flags中的第i位置1, 也就是flag中第TIF_SIGPENDING位为1, 也就是100, 也就是等于_TIF_SIGPENDING = 1 << 2.
+
+**上面的过程是推测, set_bit是使用cpu指令的, 没太看懂.**
+
+
+小结
+==========
+
+所以, 发送信号等于发送中断, 然后唤醒指定的task(通过pid), 然后把task的thread_info.flags置为TIF_SIGPENDING
+
+然后在task会收到中断, 内核处理这个中断的时候, 会去调用do_signal->handle_signal去切换用户态的栈等信息为signal handler, 保存当前调用栈信息
+
+然后切换会用户态执行signal handler, 执行完又切换到内核, 内核切换到之前的调用栈, 切换到用户态, 然后继续执行之前的程序.
+
+因为要在调用栈之间切换, 而中断必然是内核处理, 所以会有内核/用户态的切换过程.
+
+**最后, 一定要等待signal handler执行完, 无论之前的程序是什么操作, 比如计算, 比如等待事件发生, 都会被终止执行, signal handler返回之后, 之前的程序才能执行!!!**
 
 
 sigaction

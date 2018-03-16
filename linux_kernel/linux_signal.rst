@@ -7,6 +7,8 @@ linux的信号流程
 
 .. [3] http://devarea.com/linux-handling-signals-in-a-multithreaded-application/#.WpAhGINuaUk>
 
+.. [4] https://stackoverflow.com/questions/6949025/how-are-asynchronous-signal-handlers-executed-on-linux
+
 
 参考1是主要参考文章
 
@@ -21,11 +23,14 @@ task, 进程, 线程, lwp的概念参考linux_nptl.rst
 
 下面从信号处理流程去看task中的结构信息的作用, 这里不涉及调度, 调度参考linux_task_schedule.rst
 
-    *理解信号异步机制的关键是信号的响应时机，我们对一个进程发送一个信号以后，其实并没有硬中断发生，只是简单把信号挂载到目标进程的信号 pending 队列上去，信号真正得到执行的时机是进程执行完异常/中断返回到用户态的时刻。
-    
-    让信号看起来是一个异步中断的关键就是，正常的用户进程是会频繁的在用户态和内核态之间切换的（这种切换包括：系统调用、缺页异常、系统中断…），所以信号能很快的能得到执行。但这也带来了一点问题，内核进程是不响应信号的，除非它刻意的去查询。所以通常情况下我们无法通过kill命令去杀死一个内核进程。*
-    
-    --- 参考1
+  *理解信号异步机制的关键是信号的响应时机，我们对一个进程发送一个信号以后，其实并没有硬中断发生，只是简单把信号挂载到目标进程的信号 pending 队列上去，信号真正得到执行的时机是进程执行完异常/中断返回到用户态的时刻。*
+  *让信号看起来是一个异步中断的关键就是，正常的用户进程是会频繁的在用户态和内核态之间切换的（这种切换包括：系统调用、缺页异常、系统中断…），所以信号能很快的能得到执行。但这也带来了一点问题，内核进程是不响应信号的，除非它刻意的去查询。所以通常情况下我们无法通过kill命令去杀死一个内核进程。*
+  
+  --- 参考1
+
+  *See the functions wants_signal() and completes_signal(). The code picks the first available thread for the signal. An available thread is one that doesn't block the signal and has no other signals in its queue. The code happens to check the main thread first, then it checks the other threads in some order unknown to me. If no thread is available, then the signal is stuck until some thread unblocks the signal or empties its queue.*
+  
+  --- 参考4
 
 1. 发送信号先通过pid拿到线程组, 然后选出其中一个线程/task(这里经测试, 一般是主线程, 除非主线程退出或者主动block了信号), 把信号加入到信号队列中
    这里的信号队列是线程组的shared_pending, 而不是每一个task结构自己的pending队列
@@ -37,13 +42,39 @@ task, 进程, 线程, lwp的概念参考linux_nptl.rst
 
 4. 用户态执行完信号处理函数之后, 又切回内核态, 然后内核把原先保存的程序切换出来, 然后返回用户态继续处理之前的程序.
 
+5. 3和4中, 判断是否有信号要处理是在返回用户态的时候判断的
+
 其中3, 4是涉及到中断的概念和内核态/用户态切换的东西, 没搞懂, 但是通过测试, 得出无论当前任务是什么任务(io等待或者cpu计算), 被发送信号之后,
 
-总会被打断进入信号处理函数, 信号处理函数返回之后又继续, 所以3, 4可以通过测试推测出来. 切换用户态执行信号处理函数, 执行完又切换到内核,
+总会被打断, 然后切换执行信号处理函数, 信号处理函数返回之后又继续执行之前的程序, 所以3, 4可以通过测试推测出来. 
 
-内核切换到之前的调用栈, 切换到用户态, 然后继续执行之前的程序. 因为要在调用栈之间切换, 而中断必然是内核处理, 所以会有内核/用户态的切换过程.
+.. code-block:: python
 
-**最后, 一定要等待signal handler执行完, 无论之前的程序是什么操作, 比如计算, 比如等待事件发生, 都会被终止执行, signal handler返回之后, 之前的程序才能执行!!!**
+    '''
+    
+    user_mode                       kernel_mode
+    
+    routine
+                
+              --be interrupted->    
+                                    save routine and
+                                    switch stack to signal_handler
+    
+              <--return usermode-
+    
+    signal
+    handler
+    
+              ------trap into---->  
+                                    switch to routine
+    
+              <-return usermode---
+    
+    routine
+    
+    '''
+
+**最后, 一定要等待signal handler执行完, 无论之前的程序是什么操作, 比如计算, 比如等待事件发生, 都会被终止执行, signal handler返回之后, 之前的程序才能继续执行!!!**
 
 下面关于信号处理的流程参考 [1]_
 

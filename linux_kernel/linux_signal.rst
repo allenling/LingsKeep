@@ -18,7 +18,7 @@ linux的信号流程
 
 task, 进程, 线程, lwp的概念参考linux_nptl.rst
 
-综述
+小结
 =========
 
 下面从信号处理流程去看task中的结构信息的作用, 这里不涉及调度, 调度参考linux_task_schedule.rst

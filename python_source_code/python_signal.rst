@@ -13,17 +13,11 @@ signal
 
 5. PyErr_CheckSignals会遍历全局的Handlers这个数组, 找到受信的信号, 调用对应的python代码.
 
-6. python并不是把信号的handler加入队列, 然后一个个调用的形式, 而是受到信号之后, 尽可能的立马执行.
+6. python并不是把信号的handler加入队列, 然后一个个调用的形式, 而是受到信号之后, 通知vm有信号然后立即执行.
 
-7. linux中signal的handler是保存到进程的, 所以使用kill发送信号的时候, 内核回去选择一个满足条件的线程去唤醒, 具体看下面.
+7. linux中signal的handler是保存到进程的, 所以使用kill发送信号的时候, 内核回去选择一个满足条件的线程去唤醒.
 
-8. linux中signal的分发: http://pubs.opengroup.org/onlinepubs/009695399/functions/xsh_chap02_04.html
-
-   这里: https://unix.stackexchange.com/questions/225687/what-happens-to-a-multithreaded-linux-process-if-it-gets-a-signal
-
-9. linux内核会挑选哪个线程? 参考: https://stackoverflow.com/questions/6949025/how-are-asynchronous-signal-handlers-executed-on-linux
-
-10. 更详细的linux信号处理, 参考linux_kernrl/linux_nptl.rst
+8. linux内核会挑选哪个线程以及更详细的linux信号处理, 参考linux_kernrl/linux_signal.rst
 
 ----
 

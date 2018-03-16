@@ -671,6 +671,53 @@ py2中, dict确实比{}慢一点, 但是py3中, dict却比{}快了挺多的.
 
 结果上的不一致也没太明白
 
+setattr和combined dict的比较
+================================
+
+因为直接设置对象的__dict__属性, 也相当于赋值, 所以可以和setattr比较一下性能
+
+结果显示, setattr是慢于__dict__赋值的
+
+
+.. code-block:: python
+
+    In [16]: a=A()
+    
+    In [17]: x=A()
+    
+    In [18]: a.__dict__['a'] = 1
+    
+    In [19]: x.__dict__['a'] = 2
+    
+    In [20]: a.a
+    Out[20]: 1
+    
+    In [21]: x.a
+    Out[21]: 2
+    
+    In [22]: a.__dict__
+    Out[22]: {'a': 1}
+    
+    In [23]: x.__dict__
+    Out[23]: {'a': 2}
+
+
+然后使用timeit来比对一下性能, setattr基本上大概慢一倍于__dict__赋值
+
+
+.. code-block:: python
+
+    In [24]: setup = '''
+        ...: class A:
+        ...:     data=1
+        ...: a = A()
+        ...: '''
+    
+    In [25]: timeit.repeat('''a.__dict__['a']=1''',setup=setup)
+    Out[25]: [0.08287833991926163, 0.06579227698966861, 0.06424702901858836]
+    
+    In [26]: timeit.repeat('''setattr(a, 'a', 1)''',setup=setup)
+    Out[26]: [0.16998149896971881, 0.16912396694533527, 0.16973366599995643]
 
 
 ----

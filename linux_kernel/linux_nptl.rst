@@ -23,6 +23,12 @@ Linux的pthread(nptl)
 
 .. [11] http://www.cnblogs.com/parrynee/archive/2010/01/14/1648152.html
 
+.. [12] http://www.cnblogs.com/hazir/p/linux_kernel_pid.htm
+
+.. [13] https://www.toptal.com/linux/separation-anxiety-isolating-your-system-with-linux-namespaces
+
+.. [14] http://lzz5235.github.io/2016/01/11/copy_process.html
+
 参考4是fork的一些解释
 
 参考6有Linux下Thread的历史介绍
@@ -34,6 +40,14 @@ Linux的pthread(nptl)
 参考9是pthread下的同步机制
 
 参考11是task结构中, pids这个属性的一些解释. 注意的是4.15类型变成了pid_link而不是文章中的pid_type, 但是都是使用hash表结构.
+
+参考12是内核中pid整个层级的设计, 4.15删除了pidmap一类的函数, 要注意一下
+
+参考13是关于pid namespace
+
+参考14是copy_process这个函数的一些解释
+
+**这里不涉及task调度, 调度参考linux_kernel/linux_task_schedule.rst**
 
 GNU
 ====
@@ -137,10 +151,12 @@ fork/clone会在线程创建的时候被调用, 先来个了解.
 
 .. code-block:: c
 
+    // https://elixir.bootlin.com/linux/v4.15/source/kernel/fork.c#L2110
     #ifdef __ARCH_WANT_SYS_FORK
     SYSCALL_DEFINE0(fork)
     {
     #ifdef CONFIG_MMU
+        // 这里直接调用_do_fork, 传入的flags是SIGHLD
     	return _do_fork(SIGCHLD, 0, 0, NULL, NULL, 0);
     #else
     	/* can not support in nommu mode */
@@ -155,6 +171,7 @@ fork系统调用基本上没有传参, 没什么灵活性.
 
 .. code-block:: c
 
+    // https://elixir.bootlin.com/linux/v4.15/source/kernel/fork.c#L2130
     #ifdef __ARCH_WANT_SYS_CLONE
     #ifdef CONFIG_CLONE_BACKWARDS
     SYSCALL_DEFINE5(clone, unsigned long, clone_flags, unsigned long, newsp,
@@ -322,20 +339,18 @@ pthread结构
 
 pthread这个结构太长, 先放着吧
 
-pthread_create
-===================
+pthread_create/createthread
+==================================
 
-例如python中, 创建线程就直接调用pthread_create了
+例如python中, 创建线程就直接调用pthread_create了, 而pthread_create会调用到createthread去实际创建线程
 
+pthread_create代码在glibc/nptl/pthread_create.c
 
-createthread
-=====================
-
-pthread_create会调用到createthread去实际创建线程
-
-该函数一开始是在nptl/createthread.c中, 然后根据ChangeLog.18, 被移动到平台相关目录下sysdeps/unix/sysv/linux/createthread.c
+该函数一开始是在nptl/createthread.c中, 然后根据ChangeLog.18, 被移动到平台相关目录下
 
 该函数会调用clone, 但是是根据平台不同调用不同的clone的. 
+
+glibc/sysdeps/unix/sysv/linux/createthread.c
 
 .. code-block:: c
 
@@ -409,7 +424,20 @@ pthread_create会调用到createthread去实际创建线程
 task结构
 ============
 
-task结构属性很多, 下面借助clone的代码去了解创建线程的时候, task结构属性的赋值流程.
+task结构属性很多, 下面通过clone的代码流程去了解创建线程的时候, task的属性赋值流程.
+
+主要的属性有:
+
+1. pid号(pid_t类型)和pids双链表(存储pid结构, 不是pid号), 内核中根据该链表去获取对应的task结构
+   这里的pid号是task结构的, 也就是内核中每一个task都有自己的pid(叫pid是因为内核之前只有进程而没有线程), 但是
+   现在称为tid可能更合适一些.
+
+2. thread_info, thread_group, thread_info和信号有关, thread_group是线程的链表
+
+3. tgid, 也就是thread group id, 就是我们ps出来的pid, 同一个进程的线程们tgid都是主线程的pid.
+
+4. signal, sighand, shared_pending, blocked, pending, 和信号处理有关, signal.shared_pending线程组的待处理信号队列
+   而pending是每个task自己的signal处理队列, 可以看成每一个线程自己的信号处理队列
 
 
 clone中新建task结构
@@ -550,6 +578,8 @@ https://elixir.bootlin.com/linux/v4.15/source/kernel/fork.c#L1534
      * parts of the process environment (as per the clone
      * flags). The actual kick-off is left to the caller.
      */
+    // 注释上就是说, 创建一个新的task就是复制一份老的
+    // 然后启动的操作交给调用者
     static __latent_entropy struct task_struct *copy_process(
     					unsigned long clone_flags,
     					unsigned long stack_start,
@@ -565,17 +595,66 @@ https://elixir.bootlin.com/linux/v4.15/source/kernel/fork.c#L1534
         
         // 你看, 复制task结构了
         p = dup_task_struct(current, node);
+
+        if (!p)
+        	goto fork_out;
+        
+        /*
+         * This _must_ happen before we call free_task(), i.e. before we jump
+         * to any of the bad_fork_* labels. This is to avoid freeing
+         * p->set_child_tid which is (ab)used as a kthread's data pointer for
+         * kernel threads (PF_KTHREAD).
+         */
+        // 下面是CLONE_CHILD_SETTID和CLONE_CHILD_CLEARTID标志位
+        p->set_child_tid = (clone_flags & CLONE_CHILD_SETTID) ? child_tidptr : NULL;
+        /*
+         * Clear TID on mm_release()?
+         */
+        p->clear_child_tid = (clone_flags & CLONE_CHILD_CLEARTID) ? child_tidptr : NULL;
+
         
         // 省略代码
-
-        // 这里会根据是否是线程去决定是否公用
-        // 信号结构
-        retval = copy_signal(clone_flags, p);
-        if (retval)
-        	goto bad_fork_cleanup_sighand;
+        // 初始化task的pending队列
+        init_sigpending(&p->pending);
 
         // 省略代码
 
+        /* Perform scheduler related setup. Assign this task to a CPU. */
+        // 这里复制调度相关的属性, 包括调度类, 调度优先级等等
+        // 线程/子进程都是从主线程/父进程继承过来的, 这里也就是复制一份属性
+        retval = sched_fork(clone_flags, p);
+        if (retval)
+            goto bad_fork_cleanup_policy;
+
+        // 省略代码
+
+        // 复制文件
+        retval = copy_files(clone_flags, p);
+        if (retval)
+            goto bad_fork_cleanup_semundo;
+
+        // 复制文件描述符(fd)
+        retval = copy_fs(clone_flags, p);
+        if (retval)
+            goto bad_fork_cleanup_files;
+
+        // 复制信号操作函数
+        retval = copy_sighand(clone_flags, p);
+        if (retval)
+            goto bad_fork_cleanup_fs;
+        
+        // 这里会根据是否是线程去决定是否公用信号结构
+        retval = copy_signal(clone_flags, p);
+        if (retval)
+            goto bad_fork_cleanup_sighand;
+
+        // 省略代码
+
+        // 复制IO!!!
+        retval = copy_io(clone_flags, p);
+        if (retval)
+            goto bad_fork_cleanup_namespaces;
+        
         // 这里的pid则是task结构的pid
         // 和我们通常称的pid是不太一样
         p->pid = pid_nr(pid);
@@ -604,6 +683,72 @@ https://elixir.bootlin.com/linux/v4.15/source/kernel/fork.c#L1534
     
     }
 
+dup_task_struct函数会去调用平台相关的arch_dup_task_struct函数, x86下是在
+
+
+但其实也没做什么特别的, 只是把task结构复制一份, 然后改一下stack等等.
+
+.. code-block:: c
+
+    // https://elixir.bootlin.com/linux/v4.15/source/kernel/fork.c#L512 
+    static struct task_struct *dup_task_struct(struct task_struct *orig, int node)
+    {
+        // 省略代码
+
+        // 分配栈
+        stack = alloc_thread_stack_node(tsk, node);
+        if (!stack)
+        	goto free_tsk;
+        
+        stack_vm_area = task_stack_vm_area(tsk);
+        
+        // 平台相关的复制task结构
+        err = arch_dup_task_struct(tsk, orig);
+        // 省略代码
+        // 后面大都是跟栈相关的操作
+    }
+
+    // https://elixir.bootlin.com/linux/v4.15/source/arch/x86/kernel/process.c#L94
+    // x86下的复制task结构
+    int arch_dup_task_struct(struct task_struct *dst, struct task_struct *src)
+    {
+    	memcpy(dst, src, arch_task_struct_size);
+    #ifdef CONFIG_VM86
+    	dst->thread.vm86 = NULL;
+    #endif
+    
+    	return fpu__copy(&dst->thread.fpu, &src->thread.fpu);
+    }
+
+pid结构和命名空间
+=====================
+
+都来自参考 [13]_
+
+pid namespace是为了隔离进程的, 用来做虚拟化的等等
+
+*To create a new PID namespace, one must call the clone() system call with a special flag CLONE_NEWPID.*
+
+1. CLONE_NEWPID
+
+clone的时候传入CLONE_NEWPID将会新建一个pid namespace, 如果传入CLONE_NEWPID|CLONE_SIGCHLD, 那么子进程将自己分化出自己的namespace, 如果只传入
+
+CLONE_SIGCHLD而不传入CLONE_NEWPID, 那么就是一个父子进程而子进程不会创建自己新的namespace
+
+2. CLONE_NEWNET
+
+这个是网络虚拟化, 也就是说, 传入这个标志, 则子进程和父进程都将"看到"所有的端口, 甚至都有自己的回环地址(loopback).
+
+*In order to provide a usable network interface in the child namespace, it is necessary to set up additional “virtual” network interfaces which span multiple namespaces.*
+
+*Finally, to make the whole thing work, a “routing process” must be running in the global network namespace to receive traffic from the physical interface, and route it through the appropriate virtual interfaces to to the correct child network namespaces.*
+
+上面是说需要一个路由进程把物理的流量发送到指定的namespace下
+
+*To do this by hand, you can create a pair of virtual Ethernet connections between a parent and a child namespace by running a single command from the parent namespace:
+ip link add name veth0 type veth peer name veth1 netns <pid>*
+
+在父子namespace之间, 创建一对虚拟以太网连接
 
 wake_up_new_task
 ======================
@@ -666,5 +811,4 @@ https://elixir.bootlin.com/linux/v4.15/source/kernel/sched/core.c#L2447
     }
 
 
-关于task调度, 参考linux_kernel/linux_task_schedule.rst
 

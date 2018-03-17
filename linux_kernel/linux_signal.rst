@@ -808,6 +808,27 @@ https://elixir.bootlin.com/linux/v4.15/source/kernel/signal.c#L1313
     	}
     }
 
+关于pid_task, 则是返回的是线程组的主线程(进程)
+
+.. code-block:: c
+
+    // https://elixir.bootlin.com/linux/v4.15/source/kernel/pid.c#L305
+    struct task_struct *pid_task(struct pid *pid, enum pid_type type)
+    {
+    	struct task_struct *result = NULL;
+    	if (pid) {
+    		struct hlist_node *first;
+    		first = rcu_dereference_check(hlist_first_rcu(&pid->tasks[type]),
+    					      lockdep_tasklist_lock_is_held());
+    		if (first)
+    			result = hlist_entry(first, struct task_struct, pids[(type)].node);
+    	}
+    	return result;
+    }
+
+其中是拿到pid->tasks这个数组中, 对应type的头节点, 然后这个节点中包含的是一个task结构, 然后通过计算这个node在
+
+task结构中的偏移量返回task结构的地址(container_of计算). 所以也就是第一个线程的task结构, 也就是主线程(进程)
 
 https://elixir.bootlin.com/linux/v4.15/source/kernel/signal.c#L1279
 

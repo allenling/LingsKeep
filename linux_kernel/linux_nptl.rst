@@ -1088,7 +1088,7 @@ https://elixir.bootlin.com/linux/v4.15/source/kernel/fork.c#L1534
 
         // 省略代码
 
-        // 这里一般都会走第一个分支
+        // 这里一般都会走if里面的代码
         if (likely(p->pid)) {
         	ptrace_init_task(p, (clone_flags & CLONE_PTRACE) || trace);
         

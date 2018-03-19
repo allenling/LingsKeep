@@ -16,7 +16,7 @@ linux的信号流程
 
 参考3是简单的sigaction的代码例子
 
-task, 进程, 线程, lwp的概念参考linux_nptl.rst
+task, 进程, 线程, lwp的概念, 以及pid的代码, 参考linux_nptl.rst
 
 小结
 =========

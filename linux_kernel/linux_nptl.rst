@@ -450,6 +450,7 @@ task结构属性很多, 下面通过clone的代码流程去了解创建线程的
    现在称为tid可能更合适一些.
 
 2. thread_info, thread_group, thread_info是该task的一些标志位, 比如是否有待处理信号, 则是通过该标志位是否置位有关, thread_group是线程的链表
+   而thread_group是一个双链表结构, 如果是创建线程, 那么会把task的thread_group加入到主线程的thread_group中.
 
 3. tgid, 也就是thread group id, 就是我们ps出来的pid, 同一个进程的线程们tgid都是主线程的pid, 用户看到的pid就是这个tgid
 
@@ -519,12 +520,16 @@ namespace中, 父层级不知道子层级, 子层级则保存了父层级
     // https://elixir.bootlin.com/linux/v4.15/source/include/linux/pid_namespace.h#L24
     struct pid_namespace {
         // 其他的属性先省略
+
         // 这个是存储pid号/结构的地方, 是一个radix tree(基数树)结构
     	struct idr idr;
         // 哪个层级
         unsigned int level;
         // 以及上一级namespace
         struct pid_namespace *parent;
+        // 已分配了多少个pid
+        unsigned int pid_allocated;
+
         // 其他的属性先省略
     } __randomize_layout;
 
@@ -620,7 +625,7 @@ pid_nr拿到pid结构的pid号(全局)
     {
     	pid_t nr = 0;
     	if (pid)
-            // 注意这里的numbers是拿第一个元素
+            // 注意这里的numbers是拿第一个元素, 也就是下标是0的元素
             // 也就是全局的upid
     	    nr = pid->numbers[0].nr;
     	return nr;
@@ -653,6 +658,8 @@ pid_task
 其中hlist_first_rcu表示获取链表的第一个元素, 而链表的表头是pid->tasks[type], 也就是pid结构下tasks指向的hash表中对应type的元素
 
 而hlist_entry就是通过计算task结构中node, 也就是task中包含的pids这个数组, 的偏移量去返回对应的task结构
+
+**在copy_process中有具体的处理, 继续看下面**
 
 
 分配一个pid
@@ -743,6 +750,7 @@ pid_task
     	for ( ; upid >= pid->numbers; --upid) {
     		/* Make the PID visible to find_pid_ns. */
     		idr_replace(&upid->ns->idr, pid, upid->nr);
+                // namespace中已分配的个数(pid_allocated)加1
     		upid->ns->pid_allocated++;
     	}
     	spin_unlock_irq(&pidmap_lock);
@@ -826,6 +834,38 @@ idr_alloc_cyclic
 加入start=1, 也就是alloc_pid中的传参, 那么找不到比idr当前大的, 可用的pid数字, 那么就从start开始, 也就是从1开始找, 也就是
 
 和注释上的流程.
+
+获取task的pid
+================
+
+.. code-block:: c
+
+    // https://elixir.bootlin.com/linux/v4.15/source/kernel/pid.c#L334
+    struct pid *get_task_pid(struct task_struct *task, enum pid_type type)
+    {
+    	struct pid *pid;
+    	rcu_read_lock();
+    	if (type != PIDTYPE_PID)
+    		task = task->group_leader;
+    	pid = get_pid(rcu_dereference(task->pids[type].pid));
+    	rcu_read_unlock();
+    	return pid;
+    }
+    EXPORT_SYMBOL_GPL(get_task_pid);
+
+    // https://elixir.bootlin.com/linux/v4.15/source/include/linux/pid.h#L76
+    static inline struct pid *get_pid(struct pid *pid)
+    {
+    	if (pid)
+    		atomic_inc(&pid->count);
+    	return pid;
+    }
+
+get_task_pid则强制拿到PIDTYPE_PID类型的task, 返回PIDTYPE_PID类型的task中, pids这个数组指定的type的元素
+
+**有点绕呀有点绕~~~~~~~**
+
+
 
 clone中新建task结构
 =====================
@@ -1068,6 +1108,7 @@ https://elixir.bootlin.com/linux/v4.15/source/kernel/fork.c#L1534
                 // !!!!!注意一下这个exit_signal = -1
                 // 后面会使用到, 说明新建的task不是thread group leader
         	p->exit_signal = -1;
+                // 注意这里, group_leader则是当前线程的group_leader
         	p->group_leader = current->group_leader;
                 // 如果是线程, 那么tgid则是统一的tgid
         	p->tgid = current->tgid;
@@ -1076,6 +1117,7 @@ https://elixir.bootlin.com/linux/v4.15/source/kernel/fork.c#L1534
         		p->exit_signal = current->group_leader->exit_signal;
         	else
         		p->exit_signal = (clone_flags & CSIGNAL);
+                // 如果不是创建线程, 那么group_leader则是自己
         	p->group_leader = p;
                 // 如果不是线程, tgid就是其自己的pid
         	p->tgid = p->pid;
@@ -1093,7 +1135,7 @@ https://elixir.bootlin.com/linux/v4.15/source/kernel/fork.c#L1534
         	ptrace_init_task(p, (clone_flags & CLONE_PTRACE) || trace);
         
                 // 把pid结构放入到task中, pids这个数组对应的type的位置中
-                // task->pids[type].pid = pid;
+                // 这个需要和attch_pid一起看
         	init_task_pid(p, PIDTYPE_PID, pid);
 
                 // thread_group_leader的判断是: p->exit_signal >= 0;
@@ -1112,6 +1154,9 @@ https://elixir.bootlin.com/linux/v4.15/source/kernel/fork.c#L1534
         	    list_add_tail_rcu(&p->thread_node,
         	    		  &p->signal->thread_head);
         	}
+                // 这里就比较绕了
+                // 这里是把p加入到p>tasks[type]这个链表中
+                // 这个需要和init_task_pid一起看
         	attach_pid(p, PIDTYPE_PID);
         	nr_threads++;
         }
@@ -1120,6 +1165,131 @@ https://elixir.bootlin.com/linux/v4.15/source/kernel/fork.c#L1534
     
     
     }
+
+init_task_pid/attach_pid
+==========================
+
+这两个比较绕一点, 简单来说是前一个把pid放入到task中, 而第二个是把task放入到pid中, 互相包含方便快速查找
+
+查找就是一个container_of的计算了
+
+
+init_task_pid的操作
+
+.. code-block:: c
+
+    // https://elixir.bootlin.com/linux/v4.15/source/kernel/fork.c#L1506
+    static inline void
+    init_task_pid(struct task_struct *task, enum pid_type type, struct pid *pid)
+    {
+    	 task->pids[type].pid = pid;
+    }
+
+也就是
+
+.. code-block:: python
+
+    '''
+                 链表头
+    task +-----> pids   +-----+ PIDTYPE_PGID
+                              |
+                              + PIDTYPE_PID  +---+ node
+                                                 |      
+                                                 |      
+                                                 + pid 
+                                                   |
+    new_pid_struct <-------------------------------+
+    
+    '''
+
+而attach_pid
+
+.. code-block:: c
+
+    // https://elixir.bootlin.com/linux/v4.15/source/kernel/pid.c#L259
+    void attach_pid(struct task_struct *task, enum pid_type type)
+    {
+    	struct pid_link *link = &task->pids[type];
+        // 注意的是, 最后一个参数才是head, 第一个参数是要加入的node
+        hlist_add_head_rcu(&link->node, &link->pid->tasks[type]);
+    }
+
+也就是
+
+.. code-block:: python
+
+    '''
+                 链表头
+    task +-----> pids   +-----+ PIDTYPE_PGID
+                              |
+                              + PIDTYPE_PID  +---+ node >-->----+
+                                                 |              |
+                                                 |              |
+                                                 + pid          |
+                                                   |            |
+    new_pid_struct <-------------------------------+            |
+         |                                                      |
+         |                                                      |
+         +-----+ upid                                           |
+               |                                                |
+               |                                                |
+               + tasks +--+ PIDTYPE_PID ---> node1 --> node2 -> + (注意的是, node一般是PIDTYPE_PID下的第一个元素, 这里写多个是表示该结构是一个链表)
+                          |
+                          + PIDTYPE_PGID
+
+    
+    '''
+
+一般, 进程的task结构回事pid结构中的tasks中的第一个元素, 所以pid_task函数的做法就是:
+
+1. 根据namespace(一般是current的namespace)和pid数字, 拿到idr中, pid数字对应的pid结构
+
+2. 1中拿到的就是上一个图的new_pid_struct, 然后拿到tasks对应type的第一个元素, 就是进程的task结构了
+
+
+再来看看find_vpid和pid_task的代码
+
+.. code-block:: c
+
+    // 这里拿到task的pid, 然后拿到namespace
+    struct pid_namespace *task_active_pid_ns(struct task_struct *tsk)
+    {
+    	return ns_of_pid(task_pid(tsk));
+    }
+    EXPORT_SYMBOL_GPL(task_active_pid_ns);
+
+    // 这里调用find_pid_ns, 传入task_active_pid_ns返回的namespace
+    // 继续看下面
+    struct pid *find_vpid(int nr)
+    {
+    	return find_pid_ns(nr, task_active_pid_ns(current));
+    }
+    EXPORT_SYMBOL_GPL(find_vpid);
+
+    // 这里通过namespace和nr, 也就是pid号, 拿到namespace中idr结构对应的pid结构
+    struct pid *find_pid_ns(int nr, struct pid_namespace *ns)
+    {
+    	return idr_find(&ns->idr, nr);
+    }
+    EXPORT_SYMBOL_GPL(find_pid_ns);
+
+    // 这里通过pid拿到的是task结构
+    struct task_struct *pid_task(struct pid *pid, enum pid_type type)
+    {
+    	struct task_struct *result = NULL;
+    	if (pid) {
+    		struct hlist_node *first;
+    		first = rcu_dereference_check(hlist_first_rcu(&pid->tasks[type]),
+    					      lockdep_tasklist_lock_is_held());
+    		if (first)
+    			result = hlist_entry(first, struct task_struct, pids[(type)].node);
+    	}
+    	return result;
+    }
+    EXPORT_SYMBOL(pid_task);
+
+所以, pid结构中已经记住了task, 所以直接拿就好了
+
 
 dup_task_struct
 ====================
@@ -1165,6 +1335,8 @@ wake_up_new_task
 ======================
 
 注释上说就是唤醒新建的task
+
+**这里需要参考linux_task_schedule.rst**
 
 https://elixir.bootlin.com/linux/v4.15/source/kernel/sched/core.c#L2447
 

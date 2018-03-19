@@ -670,6 +670,17 @@ main中一直计算, 然后signal handler一个循环, 我们可以看到:
     	return 0;
     }
 
+man手册的解释
+================
+
+在clone的man收手册中, 说明内核会选择任意一个没有block该信号的task
+
+  *If kill(2) is used to send a signal to a thread group, and the thread group has installed a handler for the signal, then the handler will be invoked in exactly one, arbitrarily selected mem‐
+  ber of the thread group that has not blocked the signal.  If multiple threads in a group are waiting to accept the same signal using sigwaitinfo(2), the kernel will arbitrarily select one of
+  these threads to receive a signal sent using kill(2).*
+  
+  --- man clone
+
 
 ----
 
@@ -825,10 +836,9 @@ https://elixir.bootlin.com/linux/v4.15/source/kernel/signal.c#L1313
     	}
     	return result;
     }
-
 其中是拿到pid->tasks这个数组中, 对应type的头节点, 然后这个节点中包含的是一个task结构, 然后通过计算这个node在
 
-task结构中的偏移量返回task结构的地址(container_of计算). 所以也就是第一个线程的task结构, 也就是主线程(进程)
+task结构中的偏移量返回task结构的地址(container_of计算). 所以也就是第一个线程的task结构, 可以看成也就是主线程(进程)
 
 https://elixir.bootlin.com/linux/v4.15/source/kernel/signal.c#L1279
 
@@ -1201,7 +1211,11 @@ https://elixir.bootlin.com/linux/v4.15/source/include/linux/sched.h#L1456
     # define task_thread_info(task)	((struct thread_info *)(task)->stack)
     #endif
 
-所以, signal_pending则是去寻找task对应的thread_info是否有设置上了TIF_SIGPENDING标志位
+所以, signal_pending则是去寻找task对应的thread_info是否有设置上了TIF_SIGPENDING标志位, 也就是如果
+
+当前task没有待处理的信号, 也就是unlikely返回false, 所以!signal_pending返回true, 也就是没有待处理的信号的
+
+话则选择该task
 
 
 block信号
@@ -1416,7 +1430,7 @@ do_sigaction
                 // 下面这个判断是该信号是否被ignore
                 // sig_handler这个拿到sig的handler, 如果handler是SIG_IGN
                 // 那么表示忽略
-                // 忽略的时候把所有线程的中的该signale从pending移除
+                // 忽略的时候把所有线程的中的该signal从pending移除
     		if (sig_handler_ignored(sig_handler(p, sig), sig)) {
     			sigemptyset(&mask);
     			sigaddset(&mask, sig);

@@ -29,6 +29,8 @@ Linux的pthread(nptl)
 
 .. [14] http://lzz5235.github.io/2016/01/11/copy_process.html
 
+.. [15] http://blog.csdn.net/zhanglei4214/article/details/6765913
+
 参考4是fork的一些解释
 
 参考6有Linux下Thread的历史介绍
@@ -45,7 +47,7 @@ Linux的pthread(nptl)
 
 参考13是关于pid namespace
 
-参考14是copy_process这个函数的一些解释
+参考14, 15是copy_process这个函数的一些解释, 15更详细一点
 
 **这里不涉及task调度, 调度参考linux_kernel/linux_task_schedule.rst**
 
@@ -130,7 +132,7 @@ lwp, 进程, 线程可以通过ps命令来看:
     
     '''
 
-可以看到, 线程和进程分别对应一个lwp, 然后进程的lwp和pid一致, 线程的pid和lwp是不一致的.
+可以看到第二列是pid, 第四列是lwp, 线程和进程分别对应各自的lwp, 然后进程的lwp和pid一致, 线程的pid和lwp是不一致的.
 
 fork/clone调用
 ================
@@ -270,6 +272,21 @@ fork调用的是clone而不是原生的fork调用, 这是因为clone支持新建
   --- 参考4
 
 所以, 我们使用glibc下的fork并不是系统调用fork, 而是glibc实现的一个wrap, 使用起来更容易, 并且内部是调用clone这个系统调用, 可以支持线程(lwp)的创建.
+
+getpid
+-----------
+
+因此, 调用getpid返回的pid其实是tgid(thread group id), 所以ps命令返回的lwp是task的pid, 而pid那一列则是tgid
+
+  *Thread groups were a feature added in Linux 2.4 to support the POSIX threads notion of a set of threads that share a single PID.  Internally, this shared PID is the  so-called  thread  group
+  identifier (TGID) for the thread group.  Since Linux 2.4, calls to getpid(2) return the TGID of the caller.*
+  
+  --- man clone
+
+所以, 每一个进程和线程都指向一个task, 而每一个task都有自己的pid, 这个pid是内核看到的, 用来调度的, 而用户看到的pid则是tgid, 而ps命令根据参数决定是否返回
+
+同一个tgid下的所有task(线程), 还是只返回tgid等于pid的task(主线程/进程)
+
 
 LinuxThread/nptl
 ===================
@@ -432,13 +449,383 @@ task结构属性很多, 下面通过clone的代码流程去了解创建线程的
    这里的pid号是task结构的, 也就是内核中每一个task都有自己的pid(叫pid是因为内核之前只有进程而没有线程), 但是
    现在称为tid可能更合适一些.
 
-2. thread_info, thread_group, thread_info和信号有关, thread_group是线程的链表
+2. thread_info, thread_group, thread_info是该task的一些标志位, 比如是否有待处理信号, 则是通过该标志位是否置位有关, thread_group是线程的链表
 
-3. tgid, 也就是thread group id, 就是我们ps出来的pid, 同一个进程的线程们tgid都是主线程的pid.
+3. tgid, 也就是thread group id, 就是我们ps出来的pid, 同一个进程的线程们tgid都是主线程的pid, 用户看到的pid就是这个tgid
 
 4. signal, sighand, shared_pending, blocked, pending, 和信号处理有关, signal.shared_pending线程组的待处理信号队列
    而pending是每个task自己的signal处理队列, 可以看成每一个线程自己的信号处理队列
 
+pid结构和命名空间
+=====================
+
+都来自参考 [13]_
+
+pid namespace是为了隔离进程的, 用来做虚拟化的等等, 比如docker等等工具, Google App Engine这些云平台.
+
+*To create a new PID namespace, one must call the clone() system call with a special flag CLONE_NEWPID.*
+
+1. CLONE_NEWPID
+
+clone的时候传入CLONE_NEWPID将会新建一个pid namespace, 如果传入CLONE_NEWPID|CLONE_SIGCHLD, 那么子进程将自己分化出自己的namespace, 如果只传入
+
+CLONE_SIGCHLD而不传入CLONE_NEWPID, 那么就是一个父子进程而子进程不会创建自己新的namespace
+
+2. CLONE_NEWNET
+
+这个是网络虚拟化, 也就是说, 传入这个标志, 则子进程和父进程都将"看到"所有的端口, 甚至都有自己的回环地址(loopback).
+
+*In order to provide a usable network interface in the child namespace, it is necessary to set up additional “virtual” network interfaces which span multiple namespaces.*
+
+*Finally, to make the whole thing work, a “routing process” must be running in the global network namespace to receive traffic from the physical interface, and route it through the appropriate virtual interfaces to to the correct child network namespaces.*
+
+上面是说要构建虚拟网络, 还必须需要一个路由进程把物理的流量发送到指定的namespace下
+
+*To do this by hand, you can create a pair of virtual Ethernet connections between a parent and a child namespace by running a single command from the parent namespace:
+ip link add name veth0 type veth peer name veth1 netns <pid>*
+
+在父子namespace之间, 创建一对虚拟以太网连接
+
+所以, 一个task会有很多个pid(不同的namespace), 所以pid结构保存了这些信息
+
+
+.. code-block:: c
+
+    // https://elixir.bootlin.com/linux/v4.15/source/include/linux/pid.h#L53
+    struct upid {
+        // namespace下的pid号
+    	int nr;
+        // 哪个namespace
+    	struct pid_namespace *ns;
+    };
+    
+    struct pid
+    {
+    	atomic_t count;
+    	unsigned int level;
+    	/* lists of tasks that use this pid */
+        // tasks是一个hash表, 该hash表每一个类型都指向一个该类型的task结构的数组
+    	struct hlist_head tasks[PIDTYPE_MAX];
+    	struct rcu_head rcu;
+    	struct upid numbers[1];
+    };
+
+upid是该pid结构, 在不同的namespace下, 对应的不同的数字, 而pid结构中, 保存了自己的upid的数组. 也就是全局的task, 其pid数字是全局唯一的, 但是在不同的namespace下, 可以相同
+
+namespace中, 父层级不知道子层级, 子层级则保存了父层级
+
+.. code-block:: c
+
+    // https://elixir.bootlin.com/linux/v4.15/source/include/linux/pid_namespace.h#L24
+    struct pid_namespace {
+        // 其他的属性先省略
+        // 这个是存储pid号/结构的地方, 是一个radix tree(基数树)结构
+    	struct idr idr;
+        // 哪个层级
+        unsigned int level;
+        // 以及上一级namespace
+        struct pid_namespace *parent;
+        // 其他的属性先省略
+    } __randomize_layout;
+
+
+从pid获取task
+=================
+
+通过pid号, 拿到pid结构, 再拿到task结构, 可以通过信号的处理来看看
+
+在使用kill发送信号的时候, kill调用
+
+.. code-block:: c
+
+    // https://elixir.bootlin.com/linux/v4.15/source/kernel/signal.c#L1399
+    /*
+     * kill_something_info() interprets pid in interesting ways just like kill(2).
+     *
+     * POSIX specifies that kill(-1,sig) is unspecified, but what we have
+     * is probably wrong.  Should make it like BSD or SYSV.
+     */
+    
+    static int kill_something_info(int sig, struct siginfo *info, pid_t pid)
+    {
+    	int ret;
+    
+        // 如果pid大于0, 那么会发送到对应的进程中
+    	if (pid > 0) {
+    		rcu_read_lock();
+    		ret = kill_pid_info(sig, info, find_vpid(pid));
+    		rcu_read_unlock();
+    		return ret;
+    	}
+        // 省略代码
+    }
+
+其中kill_pid_info的最后一个参数是pid结构, 然后通过传入的pid结构拿到task结构
+
+.. code-block:: c
+
+
+    // https://elixir.bootlin.com/linux/v4.15/source/kernel/signal.c#L1313
+    int kill_pid_info(int sig, struct siginfo *info, struct pid *pid)
+    {
+    	int error = -ESRCH;
+    	struct task_struct *p;
+    
+    	for (;;) {
+    	    rcu_read_lock();
+    	    p = pid_task(pid, PIDTYPE_PID);
+            // 省略代码
+        }
+        // 省略代码
+     }
+
+
+所以是
+
+1. find_vpid, 拿到pid号对应的pid结构
+
+2. pid_task, 通过pid结构, 以及传入的task类型, 获取对应的task结构 
+
+
+find_vpid
+---------------
+
+这个操作基本上是去当前task的namespace下的idr(基数树)查找对应的pid号下的pid结构
+
+.. code-block:: c
+
+    // https://elixir.bootlin.com/linux/v4.15/source/kernel/pid.c#L244
+    struct pid *find_pid_ns(int nr, struct pid_namespace *ns)
+    {
+        // idr的查找
+    	return idr_find(&ns->idr, nr);
+    }
+    EXPORT_SYMBOL_GPL(find_pid_ns);
+    
+    struct pid *find_vpid(int nr)
+    {
+    	return find_pid_ns(nr, task_active_pid_ns(current));
+    }
+    EXPORT_SYMBOL_GPL(find_vpid);
+
+pid_nr拿到pid结构的pid号(全局)
+================================
+
+在copy_process中, 我们会看到, 先分配了一个新的pid结构, 然后再获取新pid结构的全局pid号
+
+.. code-block:: c
+
+    // https://elixir.bootlin.com/linux/v4.15/source/include/linux/pid.h#L165
+    static inline pid_t pid_nr(struct pid *pid)
+    {
+    	pid_t nr = 0;
+    	if (pid)
+            // 注意这里的numbers是拿第一个元素
+            // 也就是全局的upid
+    	    nr = pid->numbers[0].nr;
+    	return nr;
+    }
+
+
+
+pid_task
+------------
+
+这个去是task结构中的tasks指向的hash表中, 根据传入的类型, 找到该第一个task(有点绕听起来)
+
+.. code-block:: c
+
+    // https://elixir.bootlin.com/linux/v4.15/source/kernel/pid.c#L305
+    struct task_struct *pid_task(struct pid *pid, enum pid_type type)
+    {
+    	struct task_struct *result = NULL;
+    	if (pid) {
+    		struct hlist_node *first;
+    		first = rcu_dereference_check(hlist_first_rcu(&pid->tasks[type]),
+    					      lockdep_tasklist_lock_is_held());
+    		if (first)
+    			result = hlist_entry(first, struct task_struct, pids[(type)].node);
+    	}
+    	return result;
+    }
+    EXPORT_SYMBOL(pid_task);
+
+其中hlist_first_rcu表示获取链表的第一个元素, 而链表的表头是pid->tasks[type], 也就是pid结构下tasks指向的hash表中对应type的元素
+
+而hlist_entry就是通过计算task结构中node, 也就是task中包含的pids这个数组, 的偏移量去返回对应的task结构
+
+
+分配一个pid
+==============
+
+新建一个pid结构的时候, 全局一个, 然后其每一个层级, 也就是父namespace, 都要映射一个
+
+**注意的是, 这里只是分配新的pid而已, 并没有把pid和task对应起来, 对应起来是上一层, 也就是copy_process做的事情**
+
+所以, 这里只是把pid结构中的tasks属性初始化而已
+
+.. code-block:: c
+
+    // https://elixir.bootlin.com/linux/v4.15/source/kernel/pid.c#L147
+    struct pid *alloc_pid(struct pid_namespace *ns)
+    {
+    	struct pid *pid;
+    	enum pid_type type;
+    	int i, nr;
+    	struct pid_namespace *tmp;
+    	struct upid *upid;
+    	int retval = -ENOMEM;
+    
+        // 分配一个pid结构
+    	pid = kmem_cache_alloc(ns->pid_cachep, GFP_KERNEL);
+    	if (!pid)
+    		return ERR_PTR(retval);
+    
+    	tmp = ns;
+    	pid->level = ns->level;
+    
+        // 下面的for循环就是映射到每一个namespace层级上去
+    	for (i = ns->level; i >= 0; i--) {
+    		int pid_min = 1;
+    
+    		idr_preload(GFP_KERNEL);
+    		spin_lock_irq(&pidmap_lock);
+    
+    		/*
+    		 * init really needs pid 1, but after reaching the maximum
+    		 * wrap back to RESERVED_PIDS
+    		 */
+    		if (idr_get_cursor(&tmp->idr) > RESERVED_PIDS)
+    			pid_min = RESERVED_PIDS;
+    
+    		/*
+    		 * Store a null pointer so find_pid_ns does not find
+    		 * a partially initialized PID (see below).
+    		 */
+                // 当前循环的namespace的pid号则是
+                // 从idr这个结构中分配出来的, 是可以复用的
+    		nr = idr_alloc_cyclic(&tmp->idr, NULL, pid_min,
+    				      pid_max, GFP_ATOMIC);
+    		spin_unlock_irq(&pidmap_lock);
+    		idr_preload_end();
+    
+    		if (nr < 0) {
+    			retval = nr;
+    			goto out_free;
+    		}
+    
+                // pid的numbers这个数组的每一个元素都是upid 
+                // 其中, nr被赋值为第i个层级的pid号码, 然后ns保存的时候对应的namespace
+    		pid->numbers[i].nr = nr;
+    		pid->numbers[i].ns = tmp;
+                // 每次循环之后, 切换到父层级的namespace
+    		tmp = tmp->parent;
+    	}
+    
+    	if (unlikely(is_child_reaper(pid))) {
+    		if (pid_ns_prepare_proc(ns))
+    			goto out_free;
+    	}
+    
+    	get_pid_ns(ns);
+        // 该pid对应的计数为1
+    	atomic_set(&pid->count, 1);
+        // 初始化该pid的tasks这个数组中
+        // 每一个类型的双向链表
+    	for (type = 0; type < PIDTYPE_MAX; ++type)
+    		INIT_HLIST_HEAD(&pid->tasks[type]);
+    
+    	upid = pid->numbers + ns->level;
+    	spin_lock_irq(&pidmap_lock);
+    	if (!(ns->pid_allocated & PIDNS_ADDING))
+    		goto out_unlock;
+        // 最后, 每一个namespace上, 真正把新建的pid结构加入到对应namespace的idr结构中
+    	for ( ; upid >= pid->numbers; --upid) {
+    		/* Make the PID visible to find_pid_ns. */
+    		idr_replace(&upid->ns->idr, pid, upid->nr);
+    		upid->ns->pid_allocated++;
+    	}
+    	spin_unlock_irq(&pidmap_lock);
+    
+    	return pid;
+    
+    out_unlock:
+    	spin_unlock_irq(&pidmap_lock);
+    	put_pid_ns(ns);
+    
+    out_free:
+    	spin_lock_irq(&pidmap_lock);
+    	while (++i <= ns->level)
+    		idr_remove(&ns->idr, (pid->numbers + i)->nr);
+    
+    	/* On failure to allocate the first pid, reset the state */
+    	if (ns->pid_allocated == PIDNS_ADDING)
+    		idr_set_cursor(&ns->idr, 0);
+    
+    	spin_unlock_irq(&pidmap_lock);
+    
+    	kmem_cache_free(ns->pid_cachep, pid);
+    	return ERR_PTR(retval);
+    }
+
+1. 分配pid的原则是每一个namespace都要指定, 例如当前namespace, 父namespace, 然后父亲的父亲等等层级
+
+2. 每一个namespace分配的pid号码, 则是通过idr_alloc_cyclic这个函数去实现
+
+3. 分配之后, 保存在pid这个结构的numbers数组中
+
+4. 注意的是, 在for循环里面只是新建了对应namespace的pid数字, 然后在最后的for循环里面才会把
+   对应的namespace下, 对应的pid数字对应的pid结构加入到其idr属性上
+
+
+idr_alloc_cyclic
+=================
+
+通过注释可知, 先找一个大于last id的id, 不存在, 则找最小的, 有效的id
+
+所以称为循环(cyclic)找嘛, 也就是id值会复用
+
+显然, 在alloc_pid中, 传入的pid_min是1, end就是pid_max, pid_max是可配置的了
+
+.. code-block:: c
+
+    // https://elixir.bootlin.com/linux/v4.15/source/lib/idr.c#L49
+    /**
+     * idr_alloc_cyclic - allocate new idr entry in a cyclical fashion
+     * @idr: idr handle
+     * @ptr: pointer to be associated with the new id
+     * @start: the minimum id (inclusive)
+     * @end: the maximum id (exclusive)
+     * @gfp: memory allocation flags
+     *
+     * Allocates an ID larger than the last ID allocated if one is available.
+     * If not, it will attempt to allocate the smallest ID that is larger or
+     * equal to @start.
+     */
+    int idr_alloc_cyclic(struct idr *idr, void *ptr, int start, int end, gfp_t gfp)
+    {
+    	int id, curr = idr->idr_next;
+    
+        // start和curr谁大, 谁大从谁开始分配
+    	if (curr < start)
+    		curr = start;
+        // 找到一个比当前大的id号, 当然是可用的
+    	id = idr_alloc(idr, ptr, curr, end, gfp);
+    	if ((id == -ENOSPC) && (curr > start))
+                // 找不到, 从start开始找
+    		id = idr_alloc(idr, ptr, start, curr, gfp);
+    
+        // 下一个则是当前id + 1
+    	if (id >= 0)
+    		idr->idr_next = id + 1U;
+    
+    	return id;
+    }
+    EXPORT_SYMBOL(idr_alloc_cyclic);
+
+加入start=1, 也就是alloc_pid中的传参, 那么找不到比idr当前大的, 可用的pid数字, 那么就从start开始, 也就是从1开始找, 也就是
+
+和注释上的流程.
 
 clone中新建task结构
 =====================
@@ -615,6 +1002,7 @@ https://elixir.bootlin.com/linux/v4.15/source/kernel/fork.c#L1534
         
         // 省略代码
         // 初始化task的pending队列
+        // 初始化的意思就是把队列置空
         init_sigpending(&p->pending);
 
         // 省略代码
@@ -654,14 +1042,31 @@ https://elixir.bootlin.com/linux/v4.15/source/kernel/fork.c#L1534
         retval = copy_io(clone_flags, p);
         if (retval)
             goto bad_fork_cleanup_namespaces;
-        
-        // 这里的pid则是task结构的pid
-        // 和我们通常称的pid是不太一样
-        p->pid = pid_nr(pid);
 
+        retval = copy_thread_tls(clone_flags, stack_start, stack_size, p, tls);
+        if (retval)
+        	goto bad_fork_cleanup_io;
+        
+        if (pid != &init_struct_pid) {
+                // !!!!!!!!这里去新建了pid结构
+                // !!!!!!!!但是下面的pid_nr才会去把pid和task给对应起来!!!
+        	pid = alloc_pid(p->nsproxy->pid_ns_for_children);
+        	if (IS_ERR(pid)) {
+        		retval = PTR_ERR(pid);
+        		goto bad_fork_cleanup_thread;
+        	}
+        }
+
+        // 省略代码
+
+        
+        // 这个是拿到pid结构中全局的pid号码
+        p->pid = pid_nr(pid);
         // 下面是针对线程, 赋值task结构里面的属性
         // 包括什么tgid呀
         if (clone_flags & CLONE_THREAD) {
+                // !!!!!注意一下这个exit_signal = -1
+                // 后面会使用到, 说明新建的task不是thread group leader
         	p->exit_signal = -1;
         	p->group_leader = current->group_leader;
                 // 如果是线程, 那么tgid则是统一的tgid
@@ -676,12 +1081,48 @@ https://elixir.bootlin.com/linux/v4.15/source/kernel/fork.c#L1534
         	p->tgid = p->pid;
         }
 
+        // 省略代码
 
-    // 省略代码
+        // 初始化线程组链表, 其实就是next=prev=head
+        INIT_LIST_HEAD(&p->thread_group);
 
+        // 省略代码
+
+        // 这里一般都会走第一个分支
+        if (likely(p->pid)) {
+        	ptrace_init_task(p, (clone_flags & CLONE_PTRACE) || trace);
+        
+                // 把pid结构放入到task中, pids这个数组对应的type的位置中
+                // task->pids[type].pid = pid;
+        	init_task_pid(p, PIDTYPE_PID, pid);
+
+                // thread_group_leader的判断是: p->exit_signal >= 0;
+                // 之前如果带入的flags有CLONE_THREAD的话, 那么p->exit_signal会被复制为-1的
+                // 所以不会走if里面的代码
+        	if (thread_group_leader(p)) {
+                    // 线程不会走这里
+        	} else {
+        	    current->signal->nr_threads++;
+        	    atomic_inc(&current->signal->live);
+        	    atomic_inc(&current->signal->sigcnt);
+
+                    // !!!!!!!!!!把task加入到group_leader的thread_group链表
+        	    list_add_tail_rcu(&p->thread_group,
+        	    		  &p->group_leader->thread_group);
+        	    list_add_tail_rcu(&p->thread_node,
+        	    		  &p->signal->thread_head);
+        	}
+        	attach_pid(p, PIDTYPE_PID);
+        	nr_threads++;
+        }
+
+        // 后面还有一堆代码, 先这样吧
     
     
     }
+
+dup_task_struct
+====================
 
 dup_task_struct函数会去调用平台相关的arch_dup_task_struct函数, x86下是在
 
@@ -719,36 +1160,6 @@ dup_task_struct函数会去调用平台相关的arch_dup_task_struct函数, x86�
     
     	return fpu__copy(&dst->thread.fpu, &src->thread.fpu);
     }
-
-pid结构和命名空间
-=====================
-
-都来自参考 [13]_
-
-pid namespace是为了隔离进程的, 用来做虚拟化的等等
-
-*To create a new PID namespace, one must call the clone() system call with a special flag CLONE_NEWPID.*
-
-1. CLONE_NEWPID
-
-clone的时候传入CLONE_NEWPID将会新建一个pid namespace, 如果传入CLONE_NEWPID|CLONE_SIGCHLD, 那么子进程将自己分化出自己的namespace, 如果只传入
-
-CLONE_SIGCHLD而不传入CLONE_NEWPID, 那么就是一个父子进程而子进程不会创建自己新的namespace
-
-2. CLONE_NEWNET
-
-这个是网络虚拟化, 也就是说, 传入这个标志, 则子进程和父进程都将"看到"所有的端口, 甚至都有自己的回环地址(loopback).
-
-*In order to provide a usable network interface in the child namespace, it is necessary to set up additional “virtual” network interfaces which span multiple namespaces.*
-
-*Finally, to make the whole thing work, a “routing process” must be running in the global network namespace to receive traffic from the physical interface, and route it through the appropriate virtual interfaces to to the correct child network namespaces.*
-
-上面是说需要一个路由进程把物理的流量发送到指定的namespace下
-
-*To do this by hand, you can create a pair of virtual Ethernet connections between a parent and a child namespace by running a single command from the parent namespace:
-ip link add name veth0 type veth peer name veth1 netns <pid>*
-
-在父子namespace之间, 创建一对虚拟以太网连接
 
 wake_up_new_task
 ======================

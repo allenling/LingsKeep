@@ -222,27 +222,19 @@ https://elixir.bootlin.com/linux/v4.15/source/include/linux/kthread.h
 O(1)的调度策略
 ====================
 
-这里大多数都来自参考 [5]_
-
-*global runqueue 带来的性能问题其实还可以忍受，毕竟只是在 dequeue 的过程需要加锁；接下来这个问题，就很要命 —— 2.4 scheduler 的时间复杂度是 O(N)。*
-
+  *global runqueue 带来的性能问题其实还可以忍受，毕竟只是在 dequeue 的过程需要加锁；接下来这个问题，就很要命 —— 2.4 scheduler 的时间复杂度是 O(N)。*
+  
+  --- 参考5
+  
 这里的global是因为之前是单核系统, 所以只有一个runqueue, 然后在多核情况下(smp), 对runqueue的操作只能是加锁串行化了
-
-*2.4 scheduler 的时间复杂度是 O(N)。我们知道，现代操作系统都能运行成千上万个进程，O(N) 的算法意味着每次调度时，对于当前执行完的 process，需要把所有在 expired queue 中的 process 过一遍，找到合适的位置插入*
-
-*对于那些对2.4 scheduler 不太了解的同学咱们多说两句：2.4 scheduler 维护两个 queue：runqueue 和 expired queue。两个 queue 都永远保持有序，一个 process 用完时间片，就会被插入 expired queue；当 runqueue 为空时，只需要把 runqueue 和 expired queue 交换一下即可。*
-
-总结下来就是
-
-1. bitarray存储优先级, 如果bitmap位置设置为1, 表示该优先级有任务.
-
-2. 通过bitarray的位置找到对应的runqueue, runqueue是一个fifo结构, 也就是同一优先级下, 任务是fifo调度的
-
-3. 竞争的时候, 就是找到bitmap上, 为1的最高位, 这个使用cpu指令就一个指令, O(1)
-
-4. 然后插入/删除runqueue的时候, 链表的add/delete是O(1) 
-
-5. 当然, 还是有active queue和expire queue的区别, 只不过其中一个用完, 互相交换位置就好了
+  
+  *2.4 scheduler 的时间复杂度是 O(N)。我们知道，现代操作系统都能运行成千上万个进程，O(N) 的算法意味着每次调度时，对于当前执行完的 process，需要把所有在 expired queue 中的 process 过一遍，找到合适的位置插入*
+  
+  --- 参考5
+  
+  *对于那些对2.4 scheduler 不太了解的同学咱们多说两句：2.4 scheduler 维护两个 queue：runqueue 和 expired queue。两个 queue 都永远保持有序，一个 process 用完时间片，就会被插入 expired queue；当 runqueue 为空时，只需要把 runqueue 和 expired queue 交换一下即可。*
+  
+  --- 参考5
 
 参考 [5]_原文的流程是:
 
@@ -259,7 +251,63 @@ O(1)的调度策略
 6. 如果 active bitarray 全为零，将 active bitarray 和 expired bitarray 交换一下。
 
 
-重新计算优先级和timeslice: 
+下面代码来自参考 [1]_
+
+.. code-block:: c
+
+    struct runqueue {
+     unsigned long nr_running; /* number of runnable tasks */
+     // 其他代码省略
+     struct prio_array *active; /* pointer to the active priority array */
+     struct prio_array *expired; /* pointer to the expired priority array */
+     struct prio_array arrays[2]; /* the actual priority arrays */
+    }
+
+
+所以每一个runqueue都有自己的active queue和expired queue, 然后使用active指向arrays这个数组中的一个, expired指向另外一个元素
+
+交换active和expired则是交换指针.
+
+而prio_array的结构如下:
+
+.. code-block:: c
+
+    struct prio_array {
+     int nr_active; /* number of tasks */
+     unsigned long bitmap[BITMAP_SIZE]; /* priority bitmap */
+     struct list_head queue[MAX_PRIO]; /* priority queues */
+    };
+
+每一个prio_array都有bitmap以及对应的task数组, 所以有
+
+
+.. code-block:: python
+
+    '''
+    
+    
+    runqueue +--------------+ active  +------------>----->>>>>---+
+             |                                                   |
+             |                                                   |
+             +------------- + expired +->->-+                    |
+             |                              |                    |
+             |                              |                    |
+             |                              |                    |
+             +-------------arrays ------> prio_array -->--->--prio_array
+                                                                 |
+                                                                 |
+                                                                 |
+                                                                 +-------+ bitmap (这里是140个优先级)
+                                                                         |
+                                                                         |
+                                                                         + queue  (queue中的每一个元素都是一个task链表, 获取下一个task, 是fifo获取)
+    
+    
+    '''
+
+
+重新计算优先级和timeslice
+----------------------------
 
 task的优先级计算是动态计算, 也就是当一个task用完timeslice之后, 会重新计算其优先级和其timeslice, 将其移动(append)到新优先级的queue中.
 
@@ -290,7 +338,7 @@ O(1)调度器的问题
 * Throughput fall
   Excessive switching overhead
 
-* None fair condition(优先级之间timeslice差别会很大, 而cfs使用load weight, 是得差别不大)
+* None fair condition(优先级之间timeslice差别会很大, 而cfs使用load weight, 结果差别不大)
   Nice 0 (100ms), Nice 1(95ms) => 5%
   Nice 18(10ms), Nice 19(5ms) => 50% 
 
@@ -299,6 +347,10 @@ O(1)调度器的问题
 简单来说, O(1)调度器会根据一个task的平均睡眠时间去判断该task是否是io密集型的task, 如果是, 则提升优先级(gave a priority bonus to such tasks for better throughput and user experience)
 
 但是这个计算过程太复杂, 不够鲁棒.
+
+  *The main issue with this algorithm is the complex heuristics used to mark a task as interactive or non-interactive. The algorithm tries to identify interactive processes by analyzing average sleep time (the amount of time the process spends waiting for input). Processes that sleep for long periods of time probably are waiting for user input, so the scheduler assumes they're interactive. The scheduler gives a priority bonus to interactive tasks (for better throughput) while penalizing non-interactive tasks by lowering their priorities. All the calculations to determine the interactivity of tasks are complex and subject to potential miscalculations, causing non-interactive behavior from an interactive process.*
+  
+  --- 参考6, 说计算task是否是io密集是基于平均睡眠时间, 睡眠时间的计算以及计算timeslice很复杂, 也容易出现错误判断.
 
 下面是参考 [13]_中关于动态计算优先级, 判断task是否是io密集任务的流程
 
@@ -320,7 +372,11 @@ O(1)调度器的问题
 
 也就是睡眠了一段时间, 比如10ms, 就加上10ms, 一直运行了5ms, 然后进入睡眠, 就减去这5ms, 就是上面sleep_avg的操作
 
-**所以, O(1)是没有抢占的!!!因为它是找bitmap中第一个被置为1的优先级, 去运行该优先级下的runqueue**
+所以:
+
+1. O(1)是没有抢占的!!!因为它是找bitmap中第一个被置为1的优先级, 去运行该优先级下的runqueue
+
+2. O(1)根据task的平均睡眠时间去判断task是否是io密集, 然后这个过程计算复杂且容易出错
 
 
 针对O(1)的交互性优化

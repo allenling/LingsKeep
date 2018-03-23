@@ -3,9 +3,16 @@ epoll
 
 内核版本v4.15
 
-参考1: https://idndx.com/2014/09/01/the-implementation-of-epoll-1/, 这个系列有4章
+.. [1] https://idndx.com/2014/09/01/the-implementation-of-epoll-1/, 这个系列有4章
 
-参考2: http://blog.csdn.net/kai8wei/article/details/51233494
+.. [2] http://blog.csdn.net/kai8wei/article/details/51233494
+
+.. [3] https://stackoverflow.com/questions/19942702/the-difference-between-wait-queue-head-and-wait-queue-in-linux-kernel
+
+.. [4]  http://www.xml.com/ldd/chapter/book/ch05.html, Going to Sleep and Awakening和A Deeper Look at Wait Queues这两节
+
+.. [5] http://guojing.me/linux-kernel-architecture/posts/wait-queue/
+
 
 小结
 ======
@@ -113,20 +120,17 @@ vfs还处理了page cache, inode cache, buffer cache等等. vfs是内核的和�
 linux wait_queue
 ====================
 
-A *wait queue* is exactly that -- a queue of processes that are waiting for an event.
+  A *wait queue* is exactly that -- a queue of processes that are waiting for an event.
+  
+  --- 参考2
 
---- 参考2
+更多wait_queue查看参考 [3]_, 参考 [4]_, 参考 [5]_
 
 关于休眠, 有sleep_on/sleep_on_timeout和interruptible_sleep_on/interruptible_sleep_on_timeout两组系统调用, 不同的地方是, 前者是不可中断的, 后面是可中断的.
 
 也就是前者必须得等到设置到的时间/或者等待的event受信的时候会"醒过来", 而后者则是可以在没有到设定时间的时候, 发送一个中断, 让其"醒过来".
 
-
-1. https://stackoverflow.com/questions/19942702/the-difference-between-wait-queue-head-and-wait-queue-in-linux-kernel
-
-2. http://www.xml.com/ldd/chapter/book/ch05.html, Going to Sleep and Awakening和A Deeper Look at Wait Queues这两节
-
-3. http://guojing.me/linux-kernel-architecture/posts/wait-queue/
+**wait_queue中的唤醒不一定是真正的唤醒操作, 而是调用wait_queue中的元素, 每一个元素都是wait_queue_entry结构, 中的定义的回调. 至于是不是真正的去"唤醒"线程, 由回调决定**
 
 
 linux schedule

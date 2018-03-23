@@ -27,9 +27,9 @@ Linux的pthread(nptl)
 
 .. [13] https://www.toptal.com/linux/separation-anxiety-isolating-your-system-with-linux-namespaces
 
-.. [14] http://lzz5235.github.io/2016/01/11/copy_process.html
+.. [14] http://blog.csdn.net/zhanglei4214/article/details/6765913
 
-.. [15] http://blog.csdn.net/zhanglei4214/article/details/6765913
+.. [15] https://www.lifewire.com/what-is-linux-2201940
 
 参考4是fork的一些解释
 
@@ -43,11 +43,9 @@ Linux的pthread(nptl)
 
 参考11是task结构中, pids这个属性的一些解释. 注意的是4.15类型变成了pid_link而不是文章中的pid_type, 但是都是使用hash表结构.
 
-参考12是内核中pid整个层级的设计, 4.15删除了pidmap一类的函数, 要注意一下
+参考12, 14是内核中pid整个层级的设计, 4.15删除了pidmap一类的函数, 要注意一下
 
 参考13是关于pid namespace
-
-参考14, 15是copy_process这个函数的一些解释, 15更详细一点
 
 **这里不涉及task调度, 调度参考linux_kernel/linux_task_schedule.rst**
 
@@ -57,10 +55,21 @@ GNU
 GNU这个组织
 
 
-GNU Linux和Linux的区别和关系
+GNU/Linux和Linux
 ================================
 
-参考 [1]_
+
+  *A term you might hear every now and then is GNU/Linux. What is GNU/Linux and how does it differ from normal Linux?
+  
+  From a desktop Linux user point of view, there is no difference.
+  
+  Linux is the main engine that interacts with your computer's hardware. It is commonly known as the Linux kernel.
+  
+  The GNU tools provide a method of interacting with the Linux kernel.*
+  
+  -- 参考15
+
+比如, BASH就是一个GNU的工具
 
 
 thread/lwp

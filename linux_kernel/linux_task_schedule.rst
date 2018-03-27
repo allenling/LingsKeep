@@ -70,7 +70,7 @@
 
 2.6.23至今(4.15)linux已经是CFS调度为主了
 
-**关键点: 定时的抢占流程, 陷入等待流程(以ep_wait为例子), 以及被唤醒的流程, cfs, smp下的load balance**
+**关键点: 以epoll和clone系统调用流程为入口, 查看cfs流程, cfs的load balance先略过**
 
 SMP架构
 =============

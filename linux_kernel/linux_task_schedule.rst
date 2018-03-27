@@ -1053,11 +1053,15 @@ sched_fork中, 最后调用fair_sched_class中的task_fork函数
     	if (curr) {
                 // 这里调用update_curr去更新cfs中当前task的vruntime
     		update_curr(cfs_rq);
+                // 这里!!!!!se的vruntime初始化为curr被更新之后的vruntime
     		se->vruntime = curr->vruntime;
     	}
-        // 这个函数是对task的vruntime的一些补偿操作
+        // 这里!!!上一个if代码里面, se被初始化为curr的vruntime值之后
+        // 这个函数是对task的vruntime进行一些补偿
     	place_entity(cfs_rq, se, 1);
     
+        // 这个判断是说如果配置了子线程在父亲现在之前运行的话
+        // 确保子线程的vruntime大于父线程的vruntime, 也就是交换操作
     	if (sysctl_sched_child_runs_first && curr && entity_before(curr, se)) {
     		/*
     		 * Upon rescheduling, sched_class::put_prev_task() will place
@@ -1067,15 +1071,82 @@ sched_fork中, 最后调用fair_sched_class中的task_fork函数
     		resched_curr(rq);
     	}
     
-        // 设置task的vruntime
     	se->vruntime -= cfs_rq->min_vruntime;
     	rq_unlock(rq, &rf);
     }
 
+place_entity
+---------------
+
+这个函数会对task的vruntime进行补偿, 对新的task和io唤醒的task都有对应的补偿
+
+补偿的基础是min_vruntime
+
+更多参考 [16]_
+
+https://elixir.bootlin.com/linux/v4.15/source/kernel/sched/fair.c#L3921
+
+.. code-block:: c
+
+    static void
+    place_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int initial)
+    {
+        // 这里是以min_vruntime作为基础
+    	u64 vruntime = cfs_rq->min_vruntime;
+    
+    	/*
+    	 * The 'current' period is already promised to the current tasks,
+    	 * however the extra weight of the new task will slow them down a
+    	 * little, place the new task so that it fits in the slot that
+    	 * stays open at the end.
+    	 */
+        // initial表示新建的task
+        // 并且设置了
+    	if (initial && sched_feat(START_DEBIT))
+    		vruntime += sched_vslice(cfs_rq, se);
+    
+    	/* sleeps up to a single latency don't count. */
+    	if (!initial) {
+    		unsigned long thresh = sysctl_sched_latency; /* 一个调度周期 */
+    
+    		/*
+    		 * Halve their sleep time's effect, to allow
+    		 * for a gentler effect of sleepers:
+    		 */
+                // 如果设置了GENTLE_FAIR_SLEEPERS标志
+    		if (sched_feat(GENTLE_FAIR_SLEEPERS))
+    			thresh >>= 1; /* 补偿减为调度周期的一半, 右移一位就是除以2 */
+    
+    		vruntime -= thresh;
+    	}
+    
+    	/* ensure we never gain time by being placed backwards. */
+        // 补偿的vruntime和自己的vruntime, 取一个最大值
+    	se->vruntime = max_vruntime(se->vruntime, vruntime);
+    }
+
+sched_features的START_DEBIT位：规定新进程的第一次运行要有延迟。
+
+1. 补偿的基础是min_vruntime
+
+2. 如果是新建task, 并且规定新建的task第一次启动需要延迟, 则调用sched_vslice计算补偿, vruntime += sched_vslice
+
+3. 如果不是新建并且设置了GENTLE_FAIR_SLEEPERS, 则表示是io唤醒需要补偿, 这里是减少, 上面2是增加vruntime -= thresh
+
+4. 最后, 取补偿vruntime和se自己的vruntime的最大值
+
+
+小结
+-------
 
 1. update_curr是核心的更新vruntime的函数, 更新的是cfs中当前task的vruntime, 所以传参才只有cfs_rq, 后面说
 
-2. place_entity函数和sysctl_sched_child_runs_first配置下项, 查看参考 [16]_, 是对task的vruntime的补偿操作
+2. place_entity函数查看参考 [16]_, 是对task的vruntime的补偿操作
+
+3. sysctl_sched_child_runs_first配置是说是否配置子线程在父线程之前运行, 如果是, 并且父线程大于子线程(entity_before函数), 那么交换两个
+   线程的vruntime, 然后调用resched_curr, 这部分参考 [16]_
+
+4. 最后, 为什么se->vruntime要减去min_vruntime, 不清楚
 
 
 wake_up_new_task
@@ -1317,87 +1388,39 @@ ep_poll
         // prev就是当前cpu的runqueue中的当前task
         prev = rq->curr;
 
+        // 看到schedule函数传入的preempt是false
+        // 然后在ep_poll中把task状态设置为TASK_INTERRUPTIBLE, 该状态是大于0的
+        // 所以会走到if的代码里面
+        if (!preempt && prev->state) {
+            // 如果此时有信号发生, 则直接设置prev的状态为TASK_RUNNING状态
+            if (unlikely(signal_pending_state(prev->state, prev))) {
+            	prev->state = TASK_RUNNING;
+            } else {
+
+                // 看到unlikely标志, 说一般都走这里
+                // 也就是把prev从红黑树中拿出来
+                deactivate_task(rq, prev, DEQUEUE_SLEEP | DEQUEUE_NOCLOCK);
+
+            }
+        }
+
         // 选择下一个task
         next = pick_next_task(rq, prev, &rf);
         
         if (likely(prev != next)) {
         
-            // 做一次context_switch
             rq = context_switch(rq, prev, next, &rf);
         
         }
     
     }
 
-而pick_next_task则会调用到cfs中的pick_next_task_fair
+所以, ep_poll中休眠最终的调用是schedule函数, 该函数是进行一次调度操作, 作用:
 
-.. code-block:: c
+1. 如果task不是TASK_RUNNING状态(0x0000), 并且传入的preempt是false, 则触发deactivate_task
+   deactivate_task会调用到dequeue_task去把task从红黑树移除
 
-    // https://elixir.bootlin.com/linux/v4.15/source/kernel/sched/fair.c#L6619
-    // 省略了很多代码
-    static struct task_struct *
-    pick_next_task_fair(struct rq *rq, struct task_struct *prev, struct rq_flags *rf)
-    {
-    
-        // 把prev任务加入红黑树
-        put_prev_task(rq, prev);
-        
-        do {
-            // 选择下一个task
-            se = pick_next_entity(cfs_rq, NULL);
-            set_next_entity(cfs_rq, se);
-            cfs_rq = group_cfs_rq(se);
-        } while (cfs_rq);
-        
-        p = task_of(se);
-    }
-
-所以, ep_poll会调用schedule函数去选择下一个task运行, 然后增加当前runqueeu中当前task的vruntime, 再把task加入到红黑树中
-
-其中
-
-1. set_next_entity则是把选择的下一个task设置为对应cfs的curr
-
-.. code-block:: c
-
-    // https://elixir.bootlin.com/linux/v4.15/source/kernel/sched/fair.c#L4198
-    static void
-    set_next_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
-    {
-        if (se->on_rq) {
-        	/*
-        	 * Any task has to be enqueued before it get to execute on
-        	 * a CPU. So account for the time it spent waiting on the
-        	 * runqueue.
-        	 */
-                // 注意, 这里如果下一个task在runqueue上
-                // 那么把它从runqueue移除
-        	update_stats_wait_end(cfs_rq, se);
-        	__dequeue_entity(cfs_rq, se);
-        	update_load_avg(cfs_rq, se, UPDATE_TG);
-        }
-        
-        update_stats_curr_start(cfs_rq, se);
-        // 更新cfs_rq的当前task为下一个task
-        cfs_rq->curr = se;
-    }
-
-2. put_prev_task, 把前一个task加入红黑树
-
-.. code-block:: c
-
-    // https://elixir.bootlin.com/linux/v4.15/source/kernel/sched/fair.c#L4292
-    static void put_prev_entity(struct cfs_rq *cfs_rq, struct sched_entity *prev)
-    {
-    
-        if (prev->on_rq)
-        	update_curr(cfs_rq);
-    
-        if (prev->on_rq) {
-            /* Put 'current' back into the tree. */
-            __enqueue_entity(cfs_rq, prev);
-        }
-    }    
+2. 选择下一个task
 
 
 ----
@@ -1405,12 +1428,15 @@ ep_poll
 几个重要的函数
 =================
 
-1. update_curr, 更新当前cfs->curr的vruntime
+1. update_curr, 更新当前cfs->curr的vruntime, 这个函数在很多地方都会被调用到
 
-2. enqueue_task, 把task加入到cfs的红黑树中
+2. task_for_fair/place_entity, 对新建的task的vruntime进行补偿, 补偿的函数是place_entity, 这两个之前说过
 
-3. check_preempt_curr, 去进行抢占的操作
+3. enqueue_task/dequeue_task, 前者把task加入到cfs的红黑树中, 后者把task移除
 
+4. check_preempt_curr, 去进行抢占的操作
+
+5. schedule, 该函数去选择下一个task去运行
 
 update_curr
 ===============
@@ -1538,4 +1564,74 @@ https://elixir.bootlin.com/linux/v4.15/source/kernel/sched/fair.c#L515
 3. 如果curr存在而se不存在, 那么min_vruntime = max(min_vruntime, curr->vruntime)
 
 4. 如果curr和se都不存在,   那么min_vruntime = max(min_vruntime, min_vruntime)
+
+
+enqueue_task/enqueue_task_fair
+================================
+
+之前的try_to_wake_up函数和wake_up_new_task函数都会调用到activate_task, activate_task基本上就是调用enqueue_task去把目标task给加入到cfs的红黑树中
+
+enqueue_task在cfs中指向enqueue_task_fair函数
+
+https://elixir.bootlin.com/linux/v4.15/source/kernel/sched/fair.c#L5206
+
+.. code-block:: c
+
+    /*
+     * The enqueue_task method is called before nr_running is
+     * increased. Here we update the fair scheduling stats and
+     * then put the task into the rbtree:
+     */
+    static void
+    enqueue_task_fair(struct rq *rq, struct task_struct *p, int flags)
+    {
+    	struct cfs_rq *cfs_rq;
+    	struct sched_entity *se = &p->se;
+    
+    	/*
+    	 * If in_iowait is set, the code below may not trigger any cpufreq
+    	 * utilization updates, so do it here explicitly with the IOWAIT flag
+    	 * passed.
+    	 */
+    	if (p->in_iowait)
+    		cpufreq_update_util(rq, SCHED_CPUFREQ_IOWAIT);
+    
+    	for_each_sched_entity(se) {
+    		if (se->on_rq)
+    			break;
+    		cfs_rq = cfs_rq_of(se);
+    		enqueue_entity(cfs_rq, se, flags);
+    
+    		/*
+    		 * end evaluation on encountering a throttled cfs_rq
+    		 *
+    		 * note: in the case of encountering a throttled cfs_rq we will
+    		 * post the final h_nr_running increment below.
+    		 */
+    		if (cfs_rq_throttled(cfs_rq))
+    			break;
+    		cfs_rq->h_nr_running++;
+    
+    		flags = ENQUEUE_WAKEUP;
+    	}
+    
+    	for_each_sched_entity(se) {
+    		cfs_rq = cfs_rq_of(se);
+    		cfs_rq->h_nr_running++;
+    
+    		if (cfs_rq_throttled(cfs_rq))
+    			break;
+    
+    		update_load_avg(cfs_rq, se, UPDATE_TG);
+    		update_cfs_group(se);
+    	}
+    
+    	if (!se)
+    		add_nr_running(rq, 1);
+    
+    	hrtick_update(rq);
+    }
+
+
+
 

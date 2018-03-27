@@ -997,6 +997,8 @@ https://elixir.bootlin.com/linux/v4.15/source/kernel/fork.c#L2015
     	return nr;
     }
 
+1. copy_process的传参中, 最后一个参数NUMA_NODE这个参数, 一般是0, 非NUMA架构(一般是SMP架构)只有一个node, 也就是0这个默认的节点;
+
 copy_process
 ===============
 

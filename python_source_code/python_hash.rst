@@ -7,7 +7,7 @@ python中调用hash的时候的流程
 
 1. unicode对象的hash是创建的时候是赋值-1, 第一次计算之后就缓存下来了
    
-   空unicode的hash是0, 非空使用hash算法计算, 默认hash算法是siphash24
+   空字符串(长度为0)的hash是0, 长度大于0的字符串使用hash算法计算, 默认hash算法是siphash24
 
 2. long对象的hash就是其值, 计算过程有点绕而已.
 
@@ -123,6 +123,7 @@ cpython/Objects/unicodeobject.c
 .. code-block:: c
 
     typedef struct {
+        // 这里包含了PyASCIIObject
         PyASCIIObject _base;
         Py_ssize_t utf8_length;     /* Number of bytes in utf8, excluding the
                                      * terminating \0. */
@@ -334,7 +335,7 @@ cpython/Objects/longObject.c
 
 2. 如果long对象大于2**30, 那么得算一下, 过程看注释
 
-3. 如果long对象小鱼2**30, 那么直接返回
+3. 如果long对象小于2**30, 那么直接返回
 
 4. 之所以是30, 是因为python使用数组来保存无限大数字, 数组每一位最大都是2**30
 

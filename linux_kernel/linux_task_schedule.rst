@@ -38,6 +38,8 @@
 
 .. [17] https://blog.csdn.net/gatieme/article/details/52067748
 
+.. [18] https://blog.csdn.net/gatieme/article/details/52067898
+
 **参考1, 6, 9是主要参考, 包括linux的调度历史, O(1)调度以及CFS的概念和源码解释**
 
 参考 [4]_是关于linux调度的一个简介, 参考 [5]_是O(1)调度的解释
@@ -63,6 +65,8 @@
 参考16是cfs中几个细节的讲解
 
 参考17是cfs中更新vruntime的流程的讲解, 感觉讲得还挺清楚的
+
+参考18是cfs中enqueue_task和dequeue_task的流程, 和参考17是同一个作者
 
 2.6.23至今(4.15)linux已经是CFS调度为主了
 
@@ -1135,6 +1139,9 @@ sched_features的START_DEBIT位：规定新进程的第一次运行要有延迟�
 
 4. 最后, 取补偿vruntime和se自己的vruntime的最大值
 
+5. 之所以是用min_vruntime作为基础来补偿, 是因为这样被唤醒的task的vruntime就接近于min_vruntime, 这样很快被调用, 但又不至于太小
+   而占据了很长的cpu时间(参考 [18]_)
+
 
 小结
 -------
@@ -1425,8 +1432,8 @@ ep_poll
 
 ----
 
-几个重要的函数
-=================
+几个重要的函数和小细节
+=========================
 
 1. update_curr, 更新当前cfs->curr的vruntime, 这个函数在很多地方都会被调用到
 
@@ -1434,9 +1441,12 @@ ep_poll
 
 3. enqueue_task/dequeue_task, 前者把task加入到cfs的红黑树中, 后者把task移除
 
-4. check_preempt_curr, 去进行抢占的操作
+4. check_preempt_curr, copy_process之后, _do_fork会调用该函数去进行抢占的操作
 
 5. schedule, 该函数去选择下一个task去运行
+
+6. 关于cfs中vruntime的几个小细节, 包括: 新进程的vruntime的初值是不是0啊, 休眠进程的vruntime一直保持不变吗等等, 参考 [16]_
+
 
 update_curr
 ===============
@@ -1594,25 +1604,28 @@ https://elixir.bootlin.com/linux/v4.15/source/kernel/sched/fair.c#L5206
     	 * passed.
     	 */
     	if (p->in_iowait)
-    		cpufreq_update_util(rq, SCHED_CPUFREQ_IOWAIT);
+    	    cpufreq_update_util(rq, SCHED_CPUFREQ_IOWAIT);
     
+        
+        // 这个循环是从传入的task开始
     	for_each_sched_entity(se) {
-    		if (se->on_rq)
-    			break;
-    		cfs_rq = cfs_rq_of(se);
-    		enqueue_entity(cfs_rq, se, flags);
+    	    if (se->on_rq)
+    	    	break;
+    	    cfs_rq = cfs_rq_of(se);
+            // 这个函数是插入红黑树
+    	    enqueue_entity(cfs_rq, se, flags);
     
-    		/*
-    		 * end evaluation on encountering a throttled cfs_rq
-    		 *
-    		 * note: in the case of encountering a throttled cfs_rq we will
-    		 * post the final h_nr_running increment below.
-    		 */
-    		if (cfs_rq_throttled(cfs_rq))
-    			break;
-    		cfs_rq->h_nr_running++;
+    	    /*
+    	     * end evaluation on encountering a throttled cfs_rq
+    	     *
+    	     * note: in the case of encountering a throttled cfs_rq we will
+    	     * post the final h_nr_running increment below.
+    	     */
+    	    if (cfs_rq_throttled(cfs_rq))
+    	    	break;
+    	    cfs_rq->h_nr_running++;
     
-    		flags = ENQUEUE_WAKEUP;
+    	    flags = ENQUEUE_WAKEUP;
     	}
     
     	for_each_sched_entity(se) {
@@ -1632,6 +1645,539 @@ https://elixir.bootlin.com/linux/v4.15/source/kernel/sched/fair.c#L5206
     	hrtick_update(rq);
     }
 
+关于第一个for循环
 
+  *但是有个疑问是, 进程p所在的调度时提就一个, 为嘛要循环才能遍历啊?这是因为为了支持组调度.组调度下调度实体是有层次结构的, 我们将进程加入的时候, 同时要更新其父调度实体的调度信息, 而非组调度情况下, 就不需要调度实体的层次结构*
+
+  --- 参考18
+
+**至于第二个for循环干嘛的, 不清楚!**
+
+enqueue_entity加入红黑树
+==========================
+
+参考 [18]_
+
+https://elixir.bootlin.com/linux/v4.15/source/kernel/sched/fair.c#L4006
+
+.. code-block:: c
+
+    static void
+    enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
+    {
+    	bool renorm = !(flags & ENQUEUE_WAKEUP) || (flags & ENQUEUE_MIGRATED);
+        // 判断下是, 传入的task和cfs_rq->curr当前否是同一个
+    	bool curr = cfs_rq->curr == se;
+    
+    	/*
+    	 * If we're the current task, we must renormalise before calling
+    	 * update_curr().
+    	 */
+    	if (renorm && curr)
+    	    se->vruntime += cfs_rq->min_vruntime;
+    
+        // 更新一下cfs_rq->curr->vruntime
+    	update_curr(cfs_rq);
+    
+    	/*
+    	 * Otherwise, renormalise after, such that we're placed at the current
+    	 * moment in time, instead of some random moment in the past. Being
+    	 * placed in the past could significantly boost this task to the
+    	 * fairness detriment of existing tasks.
+    	 */
+    	if (renorm && !curr)
+    	    se->vruntime += cfs_rq->min_vruntime;
+    
+    	/*
+    	 * When enqueuing a sched_entity, we must:
+    	 *   - Update loads to have both entity and cfs_rq synced with now.
+    	 *   - Add its load to cfs_rq->runnable_avg
+    	 *   - For group_entity, update its weight to reflect the new share of
+    	 *     its group cfs_rq
+    	 *   - Add its new weight to cfs_rq->load.weight
+    	 */
+        // 更新统计量
+    	update_load_avg(cfs_rq, se, UPDATE_TG | DO_ATTACH);
+    	update_cfs_group(se);
+    	enqueue_runnable_load_avg(cfs_rq, se);
+    	account_entity_enqueue(cfs_rq, se);
+    
+        // 这里, 如果是休眠而唤醒的进程, 调用place_entity去补偿
+    	if (flags & ENQUEUE_WAKEUP)
+    	    place_entity(cfs_rq, se, 0);
+    
+    	check_schedstat_required();
+    	update_stats_enqueue(cfs_rq, se, flags);
+    	check_spread(cfs_rq, se);
+        // 这里curr是一个真假值
+        // 表示传入的task和cfs->curr是否一致, 也就是是否是同一个
+    	if (!curr)
+    	    __enqueue_entity(cfs_rq, se);
+        // on_rq的属性设置为1
+    	se->on_rq = 1;
+    
+    	if (cfs_rq->nr_running == 1) {
+    	    list_add_leaf_cfs_rq(cfs_rq);
+    	    check_enqueue_throttle(cfs_rq);
+    	}
+    }
+
+1. 调用update_curr更新cfs_rq->curr的vruntime
+
+2. 更新其他统计量
+
+3. 如果cfs_rq->curr和传入的task不是同一个, 则调用__enqueue_entity, 把传入的task加入到红黑树.
+   __enqueue_entity的流程只是加入红黑树, **并且去判断是否是leftmost, 是的话设置新的leftmost节点**, 代码先省略吧
+
+
+dequeue_task/dequeue_task_fair
+===================================
+
+在之前epoll休眠的流程中, 可以看到, 调用了schedule函数之后, 由于设置了task的状态(task->state)为TASK_INTERRUPTIBLE, 则
+
+schedule函数调用的__schedule函数, 会调用deactivate_task去调用到dequeue_task函数, 在cfs中, dequeue_task被指向函数dequeue_task_fair
+
+https://elixir.bootlin.com/linux/v4.15/source/kernel/sched/fair.c#L5262
+
+.. code-block:: c
+
+
+    /*
+     * The dequeue_task method is called before nr_running is
+     * decreased. We remove the task from the rbtree and
+     * update the fair scheduling stats:
+     */
+    static void dequeue_task_fair(struct rq *rq, struct task_struct *p, int flags)
+    {
+    	struct cfs_rq *cfs_rq;
+        // 传入的task的se对象
+    	struct sched_entity *se = &p->se;
+    	int task_sleep = flags & DEQUEUE_SLEEP;
+    
+    	for_each_sched_entity(se) {
+    	    cfs_rq = cfs_rq_of(se);
+            // 移除操作函数
+    	    dequeue_entity(cfs_rq, se, flags);
+    
+    	    /*
+    	     * end evaluation on encountering a throttled cfs_rq
+    	     *
+    	     * note: in the case of encountering a throttled cfs_rq we will
+    	     * post the final h_nr_running decrement below.
+    	    */
+    	    if (cfs_rq_throttled(cfs_rq))
+    	    	break;
+    	    cfs_rq->h_nr_running--;
+    
+    	    /* Don't dequeue parent if it has other entities besides us */
+    	    if (cfs_rq->load.weight) {
+    	    	/* Avoid re-evaluating load for this entity: */
+    	    	se = parent_entity(se);
+    	    	/*
+    	    	 * Bias pick_next to pick a task from this cfs_rq, as
+    	    	 * p is sleeping when it is within its sched_slice.
+    	    	 */
+    	    	if (task_sleep && se && !throttled_hierarchy(cfs_rq))
+    	    		set_next_buddy(se);
+    	    	break;
+    	    }
+    	    flags |= DEQUEUE_SLEEP;
+    	}
+    
+    	for_each_sched_entity(se) {
+    	    cfs_rq = cfs_rq_of(se);
+    	    cfs_rq->h_nr_running--;
+    
+    	    if (cfs_rq_throttled(cfs_rq))
+    	    	break;
+    
+    	    update_load_avg(cfs_rq, se, UPDATE_TG);
+    	    update_cfs_group(se);
+    	}
+    
+    	if (!se)
+    	    sub_nr_running(rq, 1);
+    
+    	hrtick_update(rq);
+    }
+
+除了dequeue_entity函数, 其他流程, 恩~~~不太清除
+
+dequeue_entity
+=====================
+
+真正去把task从红黑树移除的操作
+
+.. code-block:: c
+
+    static void
+    dequeue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
+    {
+    	/*
+    	 * Update run-time statistics of the 'current'.
+    	 */
+        // 又要更新一下cfs_rq->curr->vruntime
+    	update_curr(cfs_rq);
+    
+    	/*
+    	 * When dequeuing a sched_entity, we must:
+    	 *   - Update loads to have both entity and cfs_rq synced with now.
+    	 *   - Substract its load from the cfs_rq->runnable_avg.
+    	 *   - Substract its previous weight from cfs_rq->load.weight.
+    	 *   - For group entity, update its weight to reflect the new share
+    	 *     of its group cfs_rq.
+    	 */
+        // 更新统计量
+    	update_load_avg(cfs_rq, se, UPDATE_TG);
+    	dequeue_runnable_load_avg(cfs_rq, se);
+    
+    	update_stats_dequeue(cfs_rq, se, flags);
+    
+    	clear_buddies(cfs_rq, se);
+    
+    	if (se != cfs_rq->curr)
+            // 真正把task移除红黑树的地方
+    	    __dequeue_entity(cfs_rq, se);
+
+        // on_rq的属性设置为0
+    	se->on_rq = 0;
+    	account_entity_dequeue(cfs_rq, se);
+    
+    	/*
+    	 * Normalize after update_curr(); which will also have moved
+    	 * min_vruntime if @se is the one holding it back. But before doing
+    	 * update_min_vruntime() again, which will discount @se's position and
+    	 * can move min_vruntime forward still more.
+    	 */
+    	if (!(flags & DEQUEUE_SLEEP))
+    	    se->vruntime -= cfs_rq->min_vruntime;
+    
+    	/* return excess runtime on last dequeue */
+    	return_cfs_rq_runtime(cfs_rq);
+    
+    	update_cfs_group(se);
+    
+    	/*
+    	 * Now advance min_vruntime if @se was the entity holding it back,
+    	 * except when: DEQUEUE_SAVE && !DEQUEUE_MOVE, in this case we'll be
+    	 * put back on, and if we advance min_vruntime, we'll be placed back
+    	 * further than we started -- ie. we'll be penalized.
+    	 */
+    	if ((flags & (DEQUEUE_SAVE | DEQUEUE_MOVE)) == DEQUEUE_SAVE)
+    		update_min_vruntime(cfs_rq);
+    }
+
+
+schedule/pick_next_task
+==========================
+
+在epoll中, 调用schedule -> __schedule(false)去休眠和选择下一个task去运行
+
+.. code-block:: c
+
+    // schedule函数的内部
+    // https://elixir.bootlin.com/linux/v4.15/source/kernel/sched/core.c#L3427
+    asmlinkage __visible void __sched schedule(void)
+    {
+    	struct task_struct *tsk = current;
+    
+    	sched_submit_work(tsk);
+    	do {
+    	    preempt_disable();
+                // 调用__schedule
+    	    __schedule(false);
+    	    sched_preempt_enable_no_resched();
+    	} while (need_resched());
+    }
+    EXPORT_SYMBOL(schedule);
+
+    // __schedule会调用dequeue_task
+    // 然后选择下一个task去运行
+    // https://elixir.bootlin.com/linux/v4.15/source/kernel/sched/core.c#L3287
+    
+    static void __sched notrace __schedule(bool preempt)
+    {
+    
+        struct task_struct *prev, *next;
+        // 这里拿到当前cpu的rq的当前运行task
+        // 应该就是当前task了, 也就是current了
+        cpu = smp_processor_id();
+        rq = cpu_rq(cpu);
+        prev = rq->curr;
+    
+        if (!preempt && prev->state) {
+    
+            if (unlikely(signal_pending_state(prev->state, prev))) {
+    
+            }else{
+                // 这里调用dequeue_task
+                deactivate_task(rq, prev, DEQUEUE_SLEEP | DEQUEUE_NOCLOCK);
+    
+            }
+        }
+    
+        // 选择下一个task
+        next = pick_next_task(rq, prev, &rf);
+    
+        if (likely(prev != next)) {
+    
+            rq = context_switch(rq, prev, next, &rf);
+        }
+    
+        balance_callback(rq);
+    }
+
+
+
+pick_next_task
+-----------------
+
+pick_next_task这个函数将会调用到cfs中的pick_next_task
+
+https://elixir.bootlin.com/linux/v4.15/source/kernel/sched/fair.c#L6619
+
+.. code-block:: c
+
+    static struct task_struct *
+    pick_next_task_fair(struct rq *rq, struct task_struct *prev, struct rq_flags *rf)
+    {
+    
+    
+        // 省略代码, 其中包括配置了组调度的流程
+
+        // put
+        put_prev_task(rq, prev);
+    
+        do {
+            // 选择下一个task
+            se = pick_next_entity(cfs_rq, NULL);
+            // set
+            set_next_entity(cfs_rq, se);
+            cfs_rq = group_cfs_rq(se);
+        } while (cfs_rq);
+        
+        // 还省略了很多代码
+    
+    
+    }
+
+
+1. pick_next_entity则是选择最左子节点, 如果传入的task比最左子节点小, 则运行传入的task
+
+2. put_prev_task, 把prev, 也就是传入的task, 重新加入红黑树
+
+3. set_next_entity, 把1中返回的task, 设置为cfs_rq->curr
+
+
+pick_next_entity
+===================
+
+https://elixir.bootlin.com/linux/v4.15/source/kernel/sched/fair.c#L4240
+
+.. code-block:: c
+
+    /*
+     * Pick the next process, keeping these things in mind, in this order:
+     * 1) keep things fair between processes/task groups
+     * 2) pick the "next" process, since someone really wants that to run
+     * 3) pick the "last" process, for cache locality
+     * 4) do not run the "skip" process, if something else is available
+     */
+    static struct sched_entity *
+    pick_next_entity(struct cfs_rq *cfs_rq, struct sched_entity *curr)
+    {
+        // 这里是去leftmost
+        struct sched_entity *left = __pick_first_entity(cfs_rq);
+        struct sched_entity *se;
+    
+        // 判断是否有最左叶节点, 有的话, 取两者最小
+        if (!left || (curr && entity_before(curr, left)))
+        	left = curr;
+        
+        se = left; /* ideally we run the leftmost entity */
+    
+        // 后面代码先省略
+        // h后面的代码都是走注释上的流程
+    
+    }
+
+注释上说流程是:
+
+1. 保持task之间的"公平"
+
+2. 选下一个task
+
+3. 选最后一个, 这是为了缓存(这一步没太明白), 并且cfs_rq->last这个属性没找到赋值的地方, 遗落了某些地方
+
+4. 某些task是被设置skip的, 不需要运行
+
+put_prev_task/set_next_entity
+=================================
+
+put_prev_task会调用到cfs中的put_prev_task_fair
+
+.. code-block:: c
+
+    // https://elixir.bootlin.com/linux/v4.15/source/kernel/sched/fair.c#L6754
+    static void put_prev_task_fair(struct rq *rq, struct task_struct *prev)
+    {
+    	struct sched_entity *se = &prev->se;
+    	struct cfs_rq *cfs_rq;
+    
+    	for_each_sched_entity(se) {
+    		cfs_rq = cfs_rq_of(se);
+                // 对每一个循环的se调用put_prev_entity
+    		put_prev_entity(cfs_rq, se);
+    	}
+    }
+
+    // https://elixir.bootlin.com/linux/v4.15/source/kernel/sched/fair.c#L4292
+    static void put_prev_entity(struct cfs_rq *cfs_rq, struct sched_entity *prev)
+    {
+    	/*
+    	 * If still on the runqueue then deactivate_task()
+    	 * was not called and update_curr() has to be done:
+    	 */
+        // 经过dequeue_task之后, 传入的task应该不会在rq上了, 也就是on_rq=0
+    	if (prev->on_rq)
+    	    update_curr(cfs_rq);
+    
+    	/* throttle cfs_rqs exceeding runtime */
+    	check_cfs_rq_runtime(cfs_rq);
+    
+    	check_spread(cfs_rq, prev);
+    
+    	if (prev->on_rq) {
+    	    update_stats_wait_start(cfs_rq, prev);
+    	    /* Put 'current' back into the tree. */
+    	    __enqueue_entity(cfs_rq, prev);
+    	    /* in !on_rq case, update occurred at dequeue */
+    	    update_load_avg(cfs_rq, prev, 0);
+    	}
+    	cfs_rq->curr = NULL;
+    }
+
+而set_next_entity是cfs的函数, 是把选出来的next设置到cfs_rq->curr
+
+.. code-block:: c
+
+    // https://elixir.bootlin.com/linux/v4.15/source/kernel/sched/fair.c#L4198
+    static void
+    set_next_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
+    {
+    	/* 'current' is not kept within the tree. */
+        // 传入的se之前是在红黑树的leftmost的, 也是经过enqueue_task的, 也就是on_rq=1
+    	if (se->on_rq) {
+    	    /*
+    	     * Any task has to be enqueued before it get to execute on
+    	     * a CPU. So account for the time it spent waiting on the
+    	     * runqueue.
+    	     */
+    	    update_stats_wait_end(cfs_rq, se);
+            // 出队
+    	    __dequeue_entity(cfs_rq, se);
+    	    update_load_avg(cfs_rq, se, UPDATE_TG);
+    	}
+    
+    	update_stats_curr_start(cfs_rq, se);
+        // 把传入的task设置为curr
+    	cfs_rq->curr = se;
+    
+        // 后面代码先省略
+    }
+
+
+check_preempt_curr
+======================
+
+在_do_fork -> wake_up_new_task中, 调用了activate_task, 把新建的task入队之后, 再调用check_preempt_curr去做一次抢占操作
+
+https://elixir.bootlin.com/linux/v4.15/source/kernel/sched/core.c#L880
+
+.. code-block:: c
+
+    void check_preempt_curr(struct rq *rq, struct task_struct *p, int flags)
+    {
+    	const struct sched_class *class;
+    
+        // 这里判断task的调度类和rq的调度类是否一致
+        // 然后我们简单点, 假设是一直并且是cfs
+    	if (p->sched_class == rq->curr->sched_class) {
+    		rq->curr->sched_class->check_preempt_curr(rq, p, flags);
+    	} else {
+    		for_each_class(class) {
+    			if (class == rq->curr->sched_class)
+    				break;
+    			if (class == p->sched_class) {
+    				resched_curr(rq);
+    				break;
+    			}
+    		}
+    	}
+    
+    	/*
+    	 * A queue event has occurred, and we're going to schedule.  In
+    	 * this case, we can save a useless back to back clock update.
+    	 */
+    	if (task_on_rq_queued(rq->curr) && test_tsk_need_resched(rq->curr))
+    		rq_clock_skip_update(rq, true);
+    }
+
+
+如果task的调度类和rq->curr的调度类一致, 那么调用调度类的check_preempt_curr, 这里假设一直并且是cfs
+
+则会调用到cfs中的check_preempt_wakeup, 该函数会判断是否需要去抢占, 如果需要, 则还是调用resched_curr(rq)
+
+所以主要看resched_curr
+
+https://elixir.bootlin.com/linux/v4.15/source/kernel/sched/core.c#L481
+
+.. code-block:: c
+
+    void resched_curr(struct rq *rq)
+    {
+    	struct task_struct *curr = rq->curr;
+    	int cpu;
+    
+    	lockdep_assert_held(&rq->lock);
+    
+    	if (test_tsk_need_resched(curr))
+    		return;
+    
+    	cpu = cpu_of(rq);
+    
+        // 如果rq的cpu是当前cpu
+    	if (cpu == smp_processor_id()) {
+    	    set_tsk_need_resched(curr);
+    	    set_preempt_need_resched();
+    	    return;
+    	}
+    
+    	if (set_nr_and_not_polling(curr))
+    	    smp_send_reschedule(cpu);
+    	else
+    	    trace_sched_wake_idle_without_ipi(cpu);
+    }
+
+如果当前cpu和rq的cpu一致, 则调用set_tsk_need_resched, 也就是设置task的thread_info的flag设置上TIF_NEED_RESCHED标志位
+
+.. code-block:: c
+
+    // https://elixir.bootlin.com/linux/v4.15/source/include/linux/sched.h#L1541
+    static inline void set_tsk_need_resched(struct task_struct *tsk)
+    {
+    	set_tsk_thread_flag(tsk,TIF_NEED_RESCHED);
+    }
+
+
+然后set_preempt_need_resched分平台的, 里面是汇编的, 没看懂
+
+.. code-block:: c
+
+    https://elixir.bootlin.com/linux/v4.15/source/arch/x86/include/asm/preempt.h#L55
+    static __always_inline void set_preempt_need_resched(void)
+    {
+    	raw_cpu_and_4(__preempt_count, ~PREEMPT_NEED_RESCHED);
+    }
 
 

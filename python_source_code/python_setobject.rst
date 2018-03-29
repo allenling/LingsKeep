@@ -9,7 +9,7 @@ set
    
    如果开放地址法找到的位置b也不是dummy或者空槽位置, 继续线性探测n个位置(b+n), 然后重复步骤
 
-4. 如果插入一个dummy的槽位, 那么不需要扩容, 也就是fill不变, 而插入一个空槽位, 则需要考虑是否扩容
+4. 如果插入一个dummy的槽位, 那么不需要扩容, 也就是fill不变, 而插入一个空槽位, 则需要考虑是否扩容, 这和dict有区别
 
 5. 如果dummy和used的总数, 也就是fill的值, 大于hash表的2/3, 那么resize, 和dict一样, set也是优先占据dummy槽位.
 
@@ -75,7 +75,7 @@ resize流程
     
     x = {1, 2, 3, 4}, 此时fill = used = 4, hash_size = 8, mask = hash_size - 1 = 7
     
-    xh是x的hash表, -1表示dummy, NULl表示空槽位, 所以hash表:
+    xh是x的hash表, -1表示dummy, NULL表示空槽位, 所以hash表:
     
     xh = {NULL, 1, 2, 3, 4, NULL, NULL, NULL}, 长度是8
     
@@ -208,6 +208,7 @@ set更新操作
         if (PyAnySet_Check(other))
             return set_merge(so, other);
     
+        // 下面这个if是在set函数传入值的是dict的时候, 比如set({'a': 1})
         if (PyDict_CheckExact(other)) {
             PyObject *value;
             Py_ssize_t pos = 0;
@@ -235,7 +236,10 @@ set更新操作
             }
             return 0;
         }
-    
+
+
+        // 下面的操作是set函数传入的是可迭代对象的时候
+        // 比如set([1,2])
         it = PyObject_GetIter(other);
         if (it == NULL)
             return -1;
@@ -277,7 +281,7 @@ set_add_entry
           // 拿到第一个位置的槽位
           entry = &so->table[i];
           if (entry->key == NULL)
-              // 第一个槽位是空的, 直接返回
+              // 第一个槽位是空的, 直接走到found_unused代码块
               goto found_unused;
 
           freeslot = NULL;
@@ -405,6 +409,8 @@ set_add_entry
 
 2. 扩容的时候, 如果已用槽位大于50000, 那么扩容的时候至少要比used的两部大, 否则是4倍大. 也就是小于50000的set, 扩容会很快.
 
+3. 注意到的是, 插入dummy槽位的时候, fill不增加, 而插入空槽位的时候, fill自增, 这个和dict就不一样了. dict不管插入的是dummy还是empty, dk_usable都会减
+
 寻址dummy或者empty
 =====================
 
@@ -426,6 +432,10 @@ pop
 
 
 pop只是把槽位设置为dummy, 然后并不缩减hash大小
+
+pop的位置是finger为其实位置, 找到的第一个可用的, pop之后, finger会被设置为当前下一个位置
+
+比如finger初始化是0, 然后pop, pop位置1， 然后finger被赋值为1, 然后pop, finger被赋值为2
 
 
 .. code-block:: c
@@ -454,6 +464,7 @@ pop只是把槽位设置为dummy, 然后并不缩减hash大小
         }
         // 找到了一个可用的key
         key = entry->key;
+        // 把key设置为dummy
         entry->key = dummy;
         entry->hash = -1;
         so->used--;

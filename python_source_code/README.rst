@@ -38,16 +38,237 @@ python接口分层
     '''
 
 
-编译过程
+启动python
 ==============
 
-python中执行语句之前, 会把语法转成codeobject(这里先跳过语法解析什么的), 然后根据codeobject中的字节码去执行程序.
+python的入口main函数是在cpython/Programs/main.c, 该main函数会调用Py_Main这个函数, Py_Main是在
 
-1. 创建codeobject
+cpython/Modules/main.c
 
-任何一个语句执行之前都会被编译成codeobject, 比如你使用def定义函数, class定义类等等.
+.. code-block:: c
 
-比如 **x[1] = 'a'** 这个代码, 执行之前, 会编译生成一个codeobject
+    int
+    Py_Main(int argc, wchar_t **argv)
+    {
+    
+        // 省略代码
+    
+        // 如果传入的是命令
+        if (command) {
+            sts = run_command(command, &cf);
+            PyMem_RawFree(command);
+        } else if (module) {
+            // 如果是要运行module
+            sts = (RunModule(module, 1) != 0);
+        }else {
+            // 省略代码
+    
+            否则运行shell模式
+            if (sts == -1)
+                // shell模式中, fp就是标准输入了, filename则是空
+                sts = run_file(fp, filename, &cf);
+        }
+    
+        // 省略代码
+    
+    }
+
+
+所以, python运行是从fp读取命令然后执行的, shell模式就是标准输入
+
+run_file
+===========
+
+.. code-block:: c
+
+    static int
+    run_file(FILE *fp, const wchar_t *filename, PyCompilerFlags *p_cf)
+    {
+    
+        // 省略代码
+    
+        if (filename) {
+            // 如果传入了文件名, 则解析文件名
+            unicode = PyUnicode_FromWideChar(filename, wcslen(filename));
+            if (unicode != NULL) {
+                bytes = PyUnicode_EncodeFSDefault(unicode);
+                Py_DECREF(unicode);
+            }
+            if (bytes != NULL)
+                filename_str = PyBytes_AsString(bytes);
+            else {
+                PyErr_Clear();
+                filename_str = "<encoding error>";
+            }
+        }
+        else
+            // 否则文件名则是<stdin>
+            filename_str = "<stdin>";
+        // 这里继续
+        run = PyRun_AnyFileExFlags(fp, filename_str, filename != NULL, p_cf);
+        Py_XDECREF(bytes);
+        return run != 0;
+    }
+
+PyRun_AnyFileExFlags
+=========================
+
+.. code-block:: c
+
+    int
+    PyRun_AnyFileExFlags(FILE *fp, const char *filename, int closeit,
+                         PyCompilerFlags *flags)
+    {
+        if (filename == NULL)
+            filename = "???";
+        // 下面的if是判断是否是shell模式了
+        if (Py_FdIsInteractive(fp, filename)) {
+            // 运行shell模式
+            int err = PyRun_InteractiveLoopFlags(fp, filename, flags);
+            if (closeit)
+                fclose(fp);
+            return err;
+        }
+        else
+            // 执行文件
+            return PyRun_SimpleFileExFlags(fp, filename, closeit, flags);
+    }
+
+
+PyRun_InteractiveLoopFlags
+==============================
+
+运行shell模式
+
+.. code-block:: c
+
+    int
+    PyRun_InteractiveLoopFlags(FILE *fp, const char *filename_str, PyCompilerFlags *flags)
+    {
+        // 省略代码
+    
+        // 下面的do while循环就是一直执行代码的地方
+        // while的终止条件是ret不等于E_EOF
+        do {
+            ret = PyRun_InteractiveOneObjectEx(fp, filename, flags);
+            // ret是-1, 则退出
+            if (ret == -1 && PyErr_Occurred()) {
+                /* Prevent an endless loop after multiple consecutive MemoryErrors
+                 * while still allowing an interactive command to fail with a
+                 * MemoryError. */
+                if (PyErr_ExceptionMatches(PyExc_MemoryError)) {
+                    if (++nomem_count > 16) {
+                        PyErr_Clear();
+                        err = -1;
+                        break;
+                    }
+                } else {
+                    nomem_count = 0;
+                }
+                PyErr_Print();
+                flush_io();
+            } else {
+                nomem_count = 0;
+            }
+            _PY_DEBUG_PRINT_TOTAL_REFS();
+        } while (ret != E_EOF);
+    
+        // 省略代码
+    
+    }
+
+其中
+
+1. PyRun_InteractiveOneObjectEx这个函数是执行代码的过程, 然后ret是执行的结构, 所以真正解析的地方是在PyRun_InteractiveOneObjectEx里面
+
+2. 如果在shell中输入 *exit()*, 然后ret返回的是-1, 走退出流程
+
+PyRun_InteractiveOneObjectEx
+================================
+
+这里是获得标准输入的字符串, 解析, 然后生成codeobject, 执行codeobject
+
+.. code-block:: c
+
+    static int
+    PyRun_InteractiveOneObjectEx(FILE *fp, PyObject *filename,
+                                 PyCompilerFlags *flags)
+    {
+        // 省略代码
+
+        // 拿到数据
+        mod = PyParser_ASTFromFileObject(fp, filename, enc, Py_single_input, ps1, ps2, flags, &errcode, arena);
+        
+        // 省略代码
+        
+        // 执行代码
+        v = run_mod(mod, filename, d, d, flags, arena);
+
+        // 省略代码
+    
+    }
+
+
+获取输入和语法解析调用路径:
+
+PyRun_InteractiveOneObjectEx -> PyParser_ASTFromFileObject -> PyParser_ParseFileObject -> parsetok -> PyTokenizer_Get -> tok_get -> tok_nextc
+
+.. code-block:: c
+
+    static int
+    tok_nextc(struct tok_state *tok)
+    {
+    
+        // 省略代码
+        
+        if (tok->prompt != NULL) {
+           // 调用PyOS_Readline去读取标准输入的代码
+           char *newtok = PyOS_Readline(stdin, stdout, tok->prompt);
+        
+        // 省略代码
+        // 省略的包括了解析语法
+    
+    }
+
+1. parse_ok, tok_get和tok_nextc主要是读取标准输入, 然后解析语法
+
+2. 比如输入 *x=1*, 则解析之后, tok这个对象的curr属性就是: *tok->curr = "x=1\n"*
+
+
+最后是run_mode
+
+.. code-block:: c
+
+    static PyObject *
+    run_mod(mod_ty mod, PyObject *filename, PyObject *globals, PyObject *locals,
+                PyCompilerFlags *flags, PyArena *arena)
+    {
+        PyCodeObject *co;
+        PyObject *v;
+        // 编译成codeobject
+        co = PyAST_CompileObject(mod, filename, flags, -1, arena);
+        if (co == NULL)
+            return NULL;
+        // 执行codeobject
+        v = PyEval_EvalCode((PyObject*)co, globals, locals);
+        Py_DECREF(co);
+        return v;
+    }
+
+
+
+----
+
+codeobject编译过程
+=====================
+            
+
+创建codeobject
+===================
+
+接之前的函数调用路径有, run_mod -> PyAST_CompileObject -> compiler_mod -> assemble -> makecode -> PyCode_New
+
+比如 *x[1] = 'a'* 这个代码, 执行之前, 会编译生成一个codeobject
 
 .. code-block:: c
 
@@ -61,14 +282,85 @@ python中执行语句之前, 会把语法转成codeobject(这里先跳过语法�
                PyObject *lnotab)
     {
     
+        // 新建的codeobject
+        PyCodeObject *co;
+
         // 省略代码
+
+        // 下面这些就是判断输入的consts, name等等参数了
+        if (argcount < 0 || kwonlyargcount < 0 || nlocals < 0 ||
+            code == NULL ||
+            consts == NULL || !PyTuple_Check(consts) ||
+            names == NULL || !PyTuple_Check(names) ||
+            varnames == NULL || !PyTuple_Check(varnames) ||
+            freevars == NULL || !PyTuple_Check(freevars) ||
+            cellvars == NULL || !PyTuple_Check(cellvars) ||
+            name == NULL || !PyUnicode_Check(name) ||
+            filename == NULL || !PyUnicode_Check(filename) ||
+            lnotab == NULL || !PyBytes_Check(lnotab) ||
+            !PyObject_CheckReadBuffer(code)) {
+            PyErr_BadInternalCall();
+            return NULL;
+        }
+
+        /* Ensure that the filename is a ready Unicode string */
+        if (PyUnicode_READY(filename) < 0)
+            return NULL;
+
+        // 下面是缓存字符串的流程, 和字符串对象的intern机制有关
+        intern_strings(names);
+        intern_strings(varnames);
+        intern_strings(freevars);
+        intern_strings(cellvars);
+        intern_string_constants(consts);
+
+        // 省略代码
+
+        // 下面就是codeobject的创建, 赋值的过程
+        co = PyObject_NEW(PyCodeObject, &PyCode_Type);
+        if (co == NULL) {
+            if (cell2arg)
+                PyMem_FREE(cell2arg);
+            return NULL;
+        }
+        co->co_argcount = argcount;
+        co->co_kwonlyargcount = kwonlyargcount;
+        co->co_nlocals = nlocals;
+        co->co_stacksize = stacksize;
+        co->co_flags = flags;
+        Py_INCREF(code);
+        // 这是是赋值字节码的地方
+        co->co_code = code;
+        Py_INCREF(consts);
+        co->co_consts = consts;
+        Py_INCREF(names);
+        co->co_names = names;
+        Py_INCREF(varnames);
+        co->co_varnames = varnames;
+        Py_INCREF(freevars);
+        co->co_freevars = freevars;
+        Py_INCREF(cellvars);
+        co->co_cellvars = cellvars;
+        co->co_cell2arg = cell2arg;
+        Py_INCREF(filename);
+        co->co_filename = filename;
+        Py_INCREF(name);
+        co->co_name = name;
+        co->co_firstlineno = firstlineno;
+        Py_INCREF(lnotab);
+        co->co_lnotab = lnotab;
+        co->co_zombieframe = NULL;
+        co->co_weakreflist = NULL;
+        co->co_extra = NULL;
+        return co;
     
     }
 
 
-2. 运行codeobject
- 
-然后运行codeobjetc中的字节码(下面代码是在shell模式下):
+运行codeobject
+===================
+
+run_mod函数运行codeobjetc中的字节码(下面代码是在shell模式下):
 
 .. code-block:: c
 
@@ -90,9 +382,16 @@ python中执行语句之前, 会把语法转成codeobject(这里先跳过语法�
     
     }
 
-3. 创建frame
+创建frame
+============
 
 执行的时候, 根据当前线程的状态和codeobject, 创建需要执行的frame, 然后执行frame
+
+关于frame object和code object的关系嘛, 大概来说就是:
+
+python的解释器也是一个栈执行的机器, 就是入栈, 然后出栈的过程, 入栈执行的就叫做frame, python中, 一个frame就表示了一个code object, 也就是一串字节码.
+
+这里用frame object保存code object, 然后把frame object传给解释器
 
 
 .. code-block:: c
@@ -128,7 +427,8 @@ python中执行语句之前, 会把语法转成codeobject(这里先跳过语法�
     }
 
 
-4. 执行frame
+执行frame
+============
 
 执行frame是使用当前解释器去执行
 
@@ -163,7 +463,7 @@ python中执行语句之前, 会把语法转成codeobject(这里先跳过语法�
 执行字节码
 ==============
 
-通过dis查到这个操作码是STORE_SUBSCR:
+通过dis查到 *x[1] = 'a'* 的操作码是STORE_SUBSCR:
 
 .. code-block:: python
 
@@ -179,40 +479,62 @@ python中执行语句之前, 会把语法转成codeobject(这里先跳过语法�
 
 然后在_PyEval_EvalFrameDefault中:
 
+由于之前frame object创建的时候, 把codeobject传给frame object保存起来了, 所以这里还是可以得到codeobject的
+
 .. code-block:: c
 
     // cpython/Python/ceval.c
     PyObject *
     _PyEval_EvalFrameDefault(PyFrameObject *f, int throwflag)
     {
-        // 拿到codeobject和它的属性
+        // 当前的opcode
+        int opcode;  /* Current opcode */
+
+
+        // 把传入的frame object赋值到当前线程状态上保存起来
+        tstate->frame = f;
+
+
+        // 通过frame, 拿到codeobject和它的属性
         co = f->f_code;
         names = co->co_names;
         consts = co->co_consts;
         fastlocals = f->f_localsplus;
         freevars = f->f_localsplus + co->co_nlocals;
 
-        // 省略代码
+        // 拿到第一个字节码
+        first_instr = (_Py_CODEUNIT *) PyBytes_AS_STRING(co->co_code);
 
-        // 无限循环去执行codeobject的字节码
+        // 下一个字节码就是第一个字节码
+        next_instr = first_instr;
+
+        // 无限循环, 一段一段地去执行codeobject的字节码
         for (;;) {
 
             // 省略代码
 
-            TARGET(STORE_SUBSCR) {
-                PyObject *sub = TOP();
-                PyObject *container = SECOND();
-                PyObject *v = THIRD();
-                int err;
-                STACKADJ(-3);
-                /* container[sub] = v */
-                err = PyObject_SetItem(container, sub, v);
-                Py_DECREF(v);
-                Py_DECREF(container);
-                Py_DECREF(sub);
-                if (err != 0)
-                    goto error;
-                DISPATCH();
+            // 这一句是去拿当前的opcode的地方
+            // 这个宏是通过next_instr获得opcode的
+            // 并且把next_instr++
+            NEXTOPARG();
+
+            switch (opcode){
+
+                TARGET(STORE_SUBSCR) {
+                    PyObject *sub = TOP();
+                    PyObject *container = SECOND();
+                    PyObject *v = THIRD();
+                    int err;
+                    STACKADJ(-3);
+                    /* container[sub] = v */
+                    err = PyObject_SetItem(container, sub, v);
+                    Py_DECREF(v);
+                    Py_DECREF(container);
+                    Py_DECREF(sub);
+                    if (err != 0)
+                        goto error;
+                    DISPATCH();
+                }
             }
 
             // 省略代码

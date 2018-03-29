@@ -24,7 +24,7 @@ PyObject_VAR_HEAD这个头包含了PyObject和一个长度信息ob_size, PyObjec
 
 然后ob_item是一个指针数组, ob_item就是包含了对象的地址了.
 
-ob_item看起来是只是一个长度为1的数组, 但是其实是可以越界的, 关于指针数组已经其越界问题, 参考: `C_指针小结.rst <https://github.com/allenling/LingsKeep/blob/master/C_%E6%8C%87%E9%92%88%E5%B0%8F%E7%BB%93.rst>`_.
+ob_item看起来是只是一个长度为1的数组, 但是其实是可以越界的
 
 
 初始化

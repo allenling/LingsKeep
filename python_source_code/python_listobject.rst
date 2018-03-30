@@ -3,25 +3,100 @@ list
 
 1. 使用数组来存储元素
 
-2. 每当元素增减, 会resize调整数组长度, 而dict是不会的. resize会将老数组元素复制到新数组上.
+2. **任何添加删除元素**, 会先修改当前list对象的size为newsize, 然后根据新的size的值去调整数组长度, 增加或者减少数组长度, 而dict是不会的缩减存储的长度的. resize会将老数组元素复制到新数组上.
 
-3. 已分配大小allocated, 元素个数size, resize要保证: allocated >= size & size >= (allocated/2)
+3. 已分配大小allocated, 元素个数size, resize的条件是: allocated > newsize的时候, 增加数组大小, newsize < (allocated / 2)的时候, 缩减数组长度
 
-4. 数组大小n字节, 对应pool的单位分配大小是k字节, 那么如果n/k > 3/4的时候, 数组并不会重新分配内存.
+4. resize之后的allocated长度, 是基于newsize的, 也就是如果是增加数组长度, allocated = newsize + 增加步长, 如果是缩减, 则是allocated = newsize + 缩减步长
 
-5. 插入slice(包括append)的时候, 把目标位置之后的元素往后移动, 然后在目标位置依次赋值
+5. resize的时候, 增加和删除的步长是不一样的
 
-6. 删除slice(包括pop不是最后一个位置)的时候, 把要删除元素之后的元素往前移动覆盖删除元素
+6. 数组大小n字节, 对应pool的单位分配大小是k字节, 那么如果n/k > 3/4的时候, 数组并不会重新分配内存.
 
-7. pop最后一个元素的操作很快, 只是调整list长度而不会移动元素位置.
+7. 插入slice(包括append)的时候, 把目标位置之后的元素往后移动, 然后在目标位置依次赋值
 
-8. append也很快, 只需数组槽位赋值而已
+8. 删除slice(包括pop不是最后一个位置)的时候, 把要删除元素之后的元素往前移动覆盖删除元素, 删除slice的时候会有一个延迟减少引用计数的操作
 
-9. insert是for循环一个个去移动, 而slice和resize则是调用memmove/memcpy系统调用去移动(复制)元素.
+9. **pop最后一个元素** 的操作很快, 只是将list对象的size减少1, 而不会真正操作数组的.
 
-10. contains和index都是需要逐个去比较.
+10. append也很快, 只需数组槽位赋值而已, pop和append的复杂度都是O(1)
 
-----
+11. insert是for循环一个个去移动, 而slice和resize则是调用memmove/memcpy系统调用去移动(复制)元素.
+
+12. contains和index都是需要逐个去比较, 必去dict和set, 复杂度都是O(n)
+
+增加数组长度的步长
+=====================
+
+.. code-block:: python
+
+    '''
+
+    1. x = []
+
+    allocated=0, new_size=0
+
+    2. x.append(1)
+    
+    new_size=1
+    
+    new_allocated = (new_size >> 3) + (new_size <9 ? 3: 6)
+    
+    new_allocated = (1 >> 3) + (1 <9 ? 3: 6) = 0 + 3 = 3
+    
+    new_allocated += new_size = 3 + 1 = 4
+    
+    3. x的长度为1, 已分配大小为4, 一直append直到x=[1, 2, 3, 4]都不会resize, 然后x.append(5):
+
+    allocated=4, new_size=5
+    
+    new_allocated = (new_size >> 3) + (new_size <9 ? 3: 6)
+    
+    new_allocated = (5 >> 3) + (5 <9 ? 3: 6) = 0 + 3 = 3
+    
+    new_allocated += new_size = 3 + 5 = 8
+
+    '''
+
+删减数组长度的过程
+=======================
+
+x=[1, 2, 3, 4, 5], 调用x.pop(1), 此时allocated=8, new_size=4, 因为4>=8/2, 所以数组长度不变
+
+.. code-block:: python
+
+    '''
+
+    x =  [1, 2, 3, 4, 5]
+
+    allocated = 8, size = 5
+
+    1. x.pop()
+    
+    allocated = 8, newsize = 4
+
+    allocated > newsize = 8 > 4 && newsize >= (allocated >> 1) = 4 >= 8/2
+
+    所以这一步并不会缩减数组长度, x = [1, 2, 3, 4]
+
+    2. x.pop()
+    
+    allocated=8, newsize=3, 有newsize < (allocated >> 1) = 3 < 8 /2
+
+    所以触发缩减数组操作
+    
+    new_allocated = (new_size >> 3) + (new_size <9 ? 3: 6)
+    
+    new_allocated = (3 >> 3) + (3 <9 ? 3: 6) = 0 + 3 = 3
+    
+    new_allocated += new_size = 3 + 3 = 6
+
+    '''
+
+x的数组长度变为6, 一直append知道x=[1, 2, 3, 4, 5, 6], 数组才会再次扩张.
+
+所以注释中的步长只是一直append的时候的长度, 长度变化最主要要满足: allocated > new_size并且new_size>=allocated/2这两个条件
+
 
 
 PyListObject
@@ -52,6 +127,8 @@ PyListObject
     } PyListObject;
 
 
+元素数组是定义为**, 也就是指针的指针, 这个可以看做数组, 具体请看: C_指针小结.rst
+
 
 append
 ===========
@@ -75,8 +152,7 @@ append
             return -1;
         }
     
-        // 直接去resize, 反正如果需要resize会resize
-        // 不需要resize, 就直接返回的
+        // 调用resize函数去看看是否需要resize
         if (list_resize(self, n+1) < 0)
             return -1;
     
@@ -166,7 +242,7 @@ resize
     }
 
 resize条件
---------------
+==============
 
 .. code-block:: c
 
@@ -178,71 +254,8 @@ resize条件
 
 2. 需要缩减: newsize的小于已分配的一半, (allocated >> 1) > new_size
 
-增加
-------------
-
-一开始x=[], 然后x.append(1):
-
-.. code-block:: python
-
-    '''
-
-    allocated=0, new_size=1
-    
-    new_allocated = (new_size >> 3) + (new_size <9 ? 3: 6)
-    
-    new_allocated = (1 >> 3) + (1 <9 ? 3: 6) = 0 + 3 = 3
-    
-    new_allocated += new_size = 3 + 1 = 4
-    
-    '''
-
-x的长度为1, 已分配大小为4, 一直append直到x=[1, 2, 3, 4]都不会resize, 然后x.append(5):
-
-.. code-block:: python
-
-   '''
-
-    allocated=4, new_size=5
-    
-    new_allocated = (new_size >> 3) + (new_size <9 ? 3: 6)
-    
-    new_allocated = (5 >> 3) + (5 <9 ? 3: 6) = 0 + 3 = 3
-    
-    new_allocated += new_size = 3 + 5 = 8
-
-    '''
-
-此时x的长度为5, 已分配大小为8
-
-减少
--------
-
-x=[1, 2, 3, 4, 5], 调用x.pop(1), 此时allocated=8, new_size=4, 因为4>=8/2, 所以数组长度不变
-
-继续, x.pop(), 此时数组长度变为:
-
-.. code-block:: python
-
-    '''
-    
-    allocated=8, new_size=3
-    
-    new_allocated = (new_size >> 3) + (new_size <9 ? 3: 6)
-    
-    new_allocated = (3 >> 3) + (3 <9 ? 3: 6) = 0 + 3 = 3
-    
-    new_allocated += new_size = 3 + 3 = 6
-
-    '''
-
-x的数组长度变为6, 一直append知道x=[1, 2, 3, 4, 5, 6], 数组才会再次扩张.
-
-所以注释中的步长只是一直append的时候的长度, 长度变化最主要要满足: allocated > new_size并且new_size>=allocated/2这两个条件
-
-
 内存复制
------------
+===========
 
 resize的时候是调用PyMem_RESIZE去新分配一个数组, 然后把元素复制过去
 
@@ -511,15 +524,15 @@ list_ass_slice
     }
 
 memmove
------------
+===========
 
-改系统调用, 第一个参数是目标位置, 第二个参数是源位置, 第三个参数是内存大小
+系统调用, 第一个参数是目标位置, 第二个参数是源位置, 第三个参数是内存大小
 
 也就是把源位置开始, 之后的指定大小的内存, 复制到目标位置.
 
 
-缩减移动元素
----------------
+slice缩减移动元素
+==================
 
 .. code-block:: c
 
@@ -540,30 +553,28 @@ memmove
             item = a->ob_item;
         }
 
-例如x=[1, 2, 3, 4, 5], 然后pop(1)
-
 .. code-block:: python
 
     '''
     
-    [1, 2, 3, 4, 5]
+    x = [1, 2, 3, 4, 5], x.pop(1)
     
     其中d=-1, ilow=1, ihight=2, 此时tail = 5 - 2 = 3, 也就是移动3个元素.
     
     调用memmove(&item[1], &item[2], 3), 也就是把3, 4, 5移动到2所在的位置, 变为:
     
-    [1, 3, 4, 5]
+    [1, 3, 4, 5, NULL, NULL, NULL, NULL], allocated = 8
     
-    然后缩减x的长度为4, 但是数组长度依然是8, 因为4<=8/2, 然后继续pop(1), 有
+    然后缩减x的长度为4, 但是数组长度依然是8, 因为4 >= 8/2, 然后继续pop(1), newsize=3, 3 < 8/2 有
 
-    [1, 4, 5]
+    [1, 4, 5, NULL, NULL, NULL], allocated=6
 
 
     
     '''
 
 增加长度移动元素
-------------------
+==================
 
 .. code-block:: c
 
@@ -586,13 +597,11 @@ memmove
        }
 
 
-例如x=[1, 2, 3, 4, 5], 然后x[1:2] = [10, 11]
-
 .. code-block:: python
 
     '''
     
-    [1, 2, 3, 4, 5]
+    x = [1, 2, 3, 4, 5], x[1:2] = [10: 11]
     
     其中k=5, d=1, ilow=1, ihight=2, n=2, 此时tail = 5 - 2 = 3, 也就是移动3个元素.
     

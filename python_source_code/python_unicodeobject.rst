@@ -42,7 +42,7 @@ is操作的区别
     Out[129]: True
 
 
-在编译中看看foo!和awd的区别, 每一个语句都会编译成一个codeobject, 然后其中常量会保存在codeobject.consts中
+在编译中看看foo!和awd的区别, **每一个语句都会编译成一个codeobject, 每一个codeobject都有自己的consts常量**, 然后其中常量会保存在codeobject.consts中
 
 
 .. code-block:: c

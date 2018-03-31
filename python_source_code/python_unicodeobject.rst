@@ -107,7 +107,7 @@ all_name_chars是判断一个字符是否需要缓存的地方
         if (!PyUnicode_IS_ASCII(o))
             return 0;
     
-        // 这里将常规字符的缓存位置设置为1
+        // 这里是初始化过程, 所有的NAME_CHARS的字符, 在ok_name_char中都需要置1
         if (ok_name_char[*name_chars] == 0) {
             const unsigned char *p;
             for (p = name_chars; *p; p++)
@@ -117,6 +117,7 @@ all_name_chars是判断一个字符是否需要缓存的地方
         e = s + PyUnicode_GET_LENGTH(o);
         // 下面的循环会一个字符一个字符去判断是否
         // 是常规字符
+        // e是最后一个字符, s是从第一个字符开始
         while (s != e) {
             // *s就是当前位置的字符
             if (ok_name_char[*s++] == 0)
@@ -216,8 +217,7 @@ PyUnicode_InternInPlace
         if (!PyUnicode_CheckExact(s))
             return;
         // 这个是判断s是否已经被intern了
-        // 判断的依据是s对象里面的state.interned是否是SSTATE_INTERNED_MORTAL
-        // 继续看下嘛
+        // 判断的依据是PyUnicodeObject->state.interned是否是SSTATE_INTERNED_MORTAL, 也就是1
         if (PyUnicode_CHECK_INTERNED(s))
             return;
         if (interned == NULL) {
@@ -271,8 +271,6 @@ awd这个字符串
 3. **而PyUnicode_InternInPlace的作用是会把y指向x指向的awd**
 
 4. 所以is操作返回True
-
-
 
 那么在函数中呢?
 
@@ -408,9 +406,6 @@ x+y 和 'a' + 'b'的区别就是, 后一句是编译的时候可以直接执行�
 
 
 可以看到, 在编译的时候, 已经执行了'foo' + 'bar'的计算结果了
-
-
-
 
 
 intern手动缓存

@@ -230,6 +230,25 @@ PyRun_InteractiveOneObjectEx -> PyParser_ASTFromFileObject -> PyParser_ParseFile
     
     }
 
+而在parsetok中, 有:
+
+.. code-block:: c
+
+    static node *
+    parsetok(struct tok_state *tok, grammar *g, int start, perrdetail *err_ret,
+             int *flags)
+    {
+        for (;;) {
+            // 拿到输入的内容
+            type = PyTokenizer_Get(tok, &a, &b);
+            if (type == ERRORTOKEN) {
+                err_ret->error = tok->done;
+                break;
+            }
+        }
+    
+    }
+
 1. parse_ok, tok_get和tok_nextc主要是读取标准输入, 然后解析语法
 
 2. 比如输入 *x=1*, 则解析之后, tok这个对象的curr属性就是: *tok->curr = "x=1\n"*

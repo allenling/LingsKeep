@@ -3,11 +3,67 @@ longobject
 
 python3中, int和long合并了, 都属于longobject
 
-1. 无限长度数字是用数组来实现的
+1. 无限长度数字是用数组来实现的, 每个数组基数是2**30, 设基数m=2**30, 也就是整数表示为: n1 * m**0 + n2 * m**1 + n3 * m**2 + ...
 
-2. 小整数[-5, 255)会被缓存, 所以全局都是同一个对象
+2. 数组的元素表示方法为, 假设数组长度是2, [1, 2], 第一个元素是2**30的0次方, 所以是1 + (2**30) ** 0 = 1, 第二个元素是2, 2的二进制是10, 并且
+   第二个元素的开始第一位表示2**30, 第二位表示2**31, 所以10表示2**31, 所以[1,2]这个数组表示的数字是1 + 2**31
 
-3. python3.6不会缓存大整数对象
+3. longobject中的size为数组的长度, 然后如果size是负数, 则表示longobject是负数.
+
+4. 从存储数组到实际以10为底的数字(比如打印数字的时候), 打印的时候输出的数字是以10**9为底的10进制数
+
+5. 小整数[-5, 255)会被缓存, 所以全局都是同一个对象
+
+6. python3.6不会缓存大整数对象
+
+7. 大数相乘是使用Karatsuba算法, 复杂度降低到3 * (n ** log3)(log3是2为底)
+   基本的原理和做法是将位数很多的两个大数 {\displaystyle x} x和 {\displaystyle y} y分成位数较少的数，每个数都是原来 {\displaystyle x} x和 {\displaystyle y} y位数的一半
+   这样处理之后，简化为做三次乘法，并附带少量的加法操作和移位操作(来自wiki)
+
+
+longobject存储示例
+========================
+
+如果x = 2**32 + 1 = 4294967297, 那么:
+
+1. size=2, 这是因为两次x>>30计算才为0
+   
+2. 存储的数组ob_digit: [1, 4], 这是因为4的二进制是100, 4所在的数组开始是2**30, 所以100也就是表示2**32
+
+
+如果x = -(2**32 + 1) = -4294967297, 那么存储的内容和上面的一致, 只是size = -2
+
+如果x=2**61 + 1 = 2305843009213693953, 那么有:
+
+1. size = 3
+
+2. ob_digit: [1, 0, 2], 也就是2的二进制是10, 2所在的数组开始的是2**60, 2的二进制是10, 也就是2**60往左移动1位, 就是数字就是2**61, 然后就是2**61 + 0 + 1
+
+如果x = 2**61+2**33+1 = 2305843017803628545, 那么:
+
+1. size = 3
+
+2. ob_digit: [1, 8, 2], 8的二进制是1000, 第二个数组开始的数字是2**30, 第二位是2**31, 推算下来, 1000代表的就是2**33, 以此类推.
+
+如果x = x=2**61 + 3 + 2**34 + 4 = 2305843026393563143, 那么:
+
+1. size = 3
+
+2. ob_digit: [7, 16, 2], 7个位数的3和4的和, 16的二进制是10000, 也就是从2**30开始, 坐移4位为2**34 
+
+
+longobject从存储到十进制表示
+=================================
+
+当调用longobject的__str__或者__repr__方法的时候, 会打印出以10为底的整数
+
+由于c语言中的溢出限制, 所以把ob_digit数组中的数转换成10为底的数的时候, 不太可能是2**90这样的计算方式的, 而是每次左移30位, 然后多次移位的方式
+
+但是有例子可以看看, 比如x = 2**61 + 3 + 2**34 + 4 = 2305843026393563143, 存储的话上一节的一样, ob_digit = [7, 16, 2],
+
+然后打印longobject的话, 应该是逐个打印数字, 所以打印的时候应该打印2305843026393563143. 打印的时候是根据一个输出数组pout来打印
+
+最终pout将是[393563143, 305843026, 2], 打印的时候反过来输出, 也就是输出2, 305843026, 393563143, 连起来刚刚好是原来的数字!!!!!
 
 
 PyLongObject
@@ -27,7 +83,7 @@ _longobject是在cpython/Include/longintrepr.h
     struct _longobject {
         // 其中head里面就包含了数组长度了.
     	PyObject_VAR_HEAD
-        // 又看到了长度为1但是一定会越界的数组
+        // 又看到了初始化长度为1但是一定会越界的数组
     	digit ob_digit[1];
     };
 
@@ -62,16 +118,11 @@ _longobject是在cpython/Include/longintrepr.h
     #endif
 
 
-所以digit类型一般就是4字节的int了, 但是注意的是, 数组的每一个元素只用其30位作为有效位, 也就是每一个数组最大就是2**29.
+64位平台下:
 
-比如:
+1. digit类型则是32位, 而twodigits则是64位
 
-1. x=2**30的话, 那么ob_digit长度就是2, 第一个元素是0, 第二个元素就是1, 合起来二进制就是00000(一共30个0)1
-
-2. x=2**70 + 2**40的话, 那么ob_digit长度就是3, 第一个元素是0, 第二个元素是1024(二进制11位, 也就是2**10), 第三个也是1024,
-
-   x展开二进制就是000(30个) 0(19个)1(10个)0  0(19个)1(10个)0
-
+2. _PyLong_DECIMAL_SHIFT这个是用来转换成10进制的时候的底数, 是10**9
 
 PyLong_FromLong
 ====================
@@ -89,6 +140,7 @@ PyLong_FromLong
         int sign;
     
         // 小整数就从缓存拿
+        // 这个宏里面有个return, 所以如果是小整数, 直接return
         CHECK_SMALL_INT(ival);
     
         // 下面是判断符号位的
@@ -145,6 +197,50 @@ PyLong_FromLong
         return (PyObject *)v;
     }
 
+转成十进制
+=============
+
+.. code-block:: c
+
+    static int
+    long_to_decimal_string_internal(PyObject *aa,
+                                    PyObject **p_output,
+                                    _PyUnicodeWriter *writer,
+                                    _PyBytesWriter *bytes_writer,
+                                    char **bytes_str)
+    {
+    
+        // 拿到PyLongObject
+        a = (PyLongObject *)aa;
+    
+        // 传入的PyLongObject的数组
+        pin = a->ob_digit;
+        // pout也是一个digit类型的数组
+        pout = scratch->ob_digit;
+        size = 0;
+        // 下面的循环就是转成以10**9为底的10进制的过程
+        // 没怎么看懂
+        for (i = size_a; --i >= 0; ) {
+            digit hi = pin[i];
+            for (j = 0; j < size; j++) {
+                twodigits z = (twodigits)pout[j] << PyLong_SHIFT | hi;
+                hi = (digit)(z / _PyLong_DECIMAL_BASE);
+                pout[j] = (digit)(z - (twodigits)hi *
+                                  _PyLong_DECIMAL_BASE);
+            }
+            while (hi) {
+                pout[size++] = hi % _PyLong_DECIMAL_BASE;
+                hi /= _PyLong_DECIMAL_BASE;
+            }
+            /* check for keyboard interrupt */
+            SIGCHECK({
+                    Py_DECREF(scratch);
+                    return -1;
+                });
+        }
+    
+    }
+
 
 小整数池
 ==========
@@ -172,7 +268,7 @@ python中会全局缓存小整数, 缓存的小整数的范围是[-5, 257):
 CHECK_SMALL_INT
 ----------------
 
-如果是小整数, 则返回
+如果是小整数, 则返回, 注意的是, 这里是带有return的
 
 .. code-block:: c
 

@@ -16,9 +16,20 @@ python3中, int和long合并了, 都属于longobject
 
 6. python3.6不会缓存大整数对象
 
-7. 大数相乘是使用Karatsuba算法, 复杂度降低到3 * (n ** log3)(log3是2为底)
-   基本的原理和做法是将位数很多的两个大数 {\displaystyle x} x和 {\displaystyle y} y分成位数较少的数，每个数都是原来 {\displaystyle x} x和 {\displaystyle y} y位数的一半
-   这样处理之后，简化为做三次乘法，并附带少量的加法操作和移位操作(来自wiki)
+7. 大数相乘是使用Karatsuba算法, 复杂度降低到3 * (n ** log3)(log3是2为底), 参考`这里 <https://itimetraveler.github.io/2017/08/22/%E3%80%90%E7%AE%97%E6%B3%95%E3%80%91%E5%A4%A7%E6%95%B0%E7%9B%B8%E4%B9%98%E9%97%AE%E9%A2%98%E5%8F%8A%E5%85%B6%E9%AB%98%E6%95%88%E7%AE%97%E6%B3%95/`_
+   
+   
+Karatsuba算法
+==============
+
+参考 [7]_
+
+设, x = a * 10 ** (n/2) + b, y = c * 10 ** (n/2) + d
+
+x * y = ac * 10** n + (ad + bc) * 10 ** (n/2) + bd, 由于 ad + bc = (a+b) * (c+d) - ac - bd, 所以
+
+a*d和b*c则不需要分别计算, 直接用ac, bd, (a+b)*(c+d)结果用加法就可以算出来了, 乘法的个数从四次减少到了三次
+
 
 
 longobject存储示例

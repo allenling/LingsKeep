@@ -15,14 +15,492 @@ unicode
 
 ----
 
-PyUnicodeObject
+字符串编译流程
 ==================
 
+当输入 *x='12你们'* 的时候, 经过一系列语法解析之后判断到这是一个赋值语句, 赋值的是字符串, 调用到:
 
-这里涉及到unicode, utf8的编码和转码, 比如 *你* 这个字, 值是20320, 但是存储的时候, 是用三个字节存储[x, y, z]
+// cpython/Python/ast.c
 
-这部分先略过
+.. code-block:: c
 
+    static int
+    parsestr(struct compiling *c, const node *n, int *bytesmode, int *rawmode,
+             PyObject **result, const char **fstr, Py_ssize_t *fstrlen)
+    {
+    
+        // 代码省略
+
+        // 拿到s, 也就是我们传入的字符串的长度
+        // 调用strlen, 比如'12你们'的长度就是8
+        len = strlen(s);
+    
+        /* Not an f-string. */
+        /* Avoid invoking escape decoding routines if possible. */
+        // 不是f-string模式, f-string是3.7的特性
+        *rawmode = *rawmode || strchr(s, '\\') == NULL;
+        // bytesmode判断是否是byte, 比如b'123'
+        if (*bytesmode) {
+            /* Disallow non-ASCII characters. */
+            const char *ch;
+            for (ch = s; *ch; ch++) {
+                if (Py_CHARMASK(*ch) >= 0x80) {
+                    ast_error(c, n, "bytes can only contain ASCII "
+                              "literal characters.");
+                    return -1;
+                }
+            }
+            if (*rawmode)
+                *result = PyBytes_FromStringAndSize(s, len);
+            else
+                *result = decode_bytes_with_escapes(c, n, s, len);
+        } else {
+            // 不是byte, 是原生字符串
+            if (*rawmode)
+                // 调用到这里, 返回PyUnicodeObject
+                *result = PyUnicode_DecodeUTF8Stateful(s, len, NULL, NULL);
+            else
+                *result = decode_unicode_with_escapes(c, n, s, len);
+        }
+    
+    
+    }
+
+该函数中, s就是我们的字符串, len则是调用strlen得到的字符串的长度, 所以s='12你们', len=8
+
+cpython/Objects/unicodeobject.c
+
+.. code-block:: c
+
+    PyObject *
+    PyUnicode_DecodeUTF8Stateful(const char *s,
+                                 Py_ssize_t size,
+                                 const char *errors,
+                                 Py_ssize_t *consumed)
+    {
+    
+        // 这里!!!!!把writer0->buffer赋值为一个新的PyUnicodeObject
+        if (_PyUnicodeWriter_Prepare(&writer, writer.min_length, 127) == -1)
+            goto onError;
+        
+        // 初始化writer
+        _PyUnicodeWriter_Init(&writer);
+        writer.min_length = size;
+        // 这里
+        if (_PyUnicodeWriter_Prepare(&writer, writer.min_length, 127) == -1)
+            goto onError;
+
+        // 这里拿到s中第一个非ascii字符的位置, 并且把ascii复制到writer.data中
+        // 比如'12你们', 那么pos=2
+        // 所以下面的while就是从第一个非ascii字符开始去遍历
+        writer.pos = ascii_decode(s, end, writer.data);
+        // 所以, pos=2, s移动两个位置, 比如'12你们', 也就是s现在指向'你'
+        s += writer.pos;
+        
+        // 一个字符一个字符去编码和存储unicode
+        while (s < end) {
+        
+                Py_UCS4 ch;
+                int kind = writer.kind;
+        
+                // 判断每一个字符, 注意的是每一个字符!!!!!!!
+                // 下面的asciilib_函数则负责存储
+                if (kind == PyUnicode_1BYTE_KIND) {
+                    if (PyUnicode_IS_ASCII(writer.buffer))
+                        ch = asciilib_utf8_decode(&s, end, writer.data, &writer.pos);
+                    else
+                        ch = ucs1lib_utf8_decode(&s, end, writer.data, &writer.pos);
+                } else if (kind == PyUnicode_2BYTE_KIND) {
+                    ch = ucs2lib_utf8_decode(&s, end, writer.data, &writer.pos);
+                } else {
+                    assert(kind == PyUnicode_4BYTE_KIND);
+                    ch = ucs4lib_utf8_decode(&s, end, writer.data, &writer.pos);
+                }
+        
+        }
+    
+    }
+
+
+_PyUnicodeWriter_Prepare
+====================================
+
+这个函数调用的是_PyUnicodeWriter_PrepareInternal
+
+cpython/Objects/unicodeobject.c
+
+.. code-block:: c
+
+    int
+    _PyUnicodeWriter_PrepareInternal(_PyUnicodeWriter *writer,
+                                     Py_ssize_t length, Py_UCS4 maxchar)
+    {
+        // 传入的length是字符串的长度, maxchar传入的是默认的ascii码最大127
+        Py_ssize_t newlen;
+        PyObject *newbuffer;
+    
+        assert(maxchar <= MAX_UNICODE);
+    
+        /* ensure that the _PyUnicodeWriter_Prepare macro was used */
+        assert((maxchar > writer->maxchar && length >= 0)
+               || length > 0);
+    
+        if (length > PY_SSIZE_T_MAX - writer->pos) {
+            PyErr_NoMemory();
+            return -1;
+        }
+        // writer->pos被初始化为0
+        newlen = writer->pos + length;
+    
+        // 这里判断一下, 不过基本没什么用, 除非第一个字符串就是unicode
+        maxchar = Py_MAX(maxchar, writer->min_char);
+    
+        // 初始化的writer->buffer是NULL
+        if (writer->buffer == NULL) {
+            assert(!writer->readonly);
+            if (writer->overallocate
+                && newlen <= (PY_SSIZE_T_MAX - newlen / OVERALLOCATE_FACTOR)) {
+                /* overallocate to limit the number of realloc() */
+                newlen += newlen / OVERALLOCATE_FACTOR;
+            }
+            if (newlen < writer->min_length)
+                newlen = writer->min_length;
+
+            // !!!!!!!所以, 我们这里调用PyUnicode_New生成一个PyUnicodeObject
+            writer->buffer = PyUnicode_New(newlen, maxchar);
+            if (writer->buffer == NULL)
+                return -1;
+        }else if () {
+            // 代码省略
+        }else if () {
+            // 代码省略
+        }
+        _PyUnicodeWriter_Update(writer);
+    
+    }
+
+所以, 该函数就是把writer->buffer初始化一个ascii类型的PyUnicodeObject
+
+ascii_decode
+==============
+
+这个函数是PyUnicode_DecodeUTF8Stateful中, 调用_PyUnicodeWriter_Prepare去初始化writer之后
+
+计算第一个非ascii字符位置, 并且把第一个非ascii字符之前的字符赋值到writer->data中
+
+cpython/Objects/unicodeobject.c
+
+.. code-block:: c
+
+    static Py_ssize_t
+    ascii_decode(const char *start, const char *end, Py_UCS1 *dest)
+    {
+        // 其中, 传入的dest是writer->data
+        // start就是我们的字符串, '12你们'
+        // end就是结束符
+        // p指向start
+        const char *p = start;
+    
+        // 代码省略
+    
+        while (p < end) {
+            // 这里一个字符一个字符串去判断
+            /* Fast path, see in STRINGLIB(utf8_decode) in stringlib/codecs.h
+               for an explanation. */
+            if (_Py_IS_ALIGNED(p, SIZEOF_LONG)) {
+                /* Help allocation */
+                const char *_p = p;
+                while (_p < aligned_end) {
+                    unsigned long value = *(unsigned long *) _p;
+                    if (value & ASCII_CHAR_MASK)
+                        break;
+                    _p += SIZEOF_LONG;
+                }
+                p = _p;
+                if (_p == end)
+                    break;
+            }
+            // 这里0x80就是128, 也就是是否是小于等于127的字符, 也就是是否是ascii字符
+            if ((unsigned char)*p & 0x80)
+                // 如果不是ascii字符, 退出
+                break;
+            ++p;
+        }
+        // 复制第一个非ascii字符之前的内容到dest, 也就是writer->data
+        memcpy(dest, start, p - start);
+        // 返回位置
+        return p - start;
+    
+    }
+
+所以这函数是, 找到第一个非ascii字符, 复制该字符之前的ascii字符到writer->data, 返回第一个非ascii字符的位置
+
+
+继续PyUnicode_DecodeUTF8Stateful
+==================================
+
+接着继续看PyUnicode_DecodeUTF8Stateful函数
+
+
+.. code-block:: c
+
+    PyObject *
+    PyUnicode_DecodeUTF8Stateful(const char *s,
+                                 Py_ssize_t size,
+                                 const char *errors,
+                                 Py_ssize_t *consumed)
+    {
+    
+        writer.pos = ascii_decode(s, end, writer.data);
+        s += writer.pos;
+        while (s < end) {
+    
+            Py_UCS4 ch;
+            int kind = writer.kind;
+    
+            // 由于writer被初始化为一个ascii对象, 所以对第一个
+            // 非ascii字符处理的时候, 走第一个if分支
+            // 第一个unicode字符之后的字符, 走其他分支
+            // 比如'们'这个字符走PyUnicode_2BYTE_KIND这个分支
+            if (kind == PyUnicode_1BYTE_KIND) {
+                if (PyUnicode_IS_ASCII(writer.buffer))
+
+                    // 去decode(编码), 赋值字符到writer.data
+                    ch = asciilib_utf8_decode(&s, end, writer.data, &writer.pos);
+                else
+                    ch = ucs1lib_utf8_decode(&s, end, writer.data, &writer.pos);
+            } else if (kind == PyUnicode_2BYTE_KIND) {
+                ch = ucs2lib_utf8_decode(&s, end, writer.data, &writer.pos);
+            } else {
+                assert(kind == PyUnicode_4BYTE_KIND);
+                ch = ucs4lib_utf8_decode(&s, end, writer.data, &writer.pos);
+            }
+
+            switch (ch) {
+                case 0:
+                    // case=0是表示已经是最后一个字符了
+                    if (s == end || consumed)
+                        goto End;
+                    errmsg = "unexpected end of data";
+                    startinpos = s - starts;
+                    endinpos = end - starts;
+                    break;
+                case 1:
+                    errmsg = "invalid start byte";
+                    startinpos = s - starts;
+                    endinpos = startinpos + 1;
+                    break;
+                case 2:
+                case 3:
+                case 4:
+                    errmsg = "invalid continuation byte";
+                    startinpos = s - starts;
+                    endinpos = startinpos + ch - 1;
+                    break;
+                // unicode走这里!!!!!!!!!
+                default:
+                    if (_PyUnicodeWriter_WriteCharInline(&writer, ch) < 0)
+                        goto onError;
+                    continue;
+            }
+    
+        }
+        End:
+        if (consumed)
+            *consumed = s - starts;
+
+        Py_XDECREF(error_handler_obj);
+        Py_XDECREF(exc);
+        return _PyUnicodeWriter_Finish(&writer);
+    
+    }
+
+所以接下来的流程的关键是几个字符串decode的库, asciilib_utf8_decode等等, 这几个函数大同小异, 都是对unicode进行编码, 然后返回字符的unicode值
+
+比如'你'这个字符, 经过asciilib_uf8_decode编码之后, 使用三个字节去存储该字符, 返回的ch则是'你'这个字符的unicode值, 也就是20320, 当然也是复制到writer->data
+
+decode的流程涉及到unicode, utf8的编码和转码, 比如 *你* 这个字, 值是20320, 但是存储的时候, 是用三个字节存储[x, y, z], 但是python内部对于'你们’是使用两个字节存储, 这部分先略过
+
+
+在接下来的switch语句, 走default分支, 调用_PyUnicodeWriter_WriteCharInline函数
+
+
+cpython/Objects/unicodeobject.c
+
+.. code-block:: c
+
+    static inline int
+    _PyUnicodeWriter_WriteCharInline(_PyUnicodeWriter *writer, Py_UCS4 ch)
+    {
+        assert(ch <= MAX_UNICODE);
+
+        // 这里再次调用Prepare函数, 注意的是, 传入的ch是unicode字符
+        // 比如'你'这个字符, 所以writer的buffer就变为compact类型的PyUnicodeObject
+        if (_PyUnicodeWriter_Prepare(writer, 1, ch) < 0)
+            return -1;
+        PyUnicode_WRITE(writer->kind, writer->data, writer->pos, ch);
+        // 然后指向下一个字符
+        writer->pos++;
+        return 0;
+    }
+
+这个函数再次调用_PyUnicodeWriter_Prepare去重新设置writer->buffer
+
+.. code-block:: c
+
+    int
+    _PyUnicodeWriter_PrepareInternal(_PyUnicodeWriter *writer,
+                                     Py_ssize_t length, Py_UCS4 maxchar)
+    {
+    
+        // 代码省略
+        if () {
+        }else if () {
+        }
+        else if (maxchar > writer->maxchar) {
+            // 走这个分支
+            assert(!writer->readonly);
+            // 新建一个buffer
+            newbuffer = PyUnicode_New(writer->size, maxchar);
+            if (newbuffer == NULL)
+                return -1;
+            // 把writer->buffer复制到newbuffer
+            _PyUnicode_FastCopyCharacters(newbuffer, 0,
+                                          writer->buffer, 0, writer->pos);
+            // 设置writer->buffer指向newbuffer
+            Py_SETREF(writer->buffer, newbuffer);
+        }
+    }
+
+因为之前writer->max_char是127, 也就是writer->buffer默认是ascii类型的PyUnicodeObject, 这次要变成compact类型的PyUnicodeObject
+
+所以调用PyUnicode_New去新建一个compact类型的PyUnicodeObject
+
+然后继续处理'们‘这个字符, 编码, 把该字符赋值到writer->data
+
+
+最后调用_PyUnicodeWriter_Finish
+==================================
+
+cpython/Objects/unicodeobject.c
+
+这个函数基本上是说, 处理writer->buffer, 返回一个正确的unicode对象.
+
+比如之前writer->buffer指向的PyUnicodeObject中, length=8, 这个8是strlen返回的, 但是我们调用len的时候, 应该是4, 也就是writer->pos的值
+
+也就是length != pos, 表示有unicode, 所以finish函数就是把length = pos, 当然还是其他操作
+
+
+.. code-block:: c
+
+    int
+    _PyUnicodeWriter_WriteLatin1String(_PyUnicodeWriter *writer,
+                                       const char *str, Py_ssize_t len)
+    {
+        PyObject *str;
+    
+        if (writer->pos == 0) {
+            Py_CLEAR(writer->buffer);
+            _Py_RETURN_UNICODE_EMPTY();
+        }
+    
+        // 拿到writer->buffer
+        str = writer->buffer;
+        // 然后writer->buffer被清空
+        writer->buffer = NULL;
+    
+        if (writer->readonly) {
+            assert(PyUnicode_GET_LENGTH(str) == writer->pos);
+            return str;
+        }
+    
+        // 然后这里, length不等于pos
+        if (PyUnicode_GET_LENGTH(str) != writer->pos) {
+            PyObject *str2;
+            // 重新创建一个compact的unicodeobject
+            str2 = resize_compact(str, writer->pos);
+            if (str2 == NULL) {
+                Py_DECREF(str);
+                return NULL;
+            }
+            // 指向新的对象
+            str = str2;
+        }
+    
+    }
+
+
+resize_compact则是重新分配大小, 先略过
+
+小结
+======
+
+1. 初始化writer, writer->buffer先默认是一个ascii字符串, 创建为一个ascii类型的PyUnicodeObject
+
+2. 找到第一个非ascii字符, 把该字符之前的字符都复制到writer->data, 比如例子的中'12'
+
+3. 然后一个接一个字符去decode(编码), 编码的同时把unicode复制到writer->data中, 同时把writer->buffer变为一个compact类型的PyUnicodeObject
+
+4. 最后finish的时候, 设置正确的length
+
+
+获取unicode的字符串
+=======================
+
+事实上unicode的的data并没有存储在PyUnicodeObject中, 首先在debug的过程中, 我们看到都是把字符串复制到writer->data中
+
+就算最后的finish过程, 也只是把str的大小设置成合理的大小, 但是设置大小的这一步比较关键!!!!
+
+1. writer->data的地址是: 0x7ffff6bcee18
+
+2. unicode的地址是: 0x7ffff6bcedc0
+
+来看看打印字符串的时候, 去哪里拿到数据数组, 下面是unicode的repr的函数
+
+.. code-block:: c
+
+    static PyObject *
+    unicode_repr(PyObject *unicode)
+    {
+    
+        idata = PyUnicode_DATA(unicode);
+        
+        for (i = 0; i < isize; i++) {
+            Py_UCS4 ch = PyUnicode_READ(ikind, idata, i);
+        }
+    
+    }
+
+当debug的时候, 传入的unicode的地址是0x7ffff6bcedc0, 正好是创建时候的字符串'12你们'的地址, 然后PyUnicode_DATA是一个宏
+
+
+.. code-block:: c
+
+    #define PyUnicode_DATA(op) \
+        (assert(PyUnicode_Check(op)), \
+         PyUnicode_IS_COMPACT(op) ? _PyUnicode_COMPACT_DATA(op) :   \
+         _PyUnicode_NONCOMPACT_DATA(op))
+
+如果是compact类型的unicode, 那么去调用_PyUnicode_COMPACT_DATA
+
+.. code-block:: c
+
+    /* Return a void pointer to the raw unicode buffer. */
+    #define _PyUnicode_COMPACT_DATA(op)                     \
+        (PyUnicode_IS_ASCII(op) ?                   \
+         ((void*)((PyASCIIObject*)(op) + 1)) :              \
+         ((void*)((PyCompactUnicodeObject*)(op) + 1)))
+
+注释上说, 返回一个元素的unicode的buffer, 然后调用的是 *((void\*)((PyCompactUnicodeObject*)(op) + 1)))*, 也就是说是unicode的下一个地址
+
+然后在debug中看到, idata的地址正好是创建的时候, writer-data的地址: 0x7ffff6bcee18
+
+PyUnicodeObject
+===================
+
+python中, 如果全都是ascii字符, 那么会返回PyASCIIObject, 如果有unicode, 那么返回compact类型的unicode对象PyCompactUnicodeObject
+
+具体的数据结构先省略
 
 
 缓存机制

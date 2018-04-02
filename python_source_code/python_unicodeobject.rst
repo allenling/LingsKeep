@@ -498,16 +498,19 @@ resize_compact则是重新分配大小, 先略过
 
 然后在debug中看到, idata的地址正好是创建的时候, writer-data的地址: 0x7ffff6bcee18, idata的接下去的地址是:
 
+.. code-block:: python
 
-(char *)idata   + 0   0x7ffff6bcee18 "1"
-((char *)idata) + 1   0x7ffff6bcee19 ""
-((char *)idata) + 2   0x7ffff6bcee1a "2"
-((char *)idata) + 3   0x7ffff6bcee1b ""
-((char *)idata) + 4   0x7ffff6bcee1c "`OìN"
-((char *)idata) + 5   0x7ffff6bcee1d "OìN"
-((char *)idata) + 6   0x7ffff6bcee1e "ìN""
-((char *)idata) + 7   0x7ffff6bcee1f "N"
-((char *)idata) + 8   0x7ffff6bcee20 ""
+    '''
+    (char *)idata   + 0   0x7ffff6bcee18 "1"
+    ((char *)idata) + 1   0x7ffff6bcee19 ""
+    ((char *)idata) + 2   0x7ffff6bcee1a "2"
+    ((char *)idata) + 3   0x7ffff6bcee1b ""
+    ((char *)idata) + 4   0x7ffff6bcee1c "`OìN"
+    ((char *)idata) + 5   0x7ffff6bcee1d "OìN"
+    ((char *)idata) + 6   0x7ffff6bcee1e "ìN""
+    ((char *)idata) + 7   0x7ffff6bcee1f "N"
+    ((char *)idata) + 8   0x7ffff6bcee20 ""
+    '''
 
 而PyUnicode_READ读取的结果则是:
 

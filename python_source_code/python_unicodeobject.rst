@@ -443,6 +443,9 @@ resize_compact则是重新分配大小, 先略过
 
 4. 最后finish的时候, 设置正确的length
 
+5. 存储的时候, 一旦有unicode, 就会变成n个字节存储一个字符, 比如'12你们', '你们'都是用两个字节, 那么本来'12'都是用一个字节, 最后也会改为两个字节,
+   也就是说存储会变为: ['1', '', '2', '', 'x1', 'x2', 'y1', 'y2]
+
 
 获取unicode的字符串
 =======================
@@ -493,7 +496,32 @@ resize_compact则是重新分配大小, 先略过
 
 注释上说, 返回一个元素的unicode的buffer, 然后调用的是 *((void\*)((PyCompactUnicodeObject*)(op) + 1)))*, 也就是说是unicode的下一个地址
 
-然后在debug中看到, idata的地址正好是创建的时候, writer-data的地址: 0x7ffff6bcee18
+然后在debug中看到, idata的地址正好是创建的时候, writer-data的地址: 0x7ffff6bcee18, idata的接下去的地址是:
+
+
+(char *)idata   + 0   0x7ffff6bcee18 "1"
+((char *)idata) + 1   0x7ffff6bcee19 ""
+((char *)idata) + 2   0x7ffff6bcee1a "2"
+((char *)idata) + 3   0x7ffff6bcee1b ""
+((char *)idata) + 4   0x7ffff6bcee1c "`OìN"
+((char *)idata) + 5   0x7ffff6bcee1d "OìN"
+((char *)idata) + 6   0x7ffff6bcee1e "ìN""
+((char *)idata) + 7   0x7ffff6bcee1f "N"
+((char *)idata) + 8   0x7ffff6bcee20 ""
+
+而PyUnicode_READ读取的结果则是:
+
+.. code-block:: python
+
+    '''
+
+    ((Py_UCS2 *)idata)[0] = 49(1)
+    ((Py_UCS2 *)idata)[1] = 50(2)
+    ((Py_UCS2 *)idata)[2] = 20320(你)
+    ((Py_UCS2 *)idata)[3] = 20204(们)
+
+    '''
+
 
 PyUnicodeObject
 ===================

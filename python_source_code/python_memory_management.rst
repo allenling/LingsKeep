@@ -208,13 +208,13 @@ cpython/PC/pyconfig.h
 
 arena是保存多个pool的地方, arena的大小是256KB, 一个pool是4kb, 那么一个arena就有64个pool.
 
-arena包含了64个pool, 每个pool都是4kb, 至于每个pool的划分大小是多少, 根据具体情况来的, 而不是说每一个arena中一定是分别有一个分配8字节的pool, 一个分配16字节的pool
+但是每个pool的划分大小是多少, 根据具体情况来的, 而不是说每一个arena中一定是分别有一个分配8字节的pool, 一个分配16字节的pool
 
 比如可能, 一个arena中64个pool都是固定分配n(比如32)字节的pool, 一个arena中有n个固定分配大小是4字节的pool, m个分配大小是64字节的pool.
 
 需要在实际拿到一个可用的pool(4kb大小)的时候, 需要对这个pool进行初始化, 也就是决定这个pool是固定分配多大的内存
 
-可用的arena, unused_arena_objects, 是areans这个全局arena数组的一部分.
+可用的arena, unused_arena_objects变量, 是areans这个全局arena数组的一部分.
 
 cpython/Objects/obmalloc.c
 
@@ -397,7 +397,7 @@ cpython/Objects/obmalloc.c
                                                  + freepool = NULL
     '''
 
-一旦address有值, 表示该arena已经分配了具体的pool的存储空间了
+一旦address有值, 表示该arena已经分配了具体的pool的存储空间(256kb)了
 
 usedpools
 ============
@@ -523,7 +523,8 @@ usedpools
 
 
 1. used, 也就是一个pool正在使用(至少有一个block已经被分配), 但是不是full状态(至少有一个block可以被分配)
-   这个状态的pool会被加入到usedpool中
+   (At least one block in the pool is currently allocated, and at least one block in the pool is not currently allocated)
+   这个状态的pool会被加入到usedpool中(It's linked to the other used pools of the same size class via the pool_header's nextpool and prevpool members)
 
 2. full, 没有可以分配的block了, 这个状态的pool会被从usedpools中移除(On transition to full, a pool is unlinked from its usedpools[] list)，
    当该pool变为不满的时候, 也就是有一个block被释放的时候, pool又会变为used状态(A free of a block in a full pool puts the pool back in the used state),

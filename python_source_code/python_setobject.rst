@@ -1,7 +1,7 @@
 set
 ======
 
-1. 和dict一样, 散列表实现, 但是没有key字典.
+1. 和dict一样, 散列表实现, hash表是一个setentry类型的数组, setentry包含了PyObject和hash, 但是没有key字典.
 
 2. 有序性是hash顺序, 因为遍历的时候是遍历hash表.
 
@@ -18,6 +18,8 @@ set
 7. 删除元素并不会缩减hash表. 这个和dict一样. 删除是把hash赋值为-1和key赋值为dummy.
 
 8. pop操作是按hash顺序找到第一个可用的key, 然后弹出.
+
+9. pop不会去减少把弹出的对象的引用计数, 而remove(删除)是会的, 这个没明白为什么
 
 
 实现思路
@@ -154,6 +156,16 @@ PySetObject
         setentry smalltable[PySet_MINSIZE];
         PyObject *weakreflist;      /* List of weak references */
     } PySetObject;
+
+hash是setentry类型的数组
+
+
+.. code-block:: c
+
+    typedef struct {
+        PyObject *key;
+        Py_hash_t hash;             /* Cached hash code of the key */
+    } setentry;
 
 
 创建set
@@ -417,66 +429,16 @@ set_add_entry
 
 寻址的时候, 线性探测总是要寻找一个空槽位置, 二次探测对于dummy也会返回
 
-1. 一开始槽位i, 不为empty, 那么是dummy吗, 是dummy的话, 记录到free_slot, 继续.
+1. 一开始槽位i, 不为empty, 那么是dummy吗, 是dummy的话, 记录到freeslot, 继续.
 
-2. 线性探测, 连续9次i+1, 但是i不变, 期间如果没有记录free_slot, 记录下来
+2. 线性探测, 连续9次i+1, 但是i不变, 期间如果没有记录freeslot, 记录下来
 
 3. 2找不到empty槽位, 那么进行一次开放地址法, 此时i变为开放地址法的下一个下标ii
 
-4. 3拿到的元素如果是可用的(包括dummy), 记为entry. 因为此时判断条件是key == NULL, 而不是hash == - 1, 则返回, 否则继续1, 此时i=ii
+4. 3拿到的元素如果是可用的槽位(判断是entry->key==NULL), 则进入5, 否则(包括dummy情况)继续1, 此时i=ii
 
-5. 4中拿到的是可用的元素, 那么先查看free_slot是否有值, 也就是是否记录了一个dummy槽位, 如果记录了, 则优先插入dummy, free_slot赋值, 否则4中的entry
-
-pop
-=====
-
-
-pop只是把槽位设置为dummy, 然后并不缩减hash大小
-
-pop的位置是finger为其实位置, 找到的第一个可用的, pop之后, finger会被设置为当前下一个位置
-
-比如finger初始化是0, 然后pop, pop位置1， 然后finger被赋值为1, 然后pop, finger被赋值为2
-
-
-.. code-block:: c
-
-    static PyObject *
-    set_pop(PySetObject *so)
-    {
-        /* Make sure the search finger is in bounds */
-        // finger初始化是0
-        Py_ssize_t i = so->finger & so->mask;
-        setentry *entry;
-        PyObject *key;
-    
-        assert (PyAnySet_Check(so));
-        if (so->used == 0) {
-            PyErr_SetString(PyExc_KeyError, "pop from an empty set");
-            return NULL;
-        }
-    
-        // 找到第一个不为dummy的key
-        // 弹出去
-        while ((entry = &so->table[i])->key == NULL || entry->key==dummy) {
-            i++;
-            if (i > so->mask)
-                i = 0;
-        }
-        // 找到了一个可用的key
-        key = entry->key;
-        // 把key设置为dummy
-        entry->key = dummy;
-        entry->hash = -1;
-        so->used--;
-
-        // finger是可用位置的下一个位置
-        so->finger = i + 1;         /* next place to start */
-        return key;
-    }
-
-1. pop的时候不去resize
-
-2. pop的时候不会减少fill, 而是只减少used
+5. 4中必须是拿到可用槽位的时候才进入5, 插入之前, 先查看freeslot是否有值, 也就是是否之前记录了一个dummy槽位, 如果记录了, 优先插入dummy, 否则插入
+   空闲位置
 
 resize
 =============
@@ -591,6 +553,60 @@ insert的时候传入的minused可能是used的两倍(used大于50000), 或者us
 
 2. fill和原来的fill相比, 可能变小, 因为原来的fill包含了dummy和used, 新的fill值包含used
 
+pop
+=====
+
+pop只是把槽位的key设置为dummy, hash设置为-1, 然后并不缩减hash大小.
+
+所以在set_add_entry中寻找可用槽位的时候, 判断如果entry->hash == -1的话说明是dummy的, 如果entry->key == NULL则是表示是未删除过的可用槽位
+
+pop的位置是finger为其实位置, 找到的第一个可用的, pop之后, finger会被设置为当前下一个位置
+
+比如finger初始化是0, 然后pop, pop位置1， 然后finger被赋值为1, 然后pop, finger被赋值为2
+
+
+.. code-block:: c
+
+    static PyObject *
+    set_pop(PySetObject *so)
+    {
+        /* Make sure the search finger is in bounds */
+        // finger初始化是0
+        Py_ssize_t i = so->finger & so->mask;
+        setentry *entry;
+        PyObject *key;
+    
+        assert (PyAnySet_Check(so));
+        if (so->used == 0) {
+            PyErr_SetString(PyExc_KeyError, "pop from an empty set");
+            return NULL;
+        }
+    
+        // 找到第一个不为dummy的key
+        // 弹出去
+        while ((entry = &so->table[i])->key == NULL || entry->key==dummy) {
+            i++;
+            if (i > so->mask)
+                i = 0;
+        }
+        // 找到了一个可用的key
+        key = entry->key;
+        // 把key设置为dummy
+        entry->key = dummy;
+        entry->hash = -1;
+        so->used--;
+
+        // finger是可用位置的下一个位置
+        so->finger = i + 1;         /* next place to start */
+        // 最后返回key, 但是没有减少key的引用计数
+        return key;
+    }
+
+1. pop的时候不去resize
+
+2. pop的时候不会减少fill, 而是只减少used
+
+3. pop的时候不会减少old_key的引用计数, 而下面的remove却是会的
 
 remove
 ==========
@@ -615,6 +631,7 @@ remove的操作和pop一样, 只是pop是python自己找key而remove是用户指
         entry->key = dummy;
         entry->hash = -1;
         so->used--;
+        // 减少old_key引用计数
         Py_DECREF(old_key);
         return DISCARD_FOUND;
     }

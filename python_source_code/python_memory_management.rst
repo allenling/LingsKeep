@@ -185,6 +185,24 @@ cpython/PC/pyconfig.h
    比如idx=3的pool划出的单位空间是32字节, 那么一个28字节的对象为了内存对齐, 则需要划出32字节, 也就是由idx为3的pool划分.
 
 
+流程小结
+===========
+
+分配流程:
+
+1. 从可用的pool(usedpools)列表中拿到指定idx的pool链表中的第一个, 如果存在pool, 则返回, 否则走2
+
+2. 如果没有可用的pool, 分一个, 走3
+
+3. 如何分? 如果有可用的arena, 从arena中分一个pool, 走4, 如果没有可用的arena, 走5
+
+4. 从可用的arena中分一个pool, 如果有回收过的pool, 空的pool, 可用的pool就是它, 如果没有, 重新划一个4kb作为可用的pool, 无论哪一种, 最后都要把可用的pool加入usedpools数组中
+
+5. 没有可用的arena, 新建一组(很多个)arena, 然后返回第一个作为可用的arena, 然后走4
+
+
+回收流程差不多, 就是反着来
+
 新分配arena
 ==============
 
@@ -319,8 +337,10 @@ cpython/Objects/obmalloc.c
 
 1. pool_address是下一个可用的pool的地址, 比如初始化下, pool_address是100, 划分了第一个pool, 然后pool_address就是下一个pool的地址, 也就是100 + 4kb
 
-2. 新的arena的freepools被设置为NULL, 表示该arena没有回收过的空间, 需要划分新的pool, 也就是需要划分下一个4kb空间
+2. 新的arena的freepools被设置为NULL, 表示该arena没有回收过pool, 需要划分新的pool, 也就是需要划分下一个4kb空间
    freepools是一个单链表, 每当arena中的一个pool被回收, 那么会加入到freepools的头部: *freepools = pool -> old_free_pools -> old_free_pools_next ->*
+   注意的是, freepools是说一个pool, 其中的block有被回收的, 并且所有的block都是可用的, 比如其中有n个block是回收了的, m个是未使用的, m可能等于0
+   更多参考下面的usedpools一节
 
 注意点:
 
@@ -510,7 +530,10 @@ usedpools
    此时会被插入到usedpools中(Then it's linked in at the front of the appropriate usedpools[] list)
    所以下一次获取block的时候, 会优先从该pool中获取(由full变为used状态)(that the next allocation for its size class will reuse the freed block)
 
-3. empty, 所有的block都是可分配状态, 也会被从usedpools中移除(On transition to empty, a pool is unlinked from its usedpools[] list)
+3. empty, 所有的block都是可分配状态(可能有n个是回收的block, 有m个是未使用的, m可能等于0), 会被从usedpools中移除(On transition to empty, a pool is unlinked from its usedpools[] list),
+   然后加入到对应的arena中的freepools这个单链表中(and linked to the front of its arena_object's singly-linked freepools list)
+   然后从arena中拿一个可用的pool的时候, 优先拿freepools(the next time a malloc finds an empty list in usedpools[], it takes the first pool off of freepools)
+   然后需要根据idx去确定是否初始化, 比如被回收的pool的idx是4, 而我们需要的pool的idx是3, 则需要把被回收的pool的idx和分配大小设置一下
 
 
 上面三个状态基本上就展示了分配的策略
@@ -839,4 +862,5 @@ init_pool
 回收内存
 ============
 
+先看参考 [1]_
 

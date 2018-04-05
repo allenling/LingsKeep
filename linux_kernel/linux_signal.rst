@@ -9,12 +9,16 @@ linux的信号流程
 
 .. [4] https://stackoverflow.com/questions/6949025/how-are-asynchronous-signal-handlers-executed-on-linux
 
+.. [5] https://unix.stackexchange.com/questions/197918/are-kernel-mode-and-user-mode-hardware-features-or-software-features
+
 
 参考1是主要参考文章
 
 参考2是liunux/unix的信号概述(ppt)
 
 参考3是简单的sigaction的代码例子
+
+参考5是用户态(user mode)和内核态(kernel mode)的简介, 用户态和内核态是硬件特性(hardware feature), 也就是需要cpu支持的.
 
 task, 进程, 线程, lwp的概念, 以及pid的代码, 参考linux_nptl.rst
 
@@ -35,14 +39,18 @@ task, 进程, 线程, lwp的概念, 以及pid的代码, 参考linux_nptl.rst
 1. 发送信号先通过pid拿到线程组, 然后选出其中一个线程/task(这里经测试, 一般是主线程, 除非主线程退出或者主动block了信号), 把信号加入到信号队列中
    这里的信号队列是线程组的shared_pending, 而不是每一个task结构自己的pending队列
 
-2. 然后唤醒对应的task, 唤醒的时候把task的thread_info.flags设置上TIF_SIGPENDING标志位
+2. 然后把目标task的thread_info.flags设置上TIF_SIGPENDING标志位
 
-3. 唤醒是通过发送中断, 内核会强行中断目标task当前的程序, 然后目标task会进入内核态, 通过判断thread_info.flasg的标志位, 发现有信号处理, 则保存当前程序的栈等信息, 然后当前
-   程序的地址切换成信号处理函数, 然后返回用户态. 判断是否有信号要处理是在返回用户态的时候判断的
+3. 唤醒是通过发送中断, 内核会 **强行** 中断目标task当前的程序, 然后目标task会进入内核态, 通过判断thread_info.flasg的标志位, 发现有信号处理, 则保存当前程序的栈等信息, 然后当前
+   程序的地址切换成信号处理函数, 然后返回用户态. 判断是否有信号要处理是在返回用户态的时候判断的. 
 
-4. 用户态执行完信号处理函数之后, 又切回内核态, 然后内核把原先保存的程序切换出来, 然后返回用户态继续处理之前的程序.
+4. 强行中断的流程是在signal_wake_up_state函数中, 其中先调用wake_up_state(t, state | TASK_INTERRUPTIBLE)去唤醒task, 如果没有进行唤醒操作, wake_up_state会返回0, 那么
+   signal_wake_up_state则判断返回0的话, 就调用kick_process函数去强制唤醒目标task. wake_up_state返回0的情况是有可能目标task是running状态, 而wake_up_state是唤醒满足条件(TASK_INTERRUPTIBLE)的
+   task, 所以判断task->state & state为假的话, 不会去执行唤醒操作的. 所以当目标task是在处理计算密集任务的时候, 也会被强制唤醒的.
 
-其中3, 4是涉及到中断的概念和内核态/用户态切换的东西, 没搞懂, 但是通过测试, 得出无论当前任务是什么任务(io等待或者cpu计算), 被发送信号之后,
+5. 用户态执行完信号处理函数之后, 又切回内核态, 然后内核把原先保存的程序切换出来, 然后返回用户态继续处理之前的程序.
+
+其中3, 5是涉及到中断的概念和内核态/用户态切换的东西, 没搞懂, 但是通过测试, 得出无论当前任务是什么任务(io等待或者cpu计算), 被发送信号之后,
 
 总会被打断, 然后切换执行信号处理函数, 信号处理函数返回之后又继续执行之前的程序, 所以3, 4可以通过测试推测出来. 
 
@@ -72,12 +80,22 @@ task, 进程, 线程, lwp的概念, 以及pid的代码, 参考linux_nptl.rst
     
     '''
 
-**最后, 一定要等待signal handler执行完, 无论之前的程序是什么操作, 比如计算, 比如等待事件发生, 都会被终止执行, signal handler返回之后, 之前的程序才能继续执行!!!**
+线程处理信号小结
+====================
 
-源码分析参考 [1]_
+1. 唤醒的一般是主线程, 无论主线程处于那种状态, 不论主线程是否占用着cpu, 比如sleep, recv/epoll, 或者计算任务(while循环)等等, 唤醒的还是主线程
+
+2. 就算是主线程和子线程都设置了信号处理函数, 唤醒的还是主线程
+
+3. 一定是要等待signal handler执行完, 无论之前的程序是什么操作, 比如计算, recv/epoll, 都会被终止执行, signal handler返回之后, 之前的程序才能继续执行!!!
+
+4. 之所以是3的情况, 是因为内核态把当前堆栈设置为信号处理函数了, 所以肯定是等待函数返回再切入内核态再切换成之前的处理函数
 
 唤醒的是哪个线程的测试
 ============================
+
+源码分析参考 [1]_
+
 
 经过测试, 无论主线程是一直占着cpu还是陷入等待(sleep), signal一般唤醒的都是主线程. 下面是测试源码
 
@@ -669,6 +687,145 @@ main中一直计算, 然后signal handler一个循环, 我们可以看到:
         printf("main return\n");
     	return 0;
     }
+
+如果主线程和子线程都设置了信号处理函数呢?
+=============================================
+
+测试下来同样的, 还是会唤醒主线程
+
+.. code-block:: c
+
+    #include <stdio.h>
+    #include <unistd.h>
+    #include <pthread.h>
+    #include <sys/mman.h>
+    #include <stdlib.h>
+    #include <sys/prctl.h>
+    #include <sys/types.h>
+    #include <sys/wait.h>
+    #include <sys/stat.h>
+    #include <fcntl.h>
+    #include <sys/ioctl.h>
+    #include <stdio.h>
+    #include <sys/socket.h>
+    #include <sys/types.h>
+    #include <string.h>
+    #include <netinet/in.h>
+    #include <stdlib.h>
+    #include <errno.h>
+    #include <unistd.h>
+    #include <arpa/inet.h>
+     
+     
+    void handler(int signo, siginfo_t *info, void *extra) 
+    {
+    	int i;
+        pthread_t   tid;
+        tid = pthread_self();
+    	for(i=0;i<10;i++)
+    	{
+            printf("signal in %ld\n", (long) tid);
+    		sleep(2);
+    	}
+    }
+     
+    void my_set_sig_handler(void)
+    {
+            struct sigaction action;
+     
+     
+            action.sa_flags = SA_SIGINFO; 
+            action.sa_sigaction = handler;
+     
+            if (sigaction(SIGRTMIN + 3, &action, NULL) == -1) { 
+                perror("sigusr: sigaction");
+                _exit(1);
+            }
+     
+    }
+     
+    void *threadfn1(void *p)
+    {
+        // 子线程设置信号
+        my_set_sig_handler();
+        pthread_t   tid;
+        tid = pthread_self();
+        long ltid = (long)tid;
+    	while(1){
+    		printf("thread1 %ld\n", ltid);
+    		sleep(2);
+    	}
+    	return 0;
+    }
+     
+    void *threadfn2(void *p)
+    {
+    	while(1){
+    		printf("thread2\n");
+    		sleep(2);
+    	}
+    	return 0;
+    }
+     
+    void *threadfn3(void *p)
+    {
+    	while(1){
+    		printf("thread3\n");
+    		sleep(2);
+    	}
+    	return 0;
+    }
+     
+    int main()
+    {
+    	pthread_t t1,t2,t3;
+        pthread_t   tid;
+        tid = pthread_self();
+        printf("main is %ld\n", (long)tid);
+    	pthread_create(&t1,NULL,threadfn1,NULL);
+    	pthread_create(&t2,NULL,threadfn2,NULL);
+    	pthread_create(&t3,NULL,threadfn3,NULL);
+        // 主线程设置信号处理函数
+    	my_set_sig_handler();
+        int count = 0;
+        while (1) {
+            count += 1;
+        }
+    	// pthread_exit(NULL);
+    	return 0;
+    }
+
+下面是输出
+
+.. code-block:: python
+
+    '''
+    
+    main is 139817114892032
+    thread1 139817106614016
+    thread2
+    thread3
+    thread1 139817106614016
+    thread2
+    thread3
+    thread1 139817106614016
+    thread2
+    thread3
+    thread1 139817106614016
+    thread2
+    thread3
+    signal in 139817114892032
+    thread1 139817106614016
+    thread2
+    thread3
+    signal in 139817114892032
+    thread1 139817106614016
+    thread2
+    thread3
+    
+    '''
+
+说明被唤醒的还是主线程
 
 man手册的解释
 ================
@@ -1267,6 +1424,75 @@ signal_wake_up
     		kick_process(t);
     }
 
+先设置thread_info的flag加上TIF_SIGPENDING, 然后调用wake_up_state, wake_up_state是唤醒满足指定状态的task(通过和task->state做&运算)
+
+如果传入signal_wake_up中的resume是1, 那么传入signal_wake_up_state中的state就是TASK_WAKEKILL, 也就是强制唤醒, 但是至少是TASK_INTERRUPTIBLE状态的task
+
+一般的信号(非sigkill), 那么传给wake_up_state的就是要唤醒处于TASK_INTERRUPTIBLE状态的task.
+
+但是如果目标task不是TASK_INTERRUPTIBLE状态, 比如正在密集计算, 那么是不会去做唤醒处理的, 也就是wake_up_state返回0
+
+这个时候需要调用kick_process去强制唤醒, 让目标task进入内核态
+
+wake_up_state
+=================
+
+
+https://elixir.bootlin.com/linux/v4.15/source/kernel/sched/core.c#L2155
+
+.. code-block:: c
+
+    int wake_up_state(struct task_struct *p, unsigned int state)
+    {
+    	return try_to_wake_up(p, state, 0);
+    }
+
+而try_to_wake_up则是去唤醒满足状态的task, 看看注释说如果目标task不满足传入的state, 那么会返回0
+
+.. code-block:: c
+
+    /*
+     * Return: %true if @p->state changes (an actual wakeup was done),
+     *	   %false otherwise.
+     */
+    static int
+    try_to_wake_up(struct task_struct *p, unsigned int state, int wake_flags)
+    {
+        int cpu, success = 0;
+        if (!(p->state & state))
+            goto out;
+
+
+        success = 1;
+
+        return success;
+    
+    }
+
+也就是如果判断p->state & state, 如果p->state不包含state, 那么返回success=0
+
+而kick_process则是强制目标task进入内核态的
+
+.. code-block:: c
+
+    /***
+     * kick_process - kick a running thread to enter/exit the kernel  <----看这里!!
+     * @p: the to-be-kicked thread
+     *
+     * Cause a process which is running on another CPU to enter
+     * kernel-mode, without any delay. (to get signals handled.)
+     *
+     * NOTE: this function doesn't have to take the runqueue lock,
+     * because all it wants to ensure is that the remote task enters
+     * the kernel. If the IPI races and the task has been migrated
+     * to another CPU then no harm is done and the purpose has been
+     * achieved as well.
+     */
+    void kick_process(struct task_struct *p)
+    {
+
+    }
+
 
 do_signal/handle_signal
 ==========================
@@ -1322,6 +1548,10 @@ do_signal/handle_signal
 的thread_info中的flags中的第i位置1, 也就是flag中第TIF_SIGPENDING位为1, 也就是100, 也就是等于_TIF_SIGPENDING = 1 << 2.
 
 **上面的过程是推测, set_bit是使用cpu指令的, 没太看懂.**
+
+然后do_signal则是会去处理task->pending上的信号, 然后创建信号处理函数的堆栈, 保存当前用户态的堆栈, 然后把当前用户态的堆栈设置为信号处理函数
+
+然后退回到用户态中, 这样就可以执行函数处理函数了. 这一块设计用户态和内核态的切换, 没怎么看懂.
 
 
 sigaction

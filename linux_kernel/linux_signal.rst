@@ -11,6 +11,8 @@ linux的信号流程
 
 .. [5] https://unix.stackexchange.com/questions/197918/are-kernel-mode-and-user-mode-hardware-features-or-software-features
 
+.. [6] http://minnie.tuhs.org/CompArch/Lectures/week05.html
+
 
 参考1是主要参考文章
 
@@ -18,7 +20,9 @@ linux的信号流程
 
 参考3是简单的sigaction的代码例子
 
-参考5是用户态(user mode)和内核态(kernel mode)的简介, 用户态和内核态是硬件特性(hardware feature), 也就是需要cpu支持的.
+参考5, 6是用户态(user mode)和内核态(kernel mode)的简介, 用户态和内核态是硬件特性(hardware feature), 这是cpu支持的, 也就是cpu设置权限隔离, 隔离各种类型(user mode/kernel mode)的task
+
+所以, 联想一下之前英特尔的spectre和meltdown漏洞, 可以大概了解为什么
 
 task, 进程, 线程, lwp的概念, 以及pid的代码, 参考linux_nptl.rst
 

@@ -7,12 +7,190 @@
 Lock
 ======
 
-threading.Lock在C代码是用一个计数为1的semaphore来实现的, 其中代码里面的PyThread_type_lock是指向任意值的指针
+Lock在linux中具体实现取决于是否配置了POSIX的semaphore支持, 如果配置了, 则Lock是一个计数为1的semaphore实现, 否则是一个用condtion去模拟semaphore
+
+threading.Lock是一个_thread.allocate_lock函数:
+
+.. code-block:: python
+
+    In [28]: threading.Lock?
+    Docstring:
+    allocate_lock() -> lock object
+    (allocate() is an obsolete synonym)
+    
+    Create a new lock object. See help(type(threading.Lock())) for
+    information about locks.
+    Type:      builtin_function_or_method
+
+而在threading.py中, 有Lock = allocate_lock
+
+.. code-block:: python
+
+    # 这里, _allocate_lock函数指向_thread.allocate_lock函数
+    _allocate_lock = _thread.allocate_lock
+    
+    // 所以, 这里的Lock = _thread.allocate_lock
+    Lock = _allocate_lock
+    
+    所以, allocate_lock返回的是一个lock object
+
+而_thread是cpython/Modules/_threadmodules.c, 其中allocate_lock则是thread_PyThread_allocate_lock函数
 
 .. code-block:: c
 
-    // cpython/include/pythread.h
+    static PyMethodDef thread_methods[] = {
+        {"allocate_lock",           (PyCFunction)thread_PyThread_allocate_lock,
+         METH_NOARGS, allocate_doc},
+    };
+
+所以调用 *threading.Lock()* 就是调用thread_PyThread_allocate_lock函数
+
+
+.. code-block:: c
+
+    static PyObject *
+    thread_PyThread_allocate_lock(PyObject *self)
+    {
+        return (PyObject *) newlockobject();
+    }
+
+lockobject对象
+
+.. code-block:: c
+
+    typedef struct {
+        PyObject_HEAD
+        PyThread_type_lock lock_lock;
+        PyObject *in_weakreflist;
+        char locked; /* for sanity checking */
+    } lockobject;
+
+其中, PyThread_type_lock类型的lock_lock属性就是具体的锁了, 但是PyThread_type_lock的类型是一个任意类型的指针!!!!
+
+.. code-block:: c
+
     typedef void *PyThread_type_lock;
+
+所以这个lock_lock是什么, 依赖于具体实现了, 在linux下, 自然是pthread的lock了, 继续往下看
+
+newlockobject函数
+
+.. code-block:: c
+
+    static lockobject *
+    newlockobject(void)
+    {
+        lockobject *self;
+        self = PyObject_New(lockobject, &Locktype);
+        if (self == NULL)
+            return NULL;
+
+        // 这里具体分配一个lock
+        self->lock_lock = PyThread_allocate_lock();
+        self->locked = 0;
+        self->in_weakreflist = NULL;
+        if (self->lock_lock == NULL) {
+            Py_DECREF(self);
+            PyErr_SetString(ThreadError, "can't allocate lock");
+            return NULL;
+        }
+        return self;
+    }
+   
+
+所以lock_lock是依赖于具体的PyThread_allocate_lock的实现, python中, 线程包含了pthread和nt(windows平台)的实现, 那么在linux下, 自然是pthread了.
+
+所以这个PyThread_allocate_lock自然是pthread的实现, 在文件cpython/Python/thread_pthread.h中, 并且取决于宏_POSIX_SEMAPHORES
+
+如果定义了盖宏, 那么Lock则是计数为1的semaphore, 否则使用一个condtion去模拟:
+
+
+.. code-block:: c
+
+    // _POSIX_SEMAPHORES决定了USE_SEMAPHORES宏
+
+    #if (defined(_POSIX_SEMAPHORES) && !defined(HAVE_BROKEN_POSIX_SEMAPHORES) && \
+         defined(HAVE_SEM_TIMEDWAIT))
+    #  define USE_SEMAPHORES
+    #else
+    #  undef USE_SEMAPHORES
+    #endif
+
+    // 如果定义了posix semaphore支持
+    #ifdef USE_SEMAPHORES
+    
+    PyThread_type_lock
+    PyThread_allocate_lock(void)
+    {
+        // lock是一个sem_t结构
+        sem_t *lock;
+
+        sem_t *lock;
+        int status, error = 0;
+
+        dprintf(("PyThread_allocate_lock called\n"));
+        if (!initialized)
+            PyThread_init_thread();
+
+        lock = (sem_t *)PyMem_RawMalloc(sizeof(sem_t));
+
+        if (lock) {
+            // 使用sem_init去初始化计数为1
+            status = sem_init(lock,0,1);
+            CHECK_STATUS("sem_init");
+
+            if (error) {
+                PyMem_RawFree((void *)lock);
+                lock = NULL;
+            }
+        }
+
+        dprintf(("PyThread_allocate_lock() -> %p\n", lock));
+        return (PyThread_type_lock)lock;
+    
+    }
+
+    // 没有内置的POSIX semaphore支持, 则使用一个模拟的
+    #else /* USE_SEMAPHORES */
+
+    PyThread_type_lock
+    PyThread_allocate_lock(void)
+    {
+        // 一个pthread_lock结构:
+        pthread_lock *lock;
+        int status, error = 0;
+    
+        dprintf(("PyThread_allocate_lock called\n"));
+        if (!initialized)
+            PyThread_init_thread();
+    
+        lock = (pthread_lock *) PyMem_RawMalloc(sizeof(pthread_lock));
+        if (lock) {
+            memset((void *)lock, '\0', sizeof(pthread_lock));
+            lock->locked = 0;
+    
+            // 下面就是初始化condtion的过程了
+            // 省略代码
+        }
+    
+        dprintf(("PyThread_allocate_lock() -> %p\n", lock));
+        return (PyThread_type_lock) lock;
+    }
+
+    // 具体的锁结构
+    // 使用condtion来实现
+    typedef struct {
+        char             locked; /* 0=unlocked, 1=locked */
+        /* a <cond, mutex> pair to handle an acquire of a locked lock */
+        pthread_cond_t   lock_released;
+        pthread_mutex_t  mut;
+    } pthread_lock;
+
+
+sem_t的操作
+=============
+
+如果配置了_POSIX_SEMAPHORES, 那么锁的操作都是sem_等等函数
 
 acquire lock, 也就是调用sem_wait(还有其他sem函数)的时候可能:
 
@@ -25,100 +203,19 @@ acquire lock, 也就是调用sem_wait(还有其他sem函数)的时候可能:
 sem_post则是把semaphore的计数加1, 然后发送一个中断, 好让sem_wait(等等)函数捕获到
 
 
-创建新的lock object
-----------------------
-
-cpython/Modules/_threadmodule.c
-
-.. code-block:: c
-
-    // lockobject的结构体
-    typedef struct {
-        PyObject_HEAD
-        PyThread_type_lock lock_lock;
-        PyObject *in_weakreflist;
-        char locked; /* for sanity checking */
-    } lockobject;
-
-    static PyObject *
-    thread_PyThread_allocate_lock(PyObject *self)
-    {
-        return (PyObject *) newlockobject();
-    }
-
-    // 创建lock的函数
-    static lockobject *
-    newlockobject(void)
-    {
-        lockobject *self;
-        self = PyObject_New(lockobject, &Locktype);
-        if (self == NULL)
-            return NULL;
-        // 分配锁的内存
-        self->lock_lock = PyThread_allocate_lock();
-        // 是否被锁住
-        self->locked = 0;
-        self->in_weakreflist = NULL;
-        if (self->lock_lock == NULL) {
-            Py_DECREF(self);
-            PyErr_SetString(ThreadError, "can't allocate lock");
-            return NULL;
-        }
-        return self;
-    }
-
-PyThread_allocate_lock
-------------------------
-
-linux下就是pthread的allocate_lock
-
-cpython/Python/thread_pthread.h
-
-基本上就是分配个lock结构出来
-
-.. code-block:: c
-
-    PyThread_type_lock
-    PyThread_allocate_lock(void)
-    {
-        // sem_t是一个semaphore结构体
-        sem_t *lock;
-        int status, error = 0;
-    
-        dprintf(("PyThread_allocate_lock called\n"));
-        // 或许可以初始化一下线程
-        if (!initialized)
-            PyThread_init_thread();
-        // 这个分配下锁结构体的内存 
-        lock = (sem_t *)PyMem_RawMalloc(sizeof(sem_t));
-    
-        if (lock) {
-            // 这里sme_init就是初始化一个semaphore
-            // 第二个参数为0表示是在线程之前共享, 1表示是进程间共享
-            // 最后一个参数就是semaphore的初始化个数, 这里为1
-            status = sem_init(lock,0,1);
-            CHECK_STATUS("sem_init");
-    
-            if (error) {
-                PyMem_RawFree((void *)lock);
-                lock = NULL;
-            }
-        }
-    
-        dprintf(("PyThread_allocate_lock() -> %p\n", lock));
-        // 返回个lock对象指针吧?c语言忘得差不多了, 不太记得了
-        // 好像void表示的是无类型指针, 所以可以返回一个指向任意类型的指针, 好像是这样
-        return (PyThread_type_lock)lock;
-    }
-
-
-
 acquire 
----------------
+===============
 
 cpython/Modules/_threadmodule.c
 
+锁方法的定义中, acquire指向lock_PyThread_acquire_lock
+
 .. code-block:: c
+
+    static PyMethodDef lock_methods[] = {
+        {"acquire",      (PyCFunction)lock_PyThread_acquire_lock,
+         METH_VARARGS | METH_KEYWORDS, acquire_doc},
+    };
 
     static PyObject *
     lock_PyThread_acquire_lock(lockobject *self, PyObject *args, PyObject *kwds)
@@ -141,34 +238,86 @@ cpython/Modules/_threadmodule.c
     }
 
 acquire_timed
-----------------
+================
 
 cpython/Modules/_threadmodule.c
 
+先看看PyLockStatus, 这个结构枚举了所有拿锁返回的状态
+
+.. code-block:: c
+
+    typedef enum PyLockStatus {
+        PY_LOCK_FAILURE = 0,
+        PY_LOCK_ACQUIRED = 1,
+        PY_LOCK_INTR
+    } PyLockStatus;
+
+
+所以, 0是拿锁失败, 1是拿锁成功, 和被中断, 被中断是用PY_LOCK_INTR表示
 
 .. code-block:: c
 
     static PyLockStatus
     acquire_timed(PyThread_type_lock lock, _PyTime_t timeout)
     {
-        // 如果timeout大于0, 那么计算一下结束时间
+        PyLockStatus r;
+        _PyTime_t endtime = 0;
+        _PyTime_t microseconds;
+    
+        // 如果timeout, 计算下绝对时间
         if (timeout > 0)
             endtime = _PyTime_GetMonotonicClock() + timeout;
     
         do {
-            // 这里先直接去那锁, 万一就拿到了呢?
+            microseconds = _PyTime_AsMicroseconds(timeout, _PyTime_ROUND_CEILING);
+    
+            /* first a simple non-blocking try without releasing the GIL */
+            // 先别释放GIL, 直接拿锁, 万一一下子就拿到呢
             r = PyThread_acquire_lock_timed(lock, 0, 0);
+            // r!=0, 表示没拿到锁, 则直接调用PyThread_acquire_lock_timed去拿锁
             if (r == PY_LOCK_FAILURE && microseconds != 0) {
-                // 这里的话, 直接获取锁失败了~~~
-                // 保存线程状态, 然后调用PyThread_acquire_lock_timed
+                // 下面两个宏是去释放GIL的
                 Py_BEGIN_ALLOW_THREADS
                 r = PyThread_acquire_lock_timed(lock, microseconds, 1);
                 Py_END_ALLOW_THREADS
-    	    }
-        }
+            }
+    
+            // 如果是被中断了
+            if (r == PY_LOCK_INTR) {
+                /* Run signal handlers if we were interrupted.  Propagate
+                 * exceptions from signal handlers, such as KeyboardInterrupt, by
+                 * passing up PY_LOCK_INTR.  */
+                // 如果是被信号中断了, 则返回被中断
+                if (Py_MakePendingCalls() < 0) {
+                    return PY_LOCK_INTR;
+                }
+    
+                /* If we're using a timeout, recompute the timeout after processing
+                 * signals, since those can take time.  */
+                if (timeout > 0) {
+                    timeout = endtime - _PyTime_GetMonotonicClock();
+    
+                    /* Check for negative values, since those mean block forever.
+                     */
+                    if (timeout < 0) {
+                        r = PY_LOCK_FAILURE;
+                    }
+                }
+            }
+        } while (r == PY_LOCK_INTR);  /* Retry if we were interrupted. */
+    
+        return r;
     }
 
-这里的Py_BEGIN_ALLOW_THREADS和Py_END_ALLOW_THREADS这两个宏呢得一起使用, 把中间的代码给包起来的, 目的是中间代码执行之前
+
+1. 先别释放GIL, 直接调用PyThread_acquire_lock_timed去立即拿锁, 其中传入的timeout是0, 也就是不管拿没拿到, 立即返回
+   这样是说如果一般情况下是不需要等待就可以拿锁的, 所以可以先试一下
+
+2. 如果1没有拿到锁, 则调用PyThread_acquire_lock_timed, 传入timeout去拿锁, 其中需要调用宏Py_BEGIN_ALLOW_THREADS/Py_END_ALLOW_THREADS去释放GIL
+
+3. 如果2中返回值是被中断状态, 那么先判断是不是被信号打断, 是的话返回中断状态给调用者, 如果不是被信号中断状态, 并且timeout>0, 则需要重新计算timeout
+
+这里的Py_BEGIN_ALLOW_THREADS和Py_END_ALLOW_THREADS这两个宏得一起使用, 把中间的代码给包起来的, 目的是中间代码执行之前
 
 保存当前进程的状态, 释放gil, 执行后加载线程状态, 获取gil, 参考 `这里 <https://docs.python.org/3/c-api/init.html#c.Py_BEGIN_ALLOW_THREADS`_
 
@@ -198,9 +347,13 @@ cpython/Python/ceval.c
 
 
 PyThread_acquire_lock_timed
------------------------------
+=============================
 
-这个函数就是一直while去获取锁的了
+显然, 取决于_POSIX_SEMAPHORES的宏定义, PyThread_acquire_lock_timed实现是不同的
+
+下面是使用semaphore实现的获取过程, 如果是使用conditon来模拟的, 流程也差不多, 只是需要自己的锁一下condition的mutex, 然后根据情况使用
+
+pthread_cond_timedwait等待释放锁通知
 
 cpython/Python/thread_pthread.h
 
@@ -283,9 +436,9 @@ cpython/Python/thread_pthread.h
 然后此时sem_wait将会得到中断, 也就是error.EINTR, 然后会去竞争semaphore, 如果竞争不到, 继续, 直到有返回值.
 
 release
------------
+===========
 
-release比较简单, 调用sem_post释放semaphore就好了
+release比较简单, 这里只看调用sem_post释放semaphore的流程
 
 cpython/Modules/_threadmodule.c
 
@@ -349,7 +502,7 @@ threading.RLock返回的是一个C定义的rlcok.
 
 
 python实现的RLock
--------------------
+===================
 
 python实现的RLock是threading.RLock类
 
@@ -388,7 +541,7 @@ python实现的RLock是threading.RLock类
 
 
 C实现的RLock
----------------
+===============
 
 流程差不多, 只是是C代码实现的而已
 
@@ -406,7 +559,7 @@ cpython/Modules/_threadmodule.c
     } rlockobject;
 
 acquire
-------------
+============
 
 
 cpython/Modules/_threadmodule.c
@@ -454,7 +607,7 @@ cpython/Modules/_threadmodule.c
     }
 
 release
----------
+=========
 
 cpython/Modules/_threadmodule.c
 
@@ -495,8 +648,8 @@ Event
 **Event也是用Condition来实现**, set的是就是notifiy_all来唤醒所有的线程
 
 
-初始化
---------
+初始化EVENT
+=============
 
 event是由带一个互斥锁的condition, 和一个flag来实现的
 
@@ -517,7 +670,7 @@ event是由带一个互斥锁的condition, 和一个flag来实现的
 也就是说Condition看起来又不是互斥的, 但是Condition带的锁确实互斥锁, 怎么理解?
 
 condtion在哪里互斥?
----------------------------
+===========================
 
 set和wait都会调用Condition.\_\_enter\_\_, 那么会互斥吗?
 
@@ -545,11 +698,9 @@ set和wait都会调用Condition.\_\_enter\_\_, 那么会互斥吗?
 如果debug进去的话，可以看到当一个线程调用set, 然后阻塞的时候, 另外一个线程调用set, 可以看到, **此时的self._cond的lock却是unlocked的~~说明wait的时候, 必然释放了锁!!!**
 
 wait释放锁互斥锁
---------------------
-
+====================
 
 event.wait会调用condtion.wait, Condition.wait里面就释放了互斥锁了.
-
 
 下面的Condition._is_owned和Condition._release_save这两个方法只有在Condition._lock不存在这两个方法的时候, 才会调用到,
 
@@ -609,16 +760,13 @@ event.wait会调用condtion.wait, Condition.wait里面就释放了互斥锁了.
                     pass
 
 set会一直互斥
----------------
+===============
 
 set的调用的话, 知道condtion.notify_all调用完成, 才会释放锁, 然后把flag置为True, 其他wait看到True直接返回, 接着一个个去通知等待的线程(确切的说是等待释放的锁)
 
 这也合理, 不然我已经notify所有的waiter了, 然后你又重新wait, 这样就漏掉了一个没有notify了
 
 所以notify_all会检查自己是否拿了锁, 没拿报错
-
-
-
 
 .. code-block:: python
 
@@ -664,11 +812,6 @@ Semaphore
 
 queue.Queue
 =============
-
-队列的实现
-
-初始化
----------
 
 初始化包括存储数据的deque(fifo结构), 以及get, put, not_full, not_empty, all_tasks_done等所需要的Condition.
 
@@ -718,7 +861,7 @@ self.mutex, 所以可以有多个线程去进行get, put. join操作的wait, 但
             self.queue = deque()
 
 put
-------
+======
 
 获取not_full这个Condition, 并且操作完成之前是不会释放掉Condition的, 所以如果没有满, 那么直接_put然后退出解锁
 
@@ -768,7 +911,7 @@ get调用not_full.notify通知可以put
             self.not_empty.notify()
 
 get
--------
+=======
 
 和put差不多, 只不过把not_full缓存了not_empty!!
 

@@ -1,8 +1,12 @@
 Thread
 =============
 
-python代码实现
-=================
+先看python代码实现, 再看C代码实现
+
+----
+
+Python实现
+====================
 
 _active_limbo_lock
 ======================
@@ -119,13 +123,13 @@ start
             # 也就是说只有self._bootstrap被调用, _bootstrap会直接调用_bootstrap_inner, 才算被调度了
             self._started.wait()
 
+
 _bootstrap
 =============
 
 这个方法是thread被os调度的时候执行的方法
 
-
-注释里面说明了try, raise的意义, 也就是说如果thread是_daemonic的, 那么有可能在某一个错误的时间点(at an unfortunate moment),
+在Thread._bootstrap函数中的注释里面说明了try, raise的意义, 也就是说如果thread是_daemonic的, 那么有可能在某一个错误的时间点(at an unfortunate moment),
 
 daemon线程被调度的时候发现解释器环境已经被回收清除了(finds the world around it destroyed), 然后会产生一些
 
@@ -303,9 +307,11 @@ _stop是检查线程是否是终止状态, 并不是去终止异常, 并且如�
 
 其实这个思路和curio的cancel差不多, 都是往task(thread/coroutine)里面加入excpetion, 当被调度到的时候, 检查下当前
 
-的task是否有异常, 是不是被终止或者被cancel(CancellError), 是的话, 引发然后退出.
+的task是否有异常, 是不是被终止或者被cancel(CancellError), 是的话, 引发然后退出. 不同的是, curio的kernel则是在你发送异常给
 
-`dramatiq <https://github.com/allenling/magne/tree/master/magne/thread_worker/how_rabbitpy_dramatiq_works.rst>`_ 方式也是这样的
+task的时候, 会直接去终止task, 而python自己的解释器则必须等待字节码执行完毕, curio的kernel的角色就像是linux的kernel了.
+
+发送异步异常的方式在`dramatiq <https://github.com/allenling/magne/tree/master/magne/thread_worker/how_rabbitpy_dramatiq_works.rst>`_ 也有使用
 
 这样引发异常的好处是可以让线程可以在异常的时候去clean up.
 
@@ -479,9 +485,12 @@ PyEval_InitThreads
 
 cpython/Python/ceval.c
 
-功能主要是: 如果当前是主线程的初始化, 那么创建gil, 并且获取gil
 
-如果不是主线程的初始化, 那么会在调用t_bootstrap的时候去获取gil
+如果gil已经被创建过了, 那么退出, 否则创建gil
+
+这个函数就是校验一下gil的状态而已, 并没有说去获取gil
+
+因为调用者已经拿到gil(必须的), 这里再拿就错误了呀!!!!
 
 .. code-block:: c
 
@@ -602,6 +611,7 @@ cpython/Modules/_threadmodule.c
         PyObject *res;
     
         tstate = boot->tstate;
+        // 设置线程结构tstate中的indent属性
         tstate->thread_id = PyThread_get_thread_ident();
         _PyThreadState_Init(tstate);
 
@@ -833,7 +843,7 @@ release_sentinel这个函数是在tstate->on_delete_data被删除的时候调用
         lockobject *lock;
         if (obj != Py_None) {
             assert(Py_TYPE(obj) == &Locktype);
-            // C的知识忘了, 这里应该是把obj强制转换成lockobject这个类型
+            // 转成lockobject类型
             lock = (lockobject *) obj;
             if (lock->locked) {
                 // 释放掉tstate->on_delete_data这个锁

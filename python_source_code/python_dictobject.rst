@@ -9,8 +9,6 @@ python3.6的实现
 
 3. 字典只会在添加k/v的时候扩张key数组长度, 但是删除操作不会缩减key数组, resize只针对key数组, hash表不会resize, 只有hash mask会变化.
 
-   为什么不缩减数组长度呢? 注释说缩减要考虑到keys数组, 不好操作. 
-
 4. 插入的时候, 会优先插入到dummy槽位, 和set一样, 但是不管插入的是empty还是dummy, usable总是减少1, 而set插入dummy的时候, fill不变.
 
 5. resize的条件是可用空间(usable)为0, 也就是数组长度的2/3已经被使用, 那么扩容
@@ -24,6 +22,9 @@ python3.6的实现
 9. dict根据key的不一样有不同的搜索策略
 
 10. py2和3中, 调用dict函数和调用{}创建字典的区别和性能.
+
+11. 感觉比较奇怪的是为什么dict中就算占据了dummy的槽位, 依然会减少usable的值, 这样dict很容易就增加, 但是set中占据dummy并不会
+    增加fill数据. 个人感觉占据dummy槽位的话比减少可用槽位的个数比较好一点.
 
 
 

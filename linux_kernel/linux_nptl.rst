@@ -37,7 +37,7 @@ Linux的pthread(nptl)
 
 参考7中对pthread的创建过程源码有一部分跟4.15的有区别, 注意一下
 
-参考8有关于ARCH_CLONE的解释, 以及clone_flags等其他参数的一些解释
+参考8有关于ARCH_CLONE的解释, 以及clone_flags等其他参数的一些解释, 以及nptl在创建的时候, 堆栈的创建和释放的一些简要说明
 
 参考9是pthread下的同步机制
 
@@ -458,8 +458,10 @@ task结构属性很多, 下面通过clone的代码流程去了解创建线程的
    这里的pid号是task结构的, 也就是内核中每一个task都有自己的pid(叫pid是因为内核之前只有进程而没有线程), 但是
    现在称为tid可能更合适一些.
 
-2. thread_info, thread_group, thread_info是该task的一些标志位, 比如是否有待处理信号, 则是通过该标志位是否置位有关, thread_group是线程的链表
-   而thread_group是一个双链表结构, 如果是创建线程, 那么会把task的thread_group加入到主线程的thread_group中.
+2. thread_info, thread_group和group_leader
+   thread_info是该task的一些标志位, 比如是否有待处理信号, 则是通过该标志位是否置位有关
+   thread_group一个双链表结构, 把所有的线程都聚在一个链表中. 如果是创建线程, 那么会把task的thread_group加入到主线程的thread_group中.
+   group_leader则是线程组的主线程, 每一个子线程都会记录下group_leader
 
 3. tgid, 也就是thread group id, 就是我们ps出来的pid, 同一个进程的线程们tgid都是主线程的pid, 用户看到的pid就是这个tgid
 
@@ -643,7 +645,7 @@ pid_nr拿到pid结构的pid号(全局)
 
 
 pid_task
-------------
+============
 
 这个去是task结构中的tasks指向的hash表中, 根据传入的类型, 找到该第一个task(有点绕听起来)
 
@@ -676,7 +678,7 @@ pid_task
 
 新建一个pid结构的时候, 全局一个, 然后其每一个层级, 也就是父namespace, 都要映射一个
 
-**注意的是, 这里只是分配新的pid而已, 并没有把pid和task对应起来, 对应起来是上一层, 也就是copy_process做的事情**
+**注意的是, 这里只是分配新的pid而已, 并没有把pid和task对应起来, 把两者对应起来(attach操作)是上一层, 也就是copy_process做的事情**
 
 所以, 这里只是把pid结构中的tasks属性初始化而已
 
@@ -791,8 +793,9 @@ pid_task
 
 3. 分配之后, 保存在pid这个结构的numbers数组中
 
-4. 注意的是, 在for循环里面只是新建了对应namespace的pid数字, 然后在最后的for循环里面才会把
-   对应的namespace下, 对应的pid数字对应的pid结构加入到其idr属性上
+4. 注意的是, 在for循环里面只是新建了对应namespace的pid数字, 相当于从idr这个基数树中拿了一个数字, 但是没有把数字和pid结构给连接起来
+   然后在最后的for循环里面, 调用idr_replace去把每一级namespace中, idr这个基数树中的数字(nr)和pid对应起来
+   也就是说, 拿一个pid号对应的pid结构, 就是在命名空间中的idr搜索pid号, 然后就拿到对应的pid结构了
 
 
 idr_alloc_cyclic
@@ -840,7 +843,7 @@ idr_alloc_cyclic
     }
     EXPORT_SYMBOL(idr_alloc_cyclic);
 
-加入start=1, 也就是alloc_pid中的传参, 那么找不到比idr当前大的, 可用的pid数字, 那么就从start开始, 也就是从1开始找, 也就是
+传入的start=pid_min=1, 也就是alloc_pid中的传参, 那么找不到比idr当前大的, 可用的pid数字, 那么就从start开始, 也就是从1开始找, 也就是
 
 和注释上的流程.
 

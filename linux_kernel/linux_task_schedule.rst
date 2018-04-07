@@ -175,9 +175,9 @@ cpu亲和性
 而linux的线程的实现是glibc下的nptl实现的, 具体参考: glibc_nptl.rst
 
 KThread
----------------
+===============
 
-KThread是内核线程.
+KThread是内核态线程, 是内核创建的task结构.
 
 内线线程和lwp有区别是两个意思: lwp(task)是内核的调度单位, 内核线程也是对应一个task结构, 只是内核线程只能由内核去管理, 用户是终止不了的.
 
@@ -866,6 +866,98 @@ a, b两个任务, 优先级都是0, 两人的load weight都是1024, 然后占cpu
 
 *A process scheduler’s job is to pick one task from a queue and assign it to run on a respective CPU(core).*
 
+调用路径
+====================
+
+从具体调用去看调度的流程, 下面是一些调用路径的总结
+
+
+1. clone(_do_fork)中的调用:
+
+.. code-block:: python
+
+    '''
+    _do_fork -> copy_process     -> sched_fork         -> place_entity (cfs一些补偿操作)
+
+             -> wake_up_new_task -> activate_task      -> enqueue_task                   -> enqueue_task_fair (cfs)
+
+                                 -> check_preempt_curr -> check_preempt_wakeup (cfs)
+    '''
+
+2. epoll的唤醒中, 先把把current加入到waitqueue中之后, 初始化默认的回调函数, 就是默认的唤醒函数default_wake_function, 该函数调用try_to_wake_up
+
+.. code-block:: python
+
+    '''
+    try_to_wake_up -> ttwu_queue -> ttwu_do_activate -> ttwu_active    -> activate_task(看上面)
+
+                                                     -> ttwu_do_wakeup -> check_preempt_curr(看上面)
+    
+    
+    '''
+
+
+3. epoll中休眠等待事件发生, 是调用schedule_hrtimeout_range去休眠放弃cpu的, schedule_hrtimeout_range调用的是schedule函数
+
+.. code-block:: python
+
+    '''
+    
+    schedule -> __schedule -> deactivate_task -> dequeue_task               -> dequeue_task_fair (cfs)
+
+                           -> pick_next_task  -> pick_next_task_fair (cfs)
+
+                           -> context_switch (if prev != next)
+    
+    
+    '''
+
+
+4. enqueue的流程:
+
+.. code-block:: python
+
+    '''
+    
+    enqueue_task_fair -> enqueue_entity -> update_curr
+                                        
+                                        -> place_entity
+    
+                                        -> __enqueue_entity
+    
+    
+    '''
+
+
+5. check_preempt_curr流程
+
+.. code-block:: python
+
+    '''
+    
+    check_preempt_curr -> check_preempt_wakeup (cfs) -> update_curr
+                     
+                                                    -> resched_curr(rq)
+    
+    
+    '''
+
+
+6. pick_next_task流程
+
+    .. code-block:: c
+    
+    pick_next_task -> pick_next_entity
+    
+                   -> put_prev_entity
+    
+                   -> set_next_entity
+    
+    
+    '''
+
+
+
 
 clone
 ==========
@@ -1035,6 +1127,8 @@ sched_fork中, 最后调用fair_sched_class中的task_fork函数
 
 在fair.c中, 该函数被定义为task_fork_fair
 
+https://elixir.bootlin.com/linux/v4.15/source/kernel/sched/fair.c#L9442
+
 .. code-block:: c
 
     /*
@@ -1079,8 +1173,146 @@ sched_fork中, 最后调用fair_sched_class中的task_fork函数
     	rq_unlock(rq, &rf);
     }
 
+主要函数是:
+
+1. update_curr
+
+2. update_min_vruntime
+
+3. place_entity
+
+update_curr
+===============
+
+更新cfs中当前运行的task的vruntime属性
+
+主要参考 [17]_
+
+https://elixir.bootlin.com/linux/v4.15/source/kernel/sched/fair.c#L819
+
+.. code-block:: c
+
+    /*
+     * Update the current task's runtime statistics.
+     */
+    static void update_curr(struct cfs_rq *cfs_rq)
+    {
+        // 当前cfs中的当前task
+    	struct sched_entity *curr = cfs_rq->curr;
+        // 拿到实际时钟时间
+    	u64 now = rq_clock_task(rq_of(cfs_rq));
+    	u64 delta_exec;
+    
+    	if (unlikely(!curr))
+    		return;
+    
+        // 这个delta就是上一次执行和当前时间的差值
+    	delta_exec = now - curr->exec_start;
+    	if (unlikely((s64)delta_exec <= 0))
+    		return;
+    
+        // 更新开始执行的时间
+    	curr->exec_start = now;
+    
+    	schedstat_set(curr->statistics.exec_max,
+    		      max(delta_exec, curr->statistics.exec_max));
+    
+        // task的总运行时间增加delta
+    	curr->sum_exec_runtime += delta_exec;
+    	schedstat_add(cfs_rq->exec_clock, delta_exec);
+    
+        // 计算当前task的vruntime
+    	curr->vruntime += calc_delta_fair(delta_exec, curr);
+        // 更新cfs_rq的min_vruntime
+    	update_min_vruntime(cfs_rq);
+    
+    	if (entity_is_task(curr)) {
+    		struct task_struct *curtask = task_of(curr);
+    
+    		trace_sched_stat_runtime(curtask, delta_exec, curr->vruntime);
+    		cgroup_account_cputime(curtask, delta_exec);
+    		account_group_exec_runtime(curtask, delta_exec);
+    	}
+    
+    	account_cfs_rq_runtime(cfs_rq, delta_exec);
+    }
+
+
+calc_delta_fair的代码流程是:
+
+1. 如果curr.nice != NICE_0_LOAD, 则curr−>vruntime += delta_exec * (NICE_0_LOAD/curr−>se−>load.weight)
+
+2. 如果curr.nice == NICE_0_LOAD, 则curr−>vruntime+=delta
+
+也就是如果当前task的优先级是默认的0, 也就是120(0), 那么task的vruntime的增量则是delta值, 否则是delta乘以其优先级和默认优先级之间load weight的比例
+
+所以, 优先级越高, load weight越大, 则delta越小, 则vruntime的变大得越慢.
+
+
+update_min_vruntime
+=====================
+
+比对当前task和红黑树中保存的最左叶节点两者的vruntime, 谁大设置为cfs->min_vruntime
+
+update_min_vruntime, 这个函数是更新cfs_rq中, 最小的vruntime的, 之所以还需要一个cfs_rq的最小vruntime, 是因为插入红黑树的时候, 限制最小的vruntime值至少
+
+大于该值. 比如新建一个task, 设置其vruntime=0(在copy_process中), 那么它在相当长的时间内都会保持抢占CPU的优势, 这样就不好, 所以需要min_vruntime去限制
+
+最小大小(参考 [16]_)
+
+主要参考 [16]_
+
+https://elixir.bootlin.com/linux/v4.15/source/kernel/sched/fair.c#L515
+
+.. code-block:: c
+
+    static void update_min_vruntime(struct cfs_rq *cfs_rq)
+    {
+    	struct sched_entity *curr = cfs_rq->curr;
+        // 拿到缓存的最左叶节点
+    	struct rb_node *leftmost = rb_first_cached(&cfs_rq->tasks_timeline);
+    
+        // 当前min_vruntime的值
+    	u64 vruntime = cfs_rq->min_vruntime;
+    
+    	if (curr) {
+    	    if (curr->on_rq)
+                vruntime = curr->vruntime;
+    	    else
+    	        curr = NULL;
+    	}
+    
+    	if (leftmost) { /* non-empty tree */
+    		struct sched_entity *se;
+    		se = rb_entry(leftmost, struct sched_entity, run_node);
+    
+    		if (!curr)
+    		    vruntime = se->vruntime;
+    		else
+    		    vruntime = min_vruntime(vruntime, se->vruntime);
+    	}
+    
+    	/* ensure we never gain time by being placed backwards. */
+    	cfs_rq->min_vruntime = max_vruntime(cfs_rq->min_vruntime, vruntime);
+    #ifndef CONFIG_64BIT
+    	smp_wmb();
+    	cfs_rq->min_vruntime_copy = cfs_rq->min_vruntime;
+    #endif
+    }
+
+主要流程是, 比对curr->vruntime和leftmost(se)-vruntime之间的最小值为m, 然后min_vruntime = max(min_vruntime, m)
+
+1. 如果curr和se都存在, 那么min_vruntime = max(min_vruntime, min(curr->vruntime, se->vruntime))
+
+2. 如果curr不存在而se存在, 那么min_vruntime = max(min_vruntime, se->vruntime)
+
+3. 如果curr存在而se不存在, 那么min_vruntime = max(min_vruntime, curr->vruntime)
+
+4. 如果curr和se都不存在,   那么min_vruntime = max(min_vruntime, min_vruntime)
+
+
 place_entity
----------------
+===============
 
 这个函数会对task的vruntime进行补偿, 对新的task和io唤醒的task都有对应的补偿
 
@@ -1131,7 +1363,7 @@ https://elixir.bootlin.com/linux/v4.15/source/kernel/sched/fair.c#L3921
 
 sched_features的START_DEBIT位：规定新进程的第一次运行要有延迟。
 
-1. 补偿的基础是min_vruntime
+1. 补偿的基础, 也就是初始值是min_vruntime
 
 2. 如果是新建task, 并且规定新建的task第一次启动需要延迟, 则调用sched_vslice计算补偿, vruntime += sched_vslice
 
@@ -1143,18 +1375,29 @@ sched_features的START_DEBIT位：规定新进程的第一次运行要有延迟�
    而占据了很长的cpu时间(参考 [18]_)
 
 
-小结
--------
+clone中task的vruntime小结
+===============================
 
-1. update_curr是核心的更新vruntime的函数, 更新的是cfs中当前task的vruntime, 所以传参才只有cfs_rq, 后面说
+主要是sched_fork函数里面的流程:
 
-2. place_entity函数查看参考 [16]_, 是对task的vruntime的补偿操作
+1. 调用到__sched_fork去把vruntime以及sum_exec_runtime初始化为0
 
-3. sysctl_sched_child_runs_first配置是说是否配置子线程在父线程之前运行, 如果是, 并且父线程大于子线程(entity_before函数), 那么交换两个
-   线程的vruntime, 然后调用resched_curr, 这部分参考 [16]_
+2. 调用调度类的的task_fork函数, 在cfs下是task_fork_fair
 
-4. 最后, 为什么se->vruntime要减去min_vruntime, 不清楚
+3. task_fork_fair则是调用update_curr, update_curr中调用calc_delta_fair去增加cfs->curr的vruntime, 假设curr的上一次运行时间和当前时间的差值是delta_time
+   cfs->curr->vruntime的增加的值是基于其自身的load weight的, 假设增加的值是v, v = delta_time if curr.nice = 0 else delta_time * (NICE_0_LOAD/curr->load_weight)
 
+4. update_curr中还调用update_min_vruntime去更新cfs->min_vunrtime值, 其值是根据cfs->leftmost和cfs->curr来决定的
+   假设新的cfs->min_vruntime的值是n, cfs->curr和cfs->leftmost两者的最小值是m, 则n = max(m, cfs->min_vruntime)
+
+5. task_fork_fair中然后调用place_entity去针对(新的task/被唤醒的task)task进行补偿操作. 如果task是新的task, 并且设置了新task必须延迟的配置START_DEBIT
+   那么vruntime += sched_vslice(cfs_rq, se);
+   如果task是被唤醒的, 也会补偿, 具体请查看参考 [16]_(好吧, 这是因为我这部分没怎么看懂)
+
+6. 新task的补偿的值是通过函数sched_vslice去计算的, 计算的公式和3中的一样
+   没错, sched_vslice就是调用了calc_delta_fair!!!!
+
+7. task_for_fair的最后, se->vruntime -= cfs_rq->min_vruntime, 至于为什么要减min_vruntime, 不知道
 
 wake_up_new_task
 ===================
@@ -1225,363 +1468,43 @@ https://elixir.bootlin.com/linux/v4.15/source/kernel/sched/core.c#L2447
 
 2. 调用activate_task函数去调用相关调度类的enqueue_task函数, 把task加入到cfs自己的红黑树中
 
-clone流程总结
-==================================
+3. 注意的是, **wake_up_new_task传给activate_task的flag不是ENQUEUE_WAKEUP, 所以后面的操作不会调用place_entity去补偿task的vruntime**
 
-所以, 总结下来, pthread_create的时候, 子线程会继承父线程调度的参数, 包括调度策略和load_weight, 然后
-
-copy_process中调用sched_fork去初始化调度相关的参数:
-
-1. 调用__sched_fork, 把vruntime和sum_exec_runtime设置为0
-
-2. 调用fair_sched_class->task_fork_fair, 对task的vruntime进行补偿
-
-然后wake_up_new_task则会:
-
-1. 设置task的状态为TASK_RUNNING, 然后如果在SMP架构下, 需要再次设置cpu(因为1. cpu_allowed可能有变化 2. 之前选择的cpu可能不可用了)
-
-2. 调用activate_task函数去调用相关调度类的enqueue_task函数, 把task加入到cfs自己的红黑树中
+4. 调用check_preempt_curr去做一次抢占操作
 
 
+activate_task/enqueue_task
+==============================
 
-try_to_wake_up
-==================
-
-try_to_wake_up是唤醒一个task的主要函数, 比如在epoll中如果有event发生, 那么会调用该函数去唤醒睡眠的task
-
-调用路径: try_to_wake_up -> ttwu_queue -> ttwu_do_activate
-
+该函数是直接调用enqueue_task, 而enqueue_task函数则是调用task自己的调度类的enqueue_task函数
 
 .. code-block:: c
 
-
-    // https://elixir.bootlin.com/linux/v4.15/source/kernel/sched/core.c#L1705
-    static void
-    ttwu_do_activate(struct rq *rq, struct task_struct *p, int wake_flags,
-    		 struct rq_flags *rf)
+    void activate_task(struct rq *rq, struct task_struct *p, int flags)
     {
-    	int en_flags = ENQUEUE_WAKEUP | ENQUEUE_NOCLOCK;
-    
-    	lockdep_assert_held(&rq->lock);
-    
-    #ifdef CONFIG_SMP
-    	if (p->sched_contributes_to_load)
+    	if (task_contributes_to_load(p))
     		rq->nr_uninterruptible--;
     
-    	if (wake_flags & WF_MIGRATED)
-    		en_flags |= ENQUEUE_MIGRATED;
-    #endif
-    
-    	ttwu_activate(rq, p, en_flags);
-    	ttwu_do_wakeup(rq, p, wake_flags, rf);
+    	enqueue_task(rq, p, flags);
     }
 
-
-1. ttwu_activate是去把task加入到红黑树中, 也就是调用enqueue_task函数, ttwu_activate -> activate_task -> enqueue_task
-
-2. ttwu_do_wakeup则是调用check_preempt_curr去跟当前task抢占, check_preempt_curr最终调用到cfs中的check_preempt_wakeup
-
-
-ep_poll
-===============
-
-当调用ep_poll的时候, 会根据timeout让出cpu, 等待event的发生
-
-.. code-block:: c
-
-    // 省略了很多代码
-    static int ep_poll(struct eventpoll *ep, struct epoll_event __user *events,
-    		   int maxevents, long timeout)
+    static inline void enqueue_task(struct rq *rq, struct task_struct *p, int flags)
     {
+    	if (!(flags & ENQUEUE_NOCLOCK))
+    		update_rq_clock(rq);
     
-        if (!ep_events_available(ep)) {
-            
-            // 这个for循环就是检查是否是被中断唤醒的了
-            for (;;) {
-                if (!schedule_hrtimeout_range(to, slack, HRTIMER_MODE_ABS))
-                    timed_out = 1;
-            }
-        
-        }
+    	if (!(flags & ENQUEUE_RESTORE))
+    		sched_info_queued(rq, p);
     
+    	p->sched_class->enqueue_task(rq, p, flags);
     }
 
-主要函数是schedule_hrtimeout_range_clock, 而schedule_hrtimeout_range_clock则会调用schedule去让出cpu
+在cfs中, enqueue_task是enqueue_task_fair函数
 
-.. code-block:: c
-
-    /**
-     * schedule_hrtimeout_range_clock - sleep until timeout
-     * @expires:	timeout value (ktime_t)
-     * @delta:	slack in expires timeout (ktime_t)
-     * @mode:	timer mode, HRTIMER_MODE_ABS or HRTIMER_MODE_REL
-     * @clock:	timer clock, CLOCK_MONOTONIC or CLOCK_REALTIME
-     */
-    int __sched
-    schedule_hrtimeout_range_clock(ktime_t *expires, u64 delta,
-    			       const enum hrtimer_mode mode, int clock)
-    {
-    
-        struct hrtimer_sleeper t;
-        
-        /*
-         * Optimize when a zero timeout value is given. It does not
-         * matter whether this is an absolute or a relative time.
-         */
-        if (expires && *expires == 0) {
-        	__set_current_state(TASK_RUNNING);
-        	return 0;
-        }
-        
-        /*
-         * A NULL parameter means "infinite"
-         */
-        if (!expires) {
-                // 调用schedule函数
-        	schedule();
-        	return -EINTR;
-        }
-        
-        hrtimer_init_on_stack(&t.timer, clock, mode);
-        hrtimer_set_expires_range_ns(&t.timer, *expires, delta);
-        
-        hrtimer_init_sleeper(&t, current);
-        
-        hrtimer_start_expires(&t.timer, mode);
-        
-        if (likely(t.task))
-                // 调用schedule函数
-        	schedule();
-        
-        hrtimer_cancel(&t.timer);
-        destroy_hrtimer_on_stack(&t.timer);
-        
-        __set_current_state(TASK_RUNNING);
-        
-        return !t.task ? 0 : -EINTR;
-    
-    }
-
-看到, 如果expires是NULL, 也就是无限睡眠的话, 则会调用schedule函数, 所以推测出, schedule函数会让出cpu的!!!
-
-
-.. code-block:: c
-
-    // https://elixir.bootlin.com/linux/v4.15/source/kernel/sched/core.c#L3427
-    asmlinkage __visible void __sched schedule(void)
-    {
-    	struct task_struct *tsk = current;
-    
-    	sched_submit_work(tsk);
-    	do {
-    		preempt_disable();
-                // 调用__schedule函数
-    		__schedule(false);
-    		sched_preempt_enable_no_resched();
-    	} while (need_resched());
-    }
-    EXPORT_SYMBOL(schedule);
-
-所以主要函数就是__schedule函数
-
-
-.. code-block:: c
-
-    // https://elixir.bootlin.com/linux/v4.15/source/kernel/sched/core.c#L3287
-    // 省略了很多代码
-    static void __sched notrace __schedule(bool preempt)
-    {
-    
-        // prev就是当前cpu的runqueue中的当前task
-        prev = rq->curr;
-
-        // 看到schedule函数传入的preempt是false
-        // 然后在ep_poll中把task状态设置为TASK_INTERRUPTIBLE, 该状态是大于0的
-        // 所以会走到if的代码里面
-        if (!preempt && prev->state) {
-            // 如果此时有信号发生, 则直接设置prev的状态为TASK_RUNNING状态
-            if (unlikely(signal_pending_state(prev->state, prev))) {
-            	prev->state = TASK_RUNNING;
-            } else {
-
-                // 看到unlikely标志, 说一般都走这里
-                // 也就是把prev从红黑树中拿出来
-                deactivate_task(rq, prev, DEQUEUE_SLEEP | DEQUEUE_NOCLOCK);
-
-            }
-        }
-
-        // 选择下一个task
-        next = pick_next_task(rq, prev, &rf);
-        
-        if (likely(prev != next)) {
-        
-            rq = context_switch(rq, prev, next, &rf);
-        
-        }
-    
-    }
-
-所以, ep_poll中休眠最终的调用是schedule函数, 该函数是进行一次调度操作, 作用:
-
-1. 如果task不是TASK_RUNNING状态(0x0000), 并且传入的preempt是false, 则触发deactivate_task
-   deactivate_task会调用到dequeue_task去把task从红黑树移除
-
-2. 选择下一个task
-
-
-----
-
-几个重要的函数和小细节
-=========================
-
-1. update_curr, 更新当前cfs->curr的vruntime, 这个函数在很多地方都会被调用到
-
-2. task_for_fair/place_entity, 对新建的task的vruntime进行补偿, 补偿的函数是place_entity, 这两个之前说过
-
-3. enqueue_task/dequeue_task, 前者把task加入到cfs的红黑树中, 后者把task移除
-
-4. check_preempt_curr, copy_process之后, _do_fork会调用该函数去进行抢占的操作
-
-5. schedule, 该函数去选择下一个task去运行
-
-6. 关于cfs中vruntime的几个小细节, 包括: 新进程的vruntime的初值是不是0啊, 休眠进程的vruntime一直保持不变吗等等, 参考 [16]_
-
-
-update_curr
-===============
-
-更新cfs中当前运行的task的vruntime属性
-
-主要参考 [17]_
-
-https://elixir.bootlin.com/linux/v4.15/source/kernel/sched/fair.c#L819
-
-.. code-block:: c
-
-    /*
-     * Update the current task's runtime statistics.
-     */
-    static void update_curr(struct cfs_rq *cfs_rq)
-    {
-        // 当前cfs中的当前task
-    	struct sched_entity *curr = cfs_rq->curr;
-        // 拿到实际时钟时间
-    	u64 now = rq_clock_task(rq_of(cfs_rq));
-    	u64 delta_exec;
-    
-    	if (unlikely(!curr))
-    		return;
-    
-        // 这个delta就是上一次执行和当前时间的差值
-    	delta_exec = now - curr->exec_start;
-    	if (unlikely((s64)delta_exec <= 0))
-    		return;
-    
-        // 更新开始执行的时间
-    	curr->exec_start = now;
-    
-    	schedstat_set(curr->statistics.exec_max,
-    		      max(delta_exec, curr->statistics.exec_max));
-    
-        // task的总运行时间增加delta
-    	curr->sum_exec_runtime += delta_exec;
-    	schedstat_add(cfs_rq->exec_clock, delta_exec);
-    
-        // 计算当前task的vruntime
-    	curr->vruntime += calc_delta_fair(delta_exec, curr);
-        // 更新cfs_rq的min_vruntime
-    	update_min_vruntime(cfs_rq);
-    
-    	if (entity_is_task(curr)) {
-    		struct task_struct *curtask = task_of(curr);
-    
-    		trace_sched_stat_runtime(curtask, delta_exec, curr->vruntime);
-    		cgroup_account_cputime(curtask, delta_exec);
-    		account_group_exec_runtime(curtask, delta_exec);
-    	}
-    
-    	account_cfs_rq_runtime(cfs_rq, delta_exec);
-    }
-
-
-1. calc_delta_fair的代码流程是
-
-如果curr.nice != NICE_0_LOAD, 则curr−>vruntime += delta_exec * (NICE_0_LOAD/curr−>se−>load.weight)
-
-如果curr.nice == NICE_0_LOAD, 则curr−>vruntime+=delta
-
-也就是如果当前task的优先级是默认的0, 也就是120(0), 那么task的vruntime的增量则是delta值, 否则是delta乘以其优先级和默认优先级之间load weight的比例
-
-所以, 优先级越高, load weight越大, 则delta越小, 则vruntime的变大得越慢.
-
-
-2. update_min_vruntime, 这个函数是更新cfs_rq中, 最小的vruntime的, 之所以还需要一个cfs_rq的最小vruntime, 是因为插入红黑树的时候, 限制最小的vruntime值至少
-   大于该值. 比如新建一个task, 设置其vruntime=0(在copy_process中), 么那么它在相当长的时间内都会保持抢占CPU的优势, 这样就不好, 所以需要min_vruntime去限制
-   最小大小(参考 [16]_)
-
-update_min_vruntime
-=====================
-
-比对当前task和红黑树中保存的最左叶节点两者的vruntime, 谁大设置为cfs->min_vruntime
-
-主要参考 [16]_
-
-https://elixir.bootlin.com/linux/v4.15/source/kernel/sched/fair.c#L515
-
-.. code-block:: c
-
-    static void update_min_vruntime(struct cfs_rq *cfs_rq)
-    {
-    	struct sched_entity *curr = cfs_rq->curr;
-        // 拿到缓存的最左叶节点
-    	struct rb_node *leftmost = rb_first_cached(&cfs_rq->tasks_timeline);
-    
-        // 当前min_vruntime的值
-    	u64 vruntime = cfs_rq->min_vruntime;
-    
-    	if (curr) {
-    	    if (curr->on_rq)
-                vruntime = curr->vruntime;
-    	    else
-    	        curr = NULL;
-    	}
-    
-    	if (leftmost) { /* non-empty tree */
-    		struct sched_entity *se;
-    		se = rb_entry(leftmost, struct sched_entity, run_node);
-    
-    		if (!curr)
-    		    vruntime = se->vruntime;
-    		else
-    		    vruntime = min_vruntime(vruntime, se->vruntime);
-    	}
-    
-    	/* ensure we never gain time by being placed backwards. */
-    	cfs_rq->min_vruntime = max_vruntime(cfs_rq->min_vruntime, vruntime);
-    #ifndef CONFIG_64BIT
-    	smp_wmb();
-    	cfs_rq->min_vruntime_copy = cfs_rq->min_vruntime;
-    #endif
-    }
-
-主要流程是, 比对curr->vruntime和se-vruntime之间的最小值为vruntie, 然后min_vruntime = max(min_vruntime, vruntime)
-
-1. 如果curr和se都存在, 那么min_vruntime = max(min_vruntime, min(curr->vruntime, se->vruntime))
-
-2. 如果curr不存在而se存在, 那么min_vruntime = max(min_vruntime, se->vruntime)
-
-3. 如果curr存在而se不存在, 那么min_vruntime = max(min_vruntime, curr->vruntime)
-
-4. 如果curr和se都不存在,   那么min_vruntime = max(min_vruntime, min_vruntime)
-
-
-enqueue_task/enqueue_task_fair
+enqueue_task_fair
 ================================
 
-之前的try_to_wake_up函数和wake_up_new_task函数都会调用到activate_task, activate_task基本上就是调用enqueue_task去把目标task给加入到cfs的红黑树中
-
-enqueue_task在cfs中指向enqueue_task_fair函数
+enqueue_task_fair的主要操作是把目标task给加入到cfs的红黑树中
 
 https://elixir.bootlin.com/linux/v4.15/source/kernel/sched/fair.c#L5206
 
@@ -1666,6 +1589,7 @@ https://elixir.bootlin.com/linux/v4.15/source/kernel/sched/fair.c#L4006
     enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
     {
     	bool renorm = !(flags & ENQUEUE_WAKEUP) || (flags & ENQUEUE_MIGRATED);
+
         // 判断下是, 传入的task和cfs_rq->curr当前否是同一个
     	bool curr = cfs_rq->curr == se;
     
@@ -1703,6 +1627,8 @@ https://elixir.bootlin.com/linux/v4.15/source/kernel/sched/fair.c#L4006
     	account_entity_enqueue(cfs_rq, se);
     
         // 这里, 如果是休眠而唤醒的进程, 调用place_entity去补偿
+        // 显然, wake_up_new_task中传入的flag并不是ENQUEUE_WAKEUP
+        // 所以不会走place_entity
     	if (flags & ENQUEUE_WAKEUP)
     	    place_entity(cfs_rq, se, 0);
     
@@ -1724,10 +1650,303 @@ https://elixir.bootlin.com/linux/v4.15/source/kernel/sched/fair.c#L4006
 
 1. 调用update_curr更新cfs_rq->curr的vruntime
 
+2. 根据传入的flags中是否有ENQUEUE_WAKEUP标志去决定, 是否去调用place_entity去补偿vruntime
+   显然, 在wake_up_new_task中传入的不是ENQUEUE_WAKEUP标志, 所以不会走vruntime
+   **后面的唤醒流程可以看到传入的flags中带有ENQUEUE_WAKEUP标志**
+
 2. 更新其他统计量
 
 3. 如果cfs_rq->curr和传入的task不是同一个, 则调用__enqueue_entity, 把传入的task加入到红黑树.
    __enqueue_entity的流程只是加入红黑树, **并且去判断是否是leftmost, 是的话设置新的leftmost节点**, 代码先省略吧
+
+check_preempt_curr
+======================
+
+在之前wake_up_new_task流程中, 调用activate_task去调用enqueue_task, 把task加入到cfs的红黑树中, 然后调用check_preempt_curr去做抢占操作
+
+
+https://elixir.bootlin.com/linux/v4.15/source/kernel/sched/core.c#L880
+
+.. code-block:: c
+
+    void check_preempt_curr(struct rq *rq, struct task_struct *p, int flags)
+    {
+    	const struct sched_class *class;
+    
+        // 这里判断task的调度类和rq的调度类是否一致
+        // 然后我们简单点, 假设是一直并且是cfs
+    	if (p->sched_class == rq->curr->sched_class) {
+    		rq->curr->sched_class->check_preempt_curr(rq, p, flags);
+    	} else {
+    		for_each_class(class) {
+    			if (class == rq->curr->sched_class)
+    				break;
+    			if (class == p->sched_class) {
+    				resched_curr(rq);
+    				break;
+    			}
+    		}
+    	}
+    
+    	/*
+    	 * A queue event has occurred, and we're going to schedule.  In
+    	 * this case, we can save a useless back to back clock update.
+    	 */
+    	if (task_on_rq_queued(rq->curr) && test_tsk_need_resched(rq->curr))
+    		rq_clock_skip_update(rq, true);
+    }
+
+
+如果task的调度类和rq->curr的调度类一致, 那么调用调度类的check_preempt_curr, 这里假设一直并且是cfs
+
+则会调用到cfs中的check_preempt_wakeup, 该函数会判断是否需要去抢占, 如果需要, 则还是调用resched_curr(rq), 所以主要看resched_curr
+
+https://elixir.bootlin.com/linux/v4.15/source/kernel/sched/core.c#L481
+
+.. code-block:: c
+
+    void resched_curr(struct rq *rq)
+    {
+    	struct task_struct *curr = rq->curr;
+    	int cpu;
+    
+    	lockdep_assert_held(&rq->lock);
+    
+    	if (test_tsk_need_resched(curr))
+    		return;
+    
+    	cpu = cpu_of(rq);
+    
+        // 如果rq的cpu是当前cpu
+    	if (cpu == smp_processor_id()) {
+    	    set_tsk_need_resched(curr);
+    	    set_preempt_need_resched();
+    	    return;
+    	}
+    
+    	if (set_nr_and_not_polling(curr))
+    	    smp_send_reschedule(cpu);
+    	else
+    	    trace_sched_wake_idle_without_ipi(cpu);
+    }
+
+如果当前cpu和rq的cpu一致, 则调用set_tsk_need_resched, 也就是设置task的thread_info的flag设置上TIF_NEED_RESCHED标志位
+
+.. code-block:: c
+
+    // https://elixir.bootlin.com/linux/v4.15/source/include/linux/sched.h#L1541
+    static inline void set_tsk_need_resched(struct task_struct *tsk)
+    {
+    	set_tsk_thread_flag(tsk,TIF_NEED_RESCHED);
+    }
+
+
+然后set_preempt_need_resched分平台的, 里面是汇编的, 没看懂
+
+.. code-block:: c
+
+    https://elixir.bootlin.com/linux/v4.15/source/arch/x86/include/asm/preempt.h#L55
+    static __always_inline void set_preempt_need_resched(void)
+    {
+    	raw_cpu_and_4(__preempt_count, ~PREEMPT_NEED_RESCHED);
+    }
+
+
+default_wake_function/try_to_wake_up
+============================================
+
+ep_poll中, 等待有event发生的时候, 把默认的唤醒函数设置为default_wake_function, 而default_wake_function直接调用try_to_wake_up
+
+try_to_wake_up是唤醒一个task的主要函数, 比如在epoll中如果有event发生, 那么会调用该函数去唤醒睡眠的task
+
+调用路径: default_wake_function -> try_to_wake_up -> ttwu_queue -> ttwu_do_activate
+
+https://elixir.bootlin.com/linux/v4.15/source/kernel/sched/core.c#L1705
+
+.. code-block:: c
+
+    static void
+    ttwu_do_activate(struct rq *rq, struct task_struct *p, int wake_flags,
+    		 struct rq_flags *rf)
+    {
+    	int en_flags = ENQUEUE_WAKEUP | ENQUEUE_NOCLOCK;
+    
+    	lockdep_assert_held(&rq->lock);
+    
+    #ifdef CONFIG_SMP
+    	if (p->sched_contributes_to_load)
+    		rq->nr_uninterruptible--;
+    
+    	if (wake_flags & WF_MIGRATED)
+    		en_flags |= ENQUEUE_MIGRATED;
+    #endif
+    
+    	ttwu_activate(rq, p, en_flags);
+    	ttwu_do_wakeup(rq, p, wake_flags, rf);
+    }
+
+
+1. ttwu_activate最终也是调用enqueue_task函数, ttwu_activate -> activate_task -> enqueue_task
+
+2. ttwu_do_wakeup则是调用check_preempt_curr去跟当前task抢占, check_preempt_curr最终调用到cfs中的check_preempt_wakeup
+
+
+ep_poll中休眠
+===============
+
+当调用ep_poll的时候, 会根据timeout让出cpu, 等待event的发生
+
+.. code-block:: c
+
+    // 省略了很多代码
+    static int ep_poll(struct eventpoll *ep, struct epoll_event __user *events,
+    		   int maxevents, long timeout)
+    {
+    
+        if (!ep_events_available(ep)) {
+            
+            // 这个for循环就是检查是否是被中断唤醒的了
+            for (;;) {
+                if (!schedule_hrtimeout_range(to, slack, HRTIMER_MODE_ABS))
+                    timed_out = 1;
+            }
+        
+        }
+    
+    }
+
+主要函数是schedule_hrtimeout_range_clock, 而schedule_hrtimeout_range_clock则会调用schedule去让出cpu
+
+.. code-block:: c
+
+    /**
+     * schedule_hrtimeout_range_clock - sleep until timeout
+     * @expires:	timeout value (ktime_t)
+     * @delta:	slack in expires timeout (ktime_t)
+     * @mode:	timer mode, HRTIMER_MODE_ABS or HRTIMER_MODE_REL
+     * @clock:	timer clock, CLOCK_MONOTONIC or CLOCK_REALTIME
+     */
+    int __sched
+    schedule_hrtimeout_range_clock(ktime_t *expires, u64 delta,
+    			       const enum hrtimer_mode mode, int clock)
+    {
+    
+        struct hrtimer_sleeper t;
+        
+        /*
+         * Optimize when a zero timeout value is given. It does not
+         * matter whether this is an absolute or a relative time.
+         */
+        if (expires && *expires == 0) {
+        	__set_current_state(TASK_RUNNING);
+        	return 0;
+        }
+        
+        /*
+         * A NULL parameter means "infinite"
+         */
+        if (!expires) {
+                // 调用schedule函数
+        	schedule();
+        	return -EINTR;
+        }
+        
+        hrtimer_init_on_stack(&t.timer, clock, mode);
+        hrtimer_set_expires_range_ns(&t.timer, *expires, delta);
+        
+        hrtimer_init_sleeper(&t, current);
+        
+        hrtimer_start_expires(&t.timer, mode);
+        
+        if (likely(t.task))
+                // 调用schedule函数
+        	schedule();
+        
+        hrtimer_cancel(&t.timer);
+        destroy_hrtimer_on_stack(&t.timer);
+        
+        __set_current_state(TASK_RUNNING);
+        
+        return !t.task ? 0 : -EINTR;
+    
+    }
+
+看到, 如果expires是NULL, 也就是无限睡眠的话, 则会调用schedule函数, 所以推测出, schedule函数会让出cpu的!!!
+
+
+schedule/__schedule
+=========================
+
+schedule函数主要就是直接调用__schedule函数
+
+__schedule函数是强行把当前task从cfs的红黑树中移除, 然后选择下一个task去运行, 也就是做一次抢占操作(preempty)
+
+https://elixir.bootlin.com/linux/v4.15/source/kernel/sched/core.c#L3427
+
+.. code-block:: c
+
+    asmlinkage __visible void __sched schedule(void)
+    {
+    	struct task_struct *tsk = current;
+    
+    	sched_submit_work(tsk);
+    	do {
+    		preempt_disable();
+                // 调用__schedule函数
+    		__schedule(false);
+    		sched_preempt_enable_no_resched();
+    	} while (need_resched());
+    }
+    EXPORT_SYMBOL(schedule);
+
+所以主要函数就是__schedule函数
+
+https://elixir.bootlin.com/linux/v4.15/source/kernel/sched/core.c#L3287
+
+.. code-block:: c
+
+    // 省略了很多代码
+    static void __sched notrace __schedule(bool preempt)
+    {
+    
+        // prev就是当前cpu的runqueue中的当前task
+        prev = rq->curr;
+
+        // 看到schedule函数传入的preempt是false
+        // 然后在ep_poll中把task状态设置为TASK_INTERRUPTIBLE, 该状态是大于0的
+        // 所以会走到if的代码里面
+        if (!preempt && prev->state) {
+            // 如果此时有信号发生, 则直接设置prev的状态为TASK_RUNNING状态
+            if (unlikely(signal_pending_state(prev->state, prev))) {
+            	prev->state = TASK_RUNNING;
+            } else {
+
+                // 看到unlikely标志, 说一般都走这里
+                // 也就是把prev从红黑树中拿出来
+                deactivate_task(rq, prev, DEQUEUE_SLEEP | DEQUEUE_NOCLOCK);
+
+            }
+        }
+
+        // 选择下一个task
+        next = pick_next_task(rq, prev, &rf);
+        
+        if (likely(prev != next)) {
+        
+            rq = context_switch(rq, prev, next, &rf);
+        
+        }
+    
+    }
+
+所以, ep_poll中休眠最终的调用是schedule函数, 该函数是进行一次抢占操作
+
+1. 如果task不是TASK_RUNNING状态(0x0000), 并且传入的preempt是false, 则触发deactivate_task
+   deactivate_task会调用到dequeue_task去把task从红黑树移除
+
+2. 选择下一个task
+
+3. context_switch
 
 
 dequeue_task/dequeue_task_fair
@@ -1801,12 +2020,12 @@ https://elixir.bootlin.com/linux/v4.15/source/kernel/sched/fair.c#L5262
     	hrtick_update(rq);
     }
 
-除了dequeue_entity函数, 其他流程, 恩~~~不太清除
+除了dequeue_entity函数, 其他流程, 恩~~~不太清楚
 
 dequeue_entity
 =====================
 
-真正去把task从红黑树移除的操作
+真正去把task从红黑树移除的操作是__dequeue_entity函数中
 
 .. code-block:: c
 
@@ -1928,11 +2147,10 @@ schedule/pick_next_task
     }
 
 
+pick_next_task/pick_next_task_fair
+========================================
 
-pick_next_task
------------------
-
-pick_next_task这个函数将会调用到cfs中的pick_next_task
+pick_next_task这个函数将会调用到cfs中的pick_next_task_fair
 
 https://elixir.bootlin.com/linux/v4.15/source/kernel/sched/fair.c#L6619
 
@@ -1949,14 +2167,32 @@ https://elixir.bootlin.com/linux/v4.15/source/kernel/sched/fair.c#L6619
         put_prev_task(rq, prev);
     
         do {
-            // 选择下一个task
+            // 选出下一个task
             se = pick_next_entity(cfs_rq, NULL);
-            // set
+            // 设置下一个task, 也就是把选出来的下一个task设置为cfs->curr
             set_next_entity(cfs_rq, se);
             cfs_rq = group_cfs_rq(se);
         } while (cfs_rq);
         
+        // 选出来的下一个se的对应的task
+        p = task_of(se);
+       
+        // 如果下一个task和传入的当前task不一样
+        if (prev != p) {
+
+            struct sched_entity *pse = &prev->se;
+
+            // 省略代码
+
+            put_prev_entity(cfs_rq, pse);
+            set_next_entity(cfs_rq, se);
+
+        }
+
+
         // 还省略了很多代码
+
+
     
     
     }
@@ -1964,9 +2200,9 @@ https://elixir.bootlin.com/linux/v4.15/source/kernel/sched/fair.c#L6619
 
 1. pick_next_entity则是选择最左子节点, 如果传入的task比最左子节点小, 则运行传入的task
 
-2. put_prev_task, 把prev, 也就是传入的task, 重新加入红黑树
+2. put_prev_task, 把prev, 也就是传入的task, 重新加入红黑树, 因为在__schedule中, 我们移除了task
 
-3. set_next_entity, 把1中返回的task, 设置为cfs_rq->curr
+3. set_next_entity, 把1中选择的task, 设置为cfs_rq->curr
 
 
 pick_next_entity
@@ -1991,6 +2227,8 @@ https://elixir.bootlin.com/linux/v4.15/source/kernel/sched/fair.c#L4240
         struct sched_entity *se;
     
         // 判断是否有最左叶节点, 有的话, 取两者最小
+        // 如果没有最左叶节点, 则left=curr
+        // 或者存在最左叶节点和当前task, 并且当前task比最左叶节点小, 那么left=curr
         if (!left || (curr && entity_before(curr, left)))
         	left = curr;
         
@@ -2001,20 +2239,13 @@ https://elixir.bootlin.com/linux/v4.15/source/kernel/sched/fair.c#L4240
     
     }
 
-注释上说流程是:
+基本上, 简单点就是如果存在最左叶节点left, 选left和curr的最小的那一个(||的后一个判断), 如果不存在最左叶节点, 则选curr(||的前一个判断)
 
-1. 保持task之间的"公平"
-
-2. 选下一个task
-
-3. 选最后一个, 这是为了缓存(这一步没太明白), 并且cfs_rq->last这个属性没找到赋值的地方, 遗落了某些地方
-
-4. 某些task是被设置skip的, 不需要运行
 
 put_prev_task/set_next_entity
 =================================
 
-put_prev_task会调用到cfs中的put_prev_task_fair
+put_prev_task会调用到cfs中的put_prev_task_fair, 作用则是调用__enqueue_entity去把传入的prev加入到红黑树
 
 .. code-block:: c
 
@@ -2059,6 +2290,10 @@ put_prev_task会调用到cfs中的put_prev_task_fair
 
 而set_next_entity是cfs的函数, 是把选出来的next设置到cfs_rq->curr
 
+注意的是, 红黑树上的task和cfs->curr是互斥的, 也就是说
+
+**如果一个task选出来称为curr, 那么得从红黑树中移除**
+
 .. code-block:: c
 
     // https://elixir.bootlin.com/linux/v4.15/source/kernel/sched/fair.c#L4198
@@ -2084,100 +2319,6 @@ put_prev_task会调用到cfs中的put_prev_task_fair
     	cfs_rq->curr = se;
     
         // 后面代码先省略
-    }
-
-
-check_preempt_curr
-======================
-
-在_do_fork -> wake_up_new_task中, 调用了activate_task, 把新建的task入队之后, 再调用check_preempt_curr去做一次抢占操作
-
-https://elixir.bootlin.com/linux/v4.15/source/kernel/sched/core.c#L880
-
-.. code-block:: c
-
-    void check_preempt_curr(struct rq *rq, struct task_struct *p, int flags)
-    {
-    	const struct sched_class *class;
-    
-        // 这里判断task的调度类和rq的调度类是否一致
-        // 然后我们简单点, 假设是一直并且是cfs
-    	if (p->sched_class == rq->curr->sched_class) {
-    		rq->curr->sched_class->check_preempt_curr(rq, p, flags);
-    	} else {
-    		for_each_class(class) {
-    			if (class == rq->curr->sched_class)
-    				break;
-    			if (class == p->sched_class) {
-    				resched_curr(rq);
-    				break;
-    			}
-    		}
-    	}
-    
-    	/*
-    	 * A queue event has occurred, and we're going to schedule.  In
-    	 * this case, we can save a useless back to back clock update.
-    	 */
-    	if (task_on_rq_queued(rq->curr) && test_tsk_need_resched(rq->curr))
-    		rq_clock_skip_update(rq, true);
-    }
-
-
-如果task的调度类和rq->curr的调度类一致, 那么调用调度类的check_preempt_curr, 这里假设一直并且是cfs
-
-则会调用到cfs中的check_preempt_wakeup, 该函数会判断是否需要去抢占, 如果需要, 则还是调用resched_curr(rq)
-
-所以主要看resched_curr
-
-https://elixir.bootlin.com/linux/v4.15/source/kernel/sched/core.c#L481
-
-.. code-block:: c
-
-    void resched_curr(struct rq *rq)
-    {
-    	struct task_struct *curr = rq->curr;
-    	int cpu;
-    
-    	lockdep_assert_held(&rq->lock);
-    
-    	if (test_tsk_need_resched(curr))
-    		return;
-    
-    	cpu = cpu_of(rq);
-    
-        // 如果rq的cpu是当前cpu
-    	if (cpu == smp_processor_id()) {
-    	    set_tsk_need_resched(curr);
-    	    set_preempt_need_resched();
-    	    return;
-    	}
-    
-    	if (set_nr_and_not_polling(curr))
-    	    smp_send_reschedule(cpu);
-    	else
-    	    trace_sched_wake_idle_without_ipi(cpu);
-    }
-
-如果当前cpu和rq的cpu一致, 则调用set_tsk_need_resched, 也就是设置task的thread_info的flag设置上TIF_NEED_RESCHED标志位
-
-.. code-block:: c
-
-    // https://elixir.bootlin.com/linux/v4.15/source/include/linux/sched.h#L1541
-    static inline void set_tsk_need_resched(struct task_struct *tsk)
-    {
-    	set_tsk_thread_flag(tsk,TIF_NEED_RESCHED);
-    }
-
-
-然后set_preempt_need_resched分平台的, 里面是汇编的, 没看懂
-
-.. code-block:: c
-
-    https://elixir.bootlin.com/linux/v4.15/source/arch/x86/include/asm/preempt.h#L55
-    static __always_inline void set_preempt_need_resched(void)
-    {
-    	raw_cpu_and_4(__preempt_count, ~PREEMPT_NEED_RESCHED);
     }
 
 

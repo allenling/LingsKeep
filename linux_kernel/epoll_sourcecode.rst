@@ -106,7 +106,7 @@ linux中的rcu(Read-Copy Update)机制: https://www.ibm.com/developerworks/cn/li
 
 关于WRITE_ONCE的解释: https://stackoverflow.com/questions/34988277/write-once-in-linux-kernel-lists, 没怎么看懂
 
-linux vsf
+linux vfs
 ============
 
 linux中的vfs是指一套统一的接口, 然后任何实现了该接口的fs都能被挂载到linux, 然后用户态/内核态都可以使用统一的接口去操作file.
@@ -136,10 +136,7 @@ linux wait_queue
 linux schedule
 =================
 
-
-参考1: https://zhuanlan.zhihu.com/p/33389178
-
-参考2: https://zhuanlan.zhihu.com/p/33461281
+linux调度参考 linux_task_schedule.rst
 
 
 ----
@@ -155,7 +152,7 @@ cpython/Modules/selectmodule.c
 .. code-block:: c
 
     static PyTypeObject pyEpoll_Type = {
-        pyepoll_new,                                        /* tp_new */
+        pyepoll_new, /* tp_new */
     };
 
 
@@ -496,7 +493,8 @@ http://elixir.free-electrons.com/linux/v4.15/source/fs/eventpoll.c#L186
 
 1. rdlist是把epoll把受信的event发送给用户态的时候, 遍历的已受信的链表
 
-2. 而ovflist则是, 如果现在epoll正在发送event到用户态, 此时则正在受信的时间暂时放在ovflist中, 当epoll处理完rdllist的时候, 会把ovflist的event加入到rdllist中.
+2. 而ovflist则是为了无锁复制
+   如果现在epoll正在发送event到用户态, 此时则正在受信的时间暂时放在ovflist中, 当epoll处理完rdllist的时候, 会把ovflist的event加入到rdllist中.
    也就是ovflist是为了不影响正在处理的rdllist, 暂时存放受信event的地方. 主要是发送event到用户态的时候是无锁状态(不会拿epoll中的lock这个自旋锁), 所以为了避免"污染"rdllist, 又没有拿锁, 则只能
    用一个临时链表来解决. 无锁是为了效率.
 
@@ -505,6 +503,8 @@ ovflist参考: http://blog.csdn.net/mercy_pm/article/details/51381216, https://i
 
 epitem
 ========
+
+https://elixir.bootlin.com/linux/v4.15/source/fs/eventpoll.c#L142
 
 .. code-block:: c
 
@@ -539,7 +539,7 @@ epitem
     	/* The "container" of this item */
     	struct eventpoll *ep;
     
-    	/* List header used to link this item to the "struct file" items list */
+    	/*. List header used to link this item to the "struct file" items list */
     	struct list_head fllink;
     
     	/* wakeup_source used when EPOLLWAKEUP is set */
@@ -621,16 +621,17 @@ http://elixir.free-electrons.com/linux/v4.15/source/fs/eventpoll.c#L1936
     }
 
 event_poll_fops
-----------------------
+======================
 
 event_poll_fops是一套ep定义的file操作接口, 其实就是原生的文件操作接口
 
 file_operations包含的就是vfs的标准接口的集合
 
+http://elixir.free-electrons.com/linux/v4.15/source/include/linux/fs.h#L1692
+
 .. code-block:: c
 
     // 定义了read, write等文件操作接口
-    // http://elixir.free-electrons.com/linux/v4.15/source/include/linux/fs.h#L1692
     struct file_operations {
     	struct module *owner;
     	loff_t (*llseek) (struct file *, loff_t, int);
@@ -663,7 +664,7 @@ file_operations包含的就是vfs的标准接口的集合
 所以epoll本身也是一个支持poll的文件, 其poll函数是ep_eventpoll_poll.
 
 anon_inode_getfile
-----------------------
+======================
 
 anon_inode_getfile就是生成一个file结构, 然后把file->private_data指向event_poll(第三个传参)
 
@@ -695,7 +696,7 @@ anon_inode_getfile就是生成一个file结构, 然后把file->private_data指�
 
 
 所以关系就是
----------------
+===============
 
 .. code-block:: python
 
@@ -854,7 +855,7 @@ fd有效条件包括:
 2. fd对应的file一定实现有poll操作.
 
 ep_op_has_event
------------------
+=================
 
 这个是判断op的操作是否是删除, 不是删除操作就需要把user传入的epoll_event结构复制到内核态
 
@@ -922,17 +923,16 @@ http://elixir.free-electrons.com/linux/v4.15/source/fs/eventpoll.c#L1041
 
 
 红黑树
------------
+===========
 
 epoll中存放fd的结构是ep_item, 红黑树使得fd的查找最坏也能打到O(logN)
-
 
 比较的时候需用组织成ffd结构, 然后通过ffd生成一个epitem结构(这里其实就是把ffd设置到epitem中, 当然还包括其他信息), 然后再比较epitem中的ffd.
 
 其实ffd里面就包含两个属性, 一个file, 一个fd
 
 rbp获取epitem
-------------------
+==================
 
 由于epitem中保存了对应的rbp, 所以可以通过rbp获取对应的epitem:
 
@@ -952,7 +952,7 @@ container_of的参考: https://stackoverflow.com/questions/15832301/understandin
 
 
 比较过程
-------------
+============
 
 epitem比较的时候是比较其中的ffd保存的file和fd
 
@@ -1368,7 +1368,7 @@ https://elixir.bootlin.com/linux/v4.15/source/include/linux/wait.h#L87
     }
 
 
-惊群参考: http://wangxuemin.github.io/2016/01/25/Epoll%20%E6%96%B0%E5%A2%9E%20EPOLLEXCLUSIVE%20%E9%80%89%E9%A1%B9%E8%A7%A3%E5%86%B3%E4%BA%86%E6%96%B0%E5%BB%BA%E8%BF%9E%E6%8E%A5%E7%9A%84%E2%80%99%E6%83%8A%E7%BE%A4%E2%80%98%E9%97%AE%E9%A2%98/ (额, 这个url有中文, 被编码过了, 所以才那么长)
+惊群参考 `这里 <http://wangxuemin.github.io/2016/01/25/Epoll%20%E6%96%B0%E5%A2%9E%20EPOLLEXCLUSIVE%20%E9%80%89%E9%A1%B9%E8%A7%A3%E5%86%B3%E4%BA%86%E6%96%B0%E5%BB%BA%E8%BF%9E%E6%8E%A5%E7%9A%84%E2%80%99%E6%83%8A%E7%BE%A4%E2%80%98%E9%97%AE%E9%A2%98/>`_
 
 
 结构图示为:
@@ -1730,7 +1730,7 @@ __wake_up_common, 也就是遍历wait_queue, 然后调用wait_queue_entry中的f
 
 **调用poll_table的func, ep_ptable_queue_proc, 把一个wait_queue_entry加入到该file的wait_queue中, 并且这个wait_queue_entry的回调func是ep_poll_callback**
 
-**而ep_poll_callback的作用是判断是否唤醒epoll->wq中的进程**
+**而ep_poll_callback的作用是判断是: 1. 是否是感兴趣的时间发生 2. 插入ovflist还是rdllist 3. 是否需要唤醒epoll->wq中的进程**
 
 ep_insert的时候, 每一个wait_queue_entry都是加入了WQ_FLAG_EXCLUSIVE标识, 所以只会有一个wait_queue_entry被唤醒, 但是, ep_poll_callback中唤醒
 
@@ -1894,9 +1894,35 @@ https://elixir.bootlin.com/linux/v4.15/source/fs/eventpoll.c#L1736
 
 就是, 当一个event受信, 会调用default_wake_function
 
+wait_up_locked
+================
+
+wake_up_locked是去唤醒指定的wait_queue上的wait_queue_entry
+
+https://elixir.bootlin.com/linux/v4.15/source/include/linux/wait.h#L198
+
+.. code-block:: c
+
+   #define wake_up_locked(x)		__wake_up_locked((x), TASK_NORMAL, 1)
+
+所以就是调用__wake_up_locked, 传入的参数第二个是TASK_NORMAL, 第三个是1
+
+而TASK_NORMAL则包含了TASK_INTERRUPTIBLE和TASK_UNINTERRUPTIBLE
+
+.. code-block:: c
+
+    #define TASK_NORMAL			(TASK_INTERRUPTIBLE | TASK_UNINTERRUPTIBLE)
+
+
+而__wake_up_locked则是调用__wake_up_common, 并且把第三个参数作为nr_exclusive传给__wake_up_common
+
+所以wake_up_locked也是只唤醒一个线程
+
 
 default_wake_function
 =========================
+
+唤醒ep->wq上的wait_queue_entry的时候, 回调是default_wake_function
 
 default_wake_function是调用try_to_wake_up这个函数, 这个函数是通用的唤醒程序的调用
 
@@ -2132,7 +2158,7 @@ __wake_up_common中, 而__wake_up_common中, nr_exclusive的作用是:
 *The core wakeup function. Non-exclusive wakeups (nr_exclusive == 0) just wake everything up.
 If it's an exclusive wakeup (nr_exclusive == small +venumber) then we wake all the non-exclusive tasks and one exclusive task.*
 
-也就是nr_exclusive如果是0, 那么会唤醒所有的wait_queue_entry, 如果大于0, 那么唤醒一个exclusive的wait_queue_entry和所有的非exclusive的wait_queue_entry
+也就是nr_exclusive如果是0, 那么会唤醒所有的wait_queue_entry, 如果大于0, **那么唤醒一个exclusive的wait_queue_entry和所有的非exclusive的wait_queue_entry**
 
 https://elixir.bootlin.com/linux/v4.15/source/kernel/sched/wait.c#L72
 
@@ -2295,4 +2321,34 @@ https://elixir.bootlin.com/linux/v4.15/source/kernel/sched/wait.c#L72
     }
 
 4.4中是add_wait_queue, 而4.15的话是判断一下EPOLLEXCLUSIVE, 然后调用add_wait_queue_exclusive的
+
+ET和LT的区别
+==================
+
+ep_poll的时候, 给ep_scan_ready_list传入的函数是ep_send_events_proc
+
+这个函数是复制数据到用户态的, 然后还有针对LE/ET模式的区别
+
+简单来讲就是, 如果是LT模式, 则把event再次放入rdllist中
+
+.. code-block:: c
+
+    static int ep_send_events_proc(struct eventpoll *ep, struct list_head *head,
+    			       void *priv)
+    {
+    
+        // 不是ET模式, 则再次放入rdllist中
+        else if (!(epi->event.events & EPOLLET)) {
+            list_add_tail(&epi->rdllink, &ep->rdllist);
+        }
+    
+    }
+
+
+所以
+
+1. 如果你是LT模式的话, 你读了一部分数据, 不校验数据是否读完了, 然后继续ep_poll, 还是能被提醒说有数据可读的.
+
+2. 在ET模式下, 如果你读了某fd的数据n大于你要读的大小m, 此时你读取的m, 但是还剩下n-m, 如果你不继续检验数据是否读完了
+   那么你继续ep_poll的话, rdllist上没有该fd, 所以是不会拿到通知的.
 

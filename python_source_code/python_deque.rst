@@ -112,7 +112,11 @@ deque
                                                                              |
                                                                              + data      = [b, ..., ..., ..., .....]
     
-    通过append可以推测出pop, appendleft, popleft的流程了
+    3. pop
+    
+    pop则出了设置rightblock和rightlink之外, 还是会回收block的
+
+    比如上面一直pop, b1完全没有使用了, 那么直接释放掉b1
     
     '''
 

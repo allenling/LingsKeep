@@ -409,6 +409,65 @@ This clutter would defeat the usefulness of the global declaration for identifyi
 
 有时候得抠字眼一下才能理解.
 
+文档上的说明就是python如何编译的了, 从字节码上看一下
+
+
+.. code-block:: python
+
+    In [3]: def test():
+       ...:     print(a)
+       ...:     return
+       ...: 
+    
+    In [4]: dis.dis(test)
+      2           0 LOAD_GLOBAL              0 (print)
+                  2 LOAD_GLOBAL              1 (a)
+                  4 CALL_FUNCTION            1
+                  6 POP_TOP
+    
+      3           8 LOAD_CONST               0 (None)
+                 10 RETURN_VALUE
+    
+    In [5]: def test():
+       ...:     a.append(1)
+       ...:     return
+       ...: 
+    
+    In [6]: dis.dis(test)
+      2           0 LOAD_GLOBAL              0 (a)
+                  2 LOAD_ATTR                1 (append)
+                  4 LOAD_CONST               1 (1)
+                  6 CALL_FUNCTION            1
+                  8 POP_TOP
+    
+      3          10 LOAD_CONST               0 (None)
+                 12 RETURN_VALUE
+    
+    In [7]: def test():
+       ...:     a = []
+       ...:     a.append(1)
+       ...:     return
+       ...: 
+       ...: 
+    
+    In [8]: dis.dis(test)
+      2           0 BUILD_LIST               0
+                  2 STORE_FAST               0 (a)
+    
+      3           4 LOAD_FAST                0 (a)
+                  6 LOAD_ATTR                0 (append)
+                  8 LOAD_CONST               1 (1)
+                 10 CALL_FUNCTION            1
+                 12 POP_TOP
+    
+      4          14 LOAD_CONST               0 (None)
+                 16 RETURN_VALUE
+
+
+编译器很聪明, 它知道test中有没有定义a, 如果定义了, 那么就是LOAD_FAST(这个字节码是从函数的局部变量拿), 如果没有定义, 那么直接是LOAD_GLOBAL
+
+如果未定义但是是modify in place, 那么字节码还是LOAD_GLOBAL
+
 先赋值
 =============
 

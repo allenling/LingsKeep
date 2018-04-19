@@ -1579,11 +1579,13 @@ https://elixir.bootlin.com/linux/latest/source/kernel/sched/fair.c#L55
 place_entity最终计算
 ==========================
 
-最后, 得到的slice就是se的delta, 然后place_entity再次调用calc_delta_fair去计算最终的vruntime
+先调用通过sched_slice得到delta, 然后place_entity再次调用calc_delta_fair去计算最终的vruntime
 
-1. delta = sched_slice(cfs_rq, se), delta = slice = slice * (se->load / cfs_rq->load)
+1. vruntime = sched_vslice(cfs_rq, se) -> calc_delta_fair(sched_slice(cfs_rq, se), se)
 
-2. vruntime = calc_delta_fair(sched_slice(cfs_rq, se), se), vruntime = calc_delta_fair(slice, NICE_0_LOAD, se)
+2. delta = sched_slice(cfs_rq, se), delta = slice = slice * (se->load / cfs_rq->load)
+
+2. calc_delta_fair(sched_slice(cfs_rq, se), se) = calc_delta_fair(slice, NICE_0_LOAD, se)
 
 3. 所以, vruntime = slice * (NICE_0_LOAD / se->load) = slice * (se->load / cfs_rq->load) * (NICE_0_LOAD / se->load)
 

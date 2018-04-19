@@ -1575,6 +1575,19 @@ https://elixir.bootlin.com/linux/latest/source/kernel/sched/fair.c#L55
 
 而关于实际抢占是否发生, 还和sched_min_granularity_ns等参数有关(参考 [16]_), 具体继续看后面
 
+
+place_entity最终计算
+==========================
+
+最后, 得到的slice就是se的delta, 然后place_entity再次调用calc_delta_fair去计算最终的vruntime
+
+1. delta = sched_slice(cfs_rq, se), delta = slice = slice * (se->load / cfs_rq->load)
+
+2. vruntime = calc_delta_fair(sched_slice(cfs_rq, se), se), vruntime = calc_delta_fair(slice, NICE_0_LOAD, se)
+
+3. 所以, vruntime = slice * (NICE_0_LOAD / se->load) = slice * (se->load / cfs_rq->load) * (NICE_0_LOAD / se->load)
+
+
 wake_up_new_task
 ===================
 

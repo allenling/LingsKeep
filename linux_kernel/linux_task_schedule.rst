@@ -48,6 +48,8 @@
 
 .. [22] https://blog.csdn.net/gatieme/article/details/52068016
 
+.. [23] http://bbs.chinaunix.net/thread-3628238-1-1.html
+
 **参考1, 6, 9是主要参考, 包括linux的调度历史, O(1)调度以及CFS的概念和源码解释**
 
 参考 [4]_是关于linux调度的一个简介, 参考 [5]_是O(1)调度的解释
@@ -80,7 +82,7 @@
 
 参考21是抢占调度时候, TIF_NEED_RESCHED标志位的作用
 
-参考22是schedule函数中, pick_next_task函数的流程分析, 写得挺清楚的
+参考22, 23是schedule函数中, pick_next_task函数的流程分析, 写得挺清楚的
 
 2.6.23至今(4.15)linux已经是CFS调度为主了
 
@@ -1993,7 +1995,17 @@ https://elixir.bootlin.com/linux/v4.15/source/kernel/sched/core.c#L880
 check_preempt_wakeup
 =========================
 
-cfs中, 判断传入的task(se)->vruntime是否小于rq->curr->vruntime, 如果小, 则说明传入的se需要强抢占到curr, 则调用resched_curr
+主要是判断是否调用resched_curr, 为curr加上被抢占的标识
+
+流程是:
+
+1. 先判断是否需要set_next_buddy去设置cfs_rq->next, 无论是否调用set_next_buddy, 都走2
+
+2. 判断当前task(curr)是否被加上了抢占标识(TIF_NEED_RESCHED), 如果已经被加上了, 则退出, 否则走3
+   
+3. 调用wakeup_preempt_entity去判断传入的task是否应该抢占掉curr, 如果应该抢占, 则调用resched_curr
+
+4. 是否需要调用set_last_buddy设置cfs_rq->last
 
 设置curr为需要被抢占状态.
 
@@ -2072,6 +2084,7 @@ cfs中, 判断传入的task(se)->vruntime是否小于rq->curr->vruntime, 如果�
     	     * Bias pick_next to pick the sched entity that is
     	     * triggering this preemption.
     	     */
+            // 如果开启了NEXT_BUDDY特性, 设置task为cfs_rq->next
     	    if (!next_buddy_marked)
     	    	set_next_buddy(pse);
     	    goto preempt;
@@ -2091,10 +2104,11 @@ cfs中, 判断传入的task(se)->vruntime是否小于rq->curr->vruntime, 如果�
     	 * for obvious reasons its a bad idea to schedule back to it.
     	 */
     	if (unlikely(!se->on_rq || curr == rq->idle))
-    		return;
+    	    return;
     
+        // 如果开启了LAST_BUDDY特性, 把task设置到cfs_rq->last上
     	if (sched_feat(LAST_BUDDY) && scale && entity_is_task(se))
-    		set_last_buddy(se);
+    	    set_last_buddy(se);
     }
 
 
@@ -2127,9 +2141,128 @@ cfs中, 判断传入的task(se)->vruntime是否小于rq->curr->vruntime, 如果�
     // 唤醒的task一定会抢占掉当前task
     SCHED_FEAT(WAKEUP_PREEMPTION, true)
 
+当然, 也可以在/sys/kernel/debug/sched_features下看到内核所配置的特性
+
 关于WAKEUP_PREEMPTION特性, 可以参考 [16]_, 关闭这个特性的话, 唤醒的task不会抢占掉正在运行的task了
 
-关于cfs_rq->next, cfs_rq->last
+**根据默认配置的特性, 可知, 一般会把传入的task设置到cfs_rq->last上**
+
+关于cfs_rq->next, cfs_rq->last, 会关系到下一个task的选择.
+
+也就是说, 下一个task的选择可能不一定是leftmost, 有些task更需要运行, 这些更需要运行的task会设置到cfs_rq->next, cfs_rq->last上
+
+这样就比对lestmost, next, last(比对有个算法, 不是简单的比较), 选一个更合适的task. next和last也可以在选择的时候可以直接拿而不是查找
+
+相当于缓存了最想运行的task
+
+  *pick_next_entity的代码，它选择进程的规则较书上说的已经有了一些改进。原本cfs总是选择rb树最左边的进程，也就是虚拟时钟最落后的进程。现在又在这个规则之上加入了buddy这个概念*
+  
+  -- 参考23 
+
+关于下一个task的选择, 看后面的schedule部分
+
+**注意的地方:** 有两个set_next_buddy的地方
+
+1. 第一个调用条件是: 设置了NEXT_BUDDY特性, 并且cfs_rq->nr_running大于sched_nr_latency, 并且传入的flag不包含WF_FORK
+
+2. 第二个调用条件是: 如果传入的task确实应该被选择, 并且1中的判断没有通过, 则强制调用set_next_buddy
+
+
+wakeup_preempt_entity
+=========================
+
+作用是判断传入的curr和se之间, se是否应该抢占掉curr, 抢占的条件是se要小于curr, 并且大于curr+gran
+
+这个函数在schedule中也有使用
+
+https://elixir.bootlin.com/linux/v4.15/source/kernel/sched/fair.c#L6488
+
+.. code-block:: c
+
+    /*
+     * Should 'se' preempt 'curr'.
+     *
+     *             |s1
+     *        |s2
+     *   |s3
+     *         g
+     *      |<--->|c
+     *
+     *  w(c, s1) = -1
+     *  w(c, s2) =  0
+     *  w(c, s3) =  1
+     *
+     */
+    static int
+    wakeup_preempt_entity(struct sched_entity *curr, struct sched_entity *se)
+    {
+        // curr->vruntime和se->vruntime的差值
+    	s64 gran, vdiff = curr->vruntime - se->vruntime;
+    
+        // 如果curr->vruntime小于等于se->vruntime
+        // 那么显然curr不能被抢占
+    	if (vdiff <= 0)
+    		return -1;
+    
+        // 计算一下curr可允许的抢占范围
+    	gran = wakeup_gran(curr, se);
+        // 如果se->vruntime小于curr->vrutime
+        // 并且差值比curr的某一个范围还要大, 则se可以抢占掉curr
+        // 也就是说, se->vruntime必须比curr小, 并且小得多(小于curr再减去一个值)
+    	if (vdiff > gran)
+    		return 1;
+    
+    	return 0;
+    }
+
+
+看注释, c是curr, g是c的抢占范围
+
+1. 如果传入的task在s1的位置, 也就是vdiff <= 0, 则返回-1
+
+2. 如果传入的task是s2的位置, 也就是vdiff > 0, curr->vruntime > se->vruntime,
+
+   但是, vdiff < gran, 也就是s2 - curr < g, 所以返回0
+
+3. 如果是s3的位置, 那么明显vdiff > 0, 并且vidff > gran, 此时se才运行抢占掉curr!!!!!!!!!!!!!!!!!
+
+而这个gran的值则是基于最小调度周期(sysctl_sched_min_granularity)计算的
+
+https://elixir.bootlin.com/linux/v4.15/source/kernel/sched/fair.c#L6453
+
+.. code-block:: c
+
+    static unsigned long
+    wakeup_gran(struct sched_entity *curr, struct sched_entity *se)
+    {
+    	unsigned long gran = sysctl_sched_wakeup_granularity;
+    
+    	/*
+    	 * Since its curr running now, convert the gran from real-time
+    	 * to virtual-time in his units.
+    	 *
+    	 * By using 'se' instead of 'curr' we penalize light tasks, so
+    	 * they get preempted easier. That is, if 'se' < 'curr' then
+    	 * the resulting gran will be larger, therefore penalizing the
+    	 * lighter, if otoh 'se' > 'curr' then the resulting gran will
+    	 * be smaller, again penalizing the lighter task.
+    	 *
+    	 * This is especially important for buddies when the leftmost
+    	 * task is higher priority than the buddy.
+    	 */
+    	return calc_delta_fair(gran, se);
+    }
+
+
+还记得calc_delta_fair函数么, 这个函数的第一个参数是delta, 然后判断
+
+1. 如果se的load是NICE_0_LOAD, 那么返回delta
+
+2. 否则, 返回delta * (NICE_0_LOAD / se->load)
+
+所以, 如果se->vruntime < curr->vruntime, 并且se->vruntime < curr->vruntime - (sysctl_sched_wakeup_granularity * (NICE_0_LOAD / se->load))
+
+则说明传入的task可以抢占掉curr, 然后调用resched_curr, 并且设置task为cfs_rq->next或csf_rq->last, 是得curr被抢占掉的时候能优先选择传入的task
 
 resched_curr
 =================
@@ -2149,6 +2282,8 @@ https://elixir.bootlin.com/linux/v4.15/source/kernel/sched/core.c#L481
     
     	lockdep_assert_held(&rq->lock);
     
+        // 如果curr已经被设置过抢占标识了
+        // 退出
     	if (test_tsk_need_resched(curr))
     		return;
     
@@ -2362,9 +2497,9 @@ ep_poll中休眠
 schedule/__schedule
 =========================
 
-schedule函数主要就是直接调用__schedule函数
+**schedule(__schedule)函数就是做一次强制抢占操作的地方!!!!!!!!!!!!**
 
-__schedule函数是强行把当前task从cfs的红黑树中移除, 然后选择下一个task去运行, 也就是做一次抢占操作(preempty)
+上面的resched_curr只是标识了curr需要被抢占, 那么某个地方, 判断到curr需要被抢占之后, 调用schedule或者__schedule
 
 https://elixir.bootlin.com/linux/v4.15/source/kernel/sched/core.c#L3427
 
@@ -2401,7 +2536,7 @@ https://elixir.bootlin.com/linux/v4.15/source/kernel/sched/core.c#L3287
         // 然后在ep_poll中把task状态设置为TASK_INTERRUPTIBLE, 该状态是大于0的
         // 所以会走到if的代码里面
         if (!preempt && prev->state) {
-            // 如果此时有信号发生, 则直接设置prev的状态为TASK_RUNNING状态
+            // 如果此时当前的task有信号发生, 则直接当前task为TASK_RUNNINg
             if (unlikely(signal_pending_state(prev->state, prev))) {
             	prev->state = TASK_RUNNING;
             } else {
@@ -2417,21 +2552,28 @@ https://elixir.bootlin.com/linux/v4.15/source/kernel/sched/core.c#L3287
         next = pick_next_task(rq, prev, &rf);
         
         if (likely(prev != next)) {
-        
+            rq->nr_switches++;
+            rq->curr = next;
+
             rq = context_switch(rq, prev, next, &rf);
         
         }
     
     }
 
-所以, ep_poll中休眠最终的调用是schedule函数, 该函数是进行一次抢占操作
+所以, ep_poll中休眠最终的调用是schedule函数, 该函数是把当前的task给抢占出去, 选择下一个task去运行, 也就是主动让出cpu时间了
 
-1. 如果task不是TASK_RUNNING状态(0x0000), 并且传入的preempt是false, 则触发deactivate_task
+1. 传入的preempt参数是什么意思, 没太明白
+
+2. 如果task不是TASK_RUNNING状态(0x0000), 并且传入的preempt是false, 则触发deactivate_task
+
    deactivate_task会调用到dequeue_task去把task从红黑树移除
 
-2. 选择下一个task
+3. 调用pick_next_task选择下一个task, pick_next_task已经把选出来的next设置为cfs_rq->curr了, cfs_rq->curr = next
 
-3. context_switch
+4. 然后在if (prev != next)的判断下, 把rq->curr设置为选出来的next, rq->curr = next, 所以此时rq->curr = cfs_rq = next
+
+5. context_switch, 做一些寄存器切换等操作
 
 
 dequeue_task/dequeue_task_fair
@@ -2507,75 +2649,15 @@ https://elixir.bootlin.com/linux/v4.15/source/kernel/sched/fair.c#L5262
 
 除了dequeue_entity函数, 其他流程, 恩~~~不太清楚
 
-dequeue_entity
-=====================
-
-真正去把task从红黑树移除的操作是__dequeue_entity函数中
-
-.. code-block:: c
-
-    static void
-    dequeue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
-    {
-    	/*
-    	 * Update run-time statistics of the 'current'.
-    	 */
-        // 又要更新一下cfs_rq->curr->vruntime
-    	update_curr(cfs_rq);
-    
-    	/*
-    	 * When dequeuing a sched_entity, we must:
-    	 *   - Update loads to have both entity and cfs_rq synced with now.
-    	 *   - Substract its load from the cfs_rq->runnable_avg.
-    	 *   - Substract its previous weight from cfs_rq->load.weight.
-    	 *   - For group entity, update its weight to reflect the new share
-    	 *     of its group cfs_rq.
-    	 */
-        // 更新统计量
-    	update_load_avg(cfs_rq, se, UPDATE_TG);
-    	dequeue_runnable_load_avg(cfs_rq, se);
-    
-    	update_stats_dequeue(cfs_rq, se, flags);
-    
-    	clear_buddies(cfs_rq, se);
-    
-    	if (se != cfs_rq->curr)
-            // 真正把task移除红黑树的地方
-    	    __dequeue_entity(cfs_rq, se);
-
-        // on_rq的属性设置为0
-    	se->on_rq = 0;
-    	account_entity_dequeue(cfs_rq, se);
-    
-    	/*
-    	 * Normalize after update_curr(); which will also have moved
-    	 * min_vruntime if @se is the one holding it back. But before doing
-    	 * update_min_vruntime() again, which will discount @se's position and
-    	 * can move min_vruntime forward still more.
-    	 */
-    	if (!(flags & DEQUEUE_SLEEP))
-    	    se->vruntime -= cfs_rq->min_vruntime;
-    
-    	/* return excess runtime on last dequeue */
-    	return_cfs_rq_runtime(cfs_rq);
-    
-    	update_cfs_group(se);
-    
-    	/*
-    	 * Now advance min_vruntime if @se was the entity holding it back,
-    	 * except when: DEQUEUE_SAVE && !DEQUEUE_MOVE, in this case we'll be
-    	 * put back on, and if we advance min_vruntime, we'll be placed back
-    	 * further than we started -- ie. we'll be penalized.
-    	 */
-    	if ((flags & (DEQUEUE_SAVE | DEQUEUE_MOVE)) == DEQUEUE_SAVE)
-    		update_min_vruntime(cfs_rq);
-    }
-
 
 pick_next_task/pick_next_task_fair
 ========================================
 
 pick_next_task这个函数将会调用到cfs中的pick_next_task_fair
+
+该函数中, 如果开启了CONFIG_FAIR_GROUP_SCHED, 也就是开启了组调度, 那么流程复杂一点(默认组调度是开启的)
+
+然后这里只是看流程, 所以直接去看simple代码块的流程, simple则是没有配置组调度时候最简单的选择过程
 
 https://elixir.bootlin.com/linux/v4.15/source/kernel/sched/fair.c#L6619
 
@@ -2586,34 +2668,25 @@ https://elixir.bootlin.com/linux/v4.15/source/kernel/sched/fair.c#L6619
     {
     
     
+    #ifdef CONFIG_FAIR_GROUP_SCHED
         // 省略代码, 其中包括配置了组调度的流程
+    simple:
+    #endif
+        // simple是最简单情况下选择的流程
 
-        // put
+        // 把当前的task放入cfs红黑树中
+        // 之前我们把当前task给dequeue了
         put_prev_task(rq, prev);
-    
+        
         do {
-            // 选出下一个task
+            // 挑选下一个task
             se = pick_next_entity(cfs_rq, NULL);
-            // 设置下一个task, 也就是把选出来的下一个task设置为cfs->curr
+            // 把下一个task设置为curr
             set_next_entity(cfs_rq, se);
             cfs_rq = group_cfs_rq(se);
         } while (cfs_rq);
         
-        // 选出来的下一个se的对应的task
         p = task_of(se);
-       
-        // 如果下一个task和传入的当前task不一样
-        if (prev != p) {
-
-            struct sched_entity *pse = &prev->se;
-
-            // 省略代码
-
-            put_prev_entity(cfs_rq, pse);
-            set_next_entity(cfs_rq, se);
-
-        }
-
 
         // 还省略了很多代码
 
@@ -2623,7 +2696,7 @@ https://elixir.bootlin.com/linux/v4.15/source/kernel/sched/fair.c#L6619
     }
 
 
-1. pick_next_entity则是选择最左子节点, 如果传入的task比最左子节点小, 则运行传入的task
+1. pick_next_entity, 是选择合适的task来运行, 不一定是leftmost
 
 2. put_prev_task, 把prev, 也就是传入的task, 重新加入红黑树, 因为在__schedule中, 我们移除了task
 
@@ -2632,6 +2705,30 @@ https://elixir.bootlin.com/linux/v4.15/source/kernel/sched/fair.c#L6619
 
 pick_next_entity
 ===================
+
+参考 [22]_
+
+主要流程是:
+
+1. leftmost和curr谁小, 谁小选谁, 这里保存到se
+
+2. 如果cfs_rq中配置了需要跳过某个task, cfs_rq->skip, 并且cfs_rq->skip == se, 那么需要去选择一个"备胎":
+
+   如果1中se是curr, 也就是curr小于leftmost, 那么second=leftmost
+   
+   否则second = cfs_rq->next, 但是如果cfs_rq->next不存在或者curr->vruntime < cfs_rq->next->vruntime
+
+   那么second = curr
+
+3. 接2, 然后调用wakeup_preempt_entity(second, leftmost), 如果lefmost大于second
+
+   那么se = second
+
+4. 接着, 调用wakeup_preempt_entity(cfs_rq->last, se), 如果last小于se, 则se = last
+
+5. 接着调用wakeup_preempt_entity(cfs_rq->next, se), 如果next小于se, 则se = next
+
+所以, 简单总结起来就是, curr, leftmost, next, last, 选一个最小的
 
 https://elixir.bootlin.com/linux/v4.15/source/kernel/sched/fair.c#L4240
 
@@ -2647,24 +2744,54 @@ https://elixir.bootlin.com/linux/v4.15/source/kernel/sched/fair.c#L4240
     static struct sched_entity *
     pick_next_entity(struct cfs_rq *cfs_rq, struct sched_entity *curr)
     {
-        // 这里是去leftmost
-        struct sched_entity *left = __pick_first_entity(cfs_rq);
-        struct sched_entity *se;
+    	struct sched_entity *left = __pick_first_entity(cfs_rq);
+    	struct sched_entity *se;
     
-        // 判断是否有最左叶节点, 有的话, 取两者最小
-        // 如果没有最左叶节点, 则left=curr
-        // 或者存在最左叶节点和当前task, 并且当前task比最左叶节点小, 那么left=curr
-        if (!left || (curr && entity_before(curr, left)))
-        	left = curr;
-        
-        se = left; /* ideally we run the leftmost entity */
+    	/*
+    	 * If curr is set we have to see if its left of the leftmost entity
+    	 * still in the tree, provided there was anything in the tree at all.
+    	 */
+    	if (!left || (curr && entity_before(curr, left)))
+    	    left = curr;
     
-        // 后面代码先省略
-        // h后面的代码都是走注释上的流程
+    	se = left; /* ideally we run the leftmost entity */
     
+    	/*
+    	 * Avoid running the skip buddy, if running something else can
+    	 * be done without getting too unfair.
+    	 */
+    	if (cfs_rq->skip == se) {
+    	    struct sched_entity *second;
+    
+    	    if (se == curr) {
+    	    	second = __pick_first_entity(cfs_rq);
+    	    } else {
+    	    	second = __pick_next_entity(se);
+    	    	if (!second || (curr && entity_before(curr, second)))
+    	    		second = curr;
+    	    }
+    
+    	    if (second && wakeup_preempt_entity(second, left) < 1)
+    		se = second;
+    	}
+    
+    	/*
+    	 * Prefer last buddy, try to return the CPU to a preempted task.
+    	 */
+    	if (cfs_rq->last && wakeup_preempt_entity(cfs_rq->last, left) < 1)
+    	    se = cfs_rq->last;
+    
+    	/*
+    	 * Someone really wants this to run. If it's not unfair, run it.
+    	 */
+    	if (cfs_rq->next && wakeup_preempt_entity(cfs_rq->next, left) < 1)
+    	    se = cfs_rq->next;
+    
+    	clear_buddies(cfs_rq, se);
+    
+    	return se;
     }
 
-基本上, 简单点就是如果存在最左叶节点left, 选left和curr的最小的那一个(||的后一个判断), 如果不存在最左叶节点, 则选curr(||的前一个判断)
 
 
 put_prev_task/set_next_entity
@@ -2717,7 +2844,7 @@ put_prev_task会调用到cfs中的put_prev_task_fair, 作用则是调用__enqueu
 
 注意的是, 红黑树上的task和cfs->curr是互斥的, 也就是说
 
-**如果一个task选出来称为curr, 那么得从红黑树中移除**
+**如果一个task选出来设置为curr, 那么得从红黑树中移除**
 
 .. code-block:: c
 
@@ -2745,7 +2872,6 @@ put_prev_task会调用到cfs中的put_prev_task_fair, 作用则是调用__enqueu
     
         // 后面代码先省略
     }
-
 
 scheduler_tick
 =================

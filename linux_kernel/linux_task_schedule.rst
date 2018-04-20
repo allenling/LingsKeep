@@ -46,6 +46,8 @@
 
 .. [21] http://www.linuxinternals.org/blog/2016/03/20/tif-need-resched-why-is-it-needed/
 
+.. [22] https://blog.csdn.net/gatieme/article/details/52068016
+
 **参考1, 6, 9是主要参考, 包括linux的调度历史, O(1)调度以及CFS的概念和源码解释**
 
 参考 [4]_是关于linux调度的一个简介, 参考 [5]_是O(1)调度的解释
@@ -77,6 +79,8 @@
 参考19, 20是调度参数的配置的解释, 比如sched_min_granularity_ns等等
 
 参考21是抢占调度时候, TIF_NEED_RESCHED标志位的作用
+
+参考22是schedule函数中, pick_next_task函数的流程分析, 写得挺清楚的
 
 2.6.23至今(4.15)linux已经是CFS调度为主了
 
@@ -865,13 +869,8 @@ a, b两个任务, 优先级都是0, 两人的load weight都是1024, 然后占cpu
 
 4. idle.c: 空闲(idle)task的调度策略
 
+下面主要是cfs的代码流程
 
-
-当一个task处于运行状态的时候, 内核调用enqueue_task, 该函数的作用是把指定的task加入到cpu的runqueue里面(优先级插入?)
-
-*Each CPU(core) in the system has its own runqueue, and any task can be included in at most one runqueue;*
-
-*A process scheduler’s job is to pick one task from a queue and assign it to run on a respective CPU(core).*
 
 调用路径
 ====================
@@ -890,8 +889,17 @@ a, b两个任务, 优先级都是0, 两人的load weight都是1024, 然后占cpu
 
              -> wake_up_new_task -> activate_task      -> enqueue_task                   -> enqueue_task_fair (cfs)
 
-                                 -> check_preempt_curr -> check_preempt_wakeup (cfs)     -> resched_curr
+                                 -> check_preempt_curr -> check_preempt_wakeup (cfs)
     '''
+
+    所以流程上就是, 先调用copy_process, 对新建的task进行调度的初始化, 然后如果配置了子task要优先于父task运行, 则标识父task为被抢占状态
+
+    然后经过copy_process之后, 父task被抢占之后选择的task不一定是新建的task, 而check_preempt_wakeup则是把当前task设置为cfs_rq->next或者cfs_rq->last
+
+    这样父task被抢占走的时候, 选择的下一个task就很有可能是当前新建的task了
+
+    此时传入给check_preempt_wakeup的标志位(wake_flag)是WF_FORK
+
 
 2. epoll的唤醒中, 先把把current加入到waitqueue中之后, 初始化默认的回调函数, 就是默认的唤醒函数default_wake_function, 该函数调用try_to_wake_up
 
@@ -900,13 +908,15 @@ a, b两个任务, 优先级都是0, 两人的load weight都是1024, 然后占cpu
     '''
     try_to_wake_up -> ttwu_queue -> ttwu_do_activate -> ttwu_active    -> activate_task(看上面)
 
-                                                     -> ttwu_do_wakeup -> check_preempt_curr(看上面)
+                                                     -> ttwu_do_wakeup -> check_preempt_curr(看上面, 但是传入的参数不一样)
     
     
     '''
 
+    try_to_wake_up给check_preempt_curr(check_preempt_wakeup)传入的唤醒标志位(wake_flag)是WF_SYNC
 
-3. epoll中休眠等待事件发生, 是调用schedule_hrtimeout_range去休眠放弃cpu的, schedule_hrtimeout_range调用的是schedule函数
+
+3. epoll中休眠等待事件发生, schedule_hrtimeout_range调用schedule函数去休眠放弃cpu的, 也就是强制做一次抢占操作, 移除curr, 强行放弃cpu
 
 .. code-block:: python
 
@@ -953,7 +963,7 @@ a, b两个任务, 优先级都是0, 两人的load weight都是1024, 然后占cpu
     '''
 
 
-6. check_preempt_curr流程
+6. check_preempt_curr流程, 其中还会配置去设置cfs_rq->next/cfs_rq->last, next和last是用来做抢占的时候, 和leftmost比较,  选择更合适的task来运行
 
 .. code-block:: python
 
@@ -961,7 +971,7 @@ a, b两个任务, 优先级都是0, 两人的load weight都是1024, 然后占cpu
     
     check_preempt_curr -> check_preempt_wakeup (cfs) -> update_curr
                      
-                                                    -> resched_curr(rq)
+                                                     -> resched_curr(rq)
     
     
     '''
@@ -977,21 +987,27 @@ a, b两个任务, 优先级都是0, 两人的load weight都是1024, 然后占cpu
     
     '''
 
+    主要是判断rq->curr是否需要被抢占走, 其他还包括load balance
+
 * 其中check_preempt_tick和check_preempt_curr都会调用resched_curr, 但是条件是有区别的
   
-  check_preempt_tick  : **计算req->curr的时间片是否使用完了, 使用完了则调用resched_curr去设置被抢占状态, 相关的属性是sum_exec_runtime/prev_sum_exec_runtime**
+  check_preempt_tick  : **计算req->curr的时间片是否使用完了, 使用完了则调用resched_curr去设置被抢占状态, 相关的计算属性是sum_exec_runtime/prev_sum_exec_runtime**
 
-  check_preempt_wakeup: **判断新建的task是否需要抢占rq->curr, 如果需要, 调用resched_curr设置上需要被抢占状态**
+  check_preempt_wakeup: **判断传入的task的vruntime是否小于rq->curr, 如果小鱼, 则证明被唤醒的传入的task很喜欢运行, 所以调用resched_curr设置rq->curr被抢占状态**
 
 * update_curr都是更新cfs_rq->curr的vruntime和sum_exec_runtime, 以及cfs_rq->min_vruntime的值
   
   下次时钟周期去调用check_preempt_tick通过sum_exec_runtime和prev_sum_exec_runtime时间的差值
   
-  去判断是cfs_rq->curr是否以及用完了被分配的(理想的, ideal)时间, 如果是, 则调用resched_curr设置cfs_rq->curr需要被抢占掉
+  去判断是cfs_rq->curr是否已经用完了 **计划分配的(理想的, ideal)运行时间**, 如果是, 则调用resched_curr设置cfs_rq->curr需要被抢占掉
 
 * **值得注意的是, 上面的流程, 最终都是调用到resched_curr, 而resched_curr只是把rq->curr这个task设置上被抢占状态(TIF_NEED_RESCHED), 真正的去做一次抢占是在schedule(__schedule)函数**
 
   也就是谁调用schedule, 就是执行了一次强制抢占
+
+* 进行一次抢占的时候是否一定是最左叶节点? 不一定, 会拿leftmost和cfs_rq->next, cfs_rq->last三者比较, 选一个合适的.
+
+  这里配合check_preempt_wakeup和schedule一起看
 
 
 clone
@@ -1206,6 +1222,7 @@ https://elixir.bootlin.com/linux/v4.15/source/kernel/sched/fair.c#L9442
                 // 这里!!!!!se的vruntime初始化为curr被更新之后的vruntime
     		se->vruntime = curr->vruntime;
     	}
+
         // 这里!!!上一个if代码里面, se被初始化为curr的vruntime值之后
         // 这个函数是对task的vruntime进行一些补偿
     	place_entity(cfs_rq, se, 1);
@@ -1576,24 +1593,83 @@ https://elixir.bootlin.com/linux/latest/source/kernel/sched/fair.c#L55
 而关于实际抢占是否发生, 还和sched_min_granularity_ns等参数有关(参考 [16]_), 具体继续看后面
 
 
-place_entity最终计算
+place_entity补偿最终计算
 ==========================
 
 先调用通过sched_slice得到delta, 然后place_entity再次调用calc_delta_fair去计算最终的vruntime
 
-1. vruntime = sched_vslice(cfs_rq, se) -> calc_delta_fair(sched_slice(cfs_rq, se), se)
+1. new_for_task->vruntime = min_vruntime + sched_vslice(cfs_rq, se)
+                         
+                            min_vruntime + calc_delta_fair(sched_slice(cfs_rq, se), se)
 
-2. delta = sched_slice(cfs_rq, se), delta = slice = slice * (se->load / cfs_rq->load)
+2. delta = sched_slice(cfs_rq, se), delta = slice = base_slice * (se->load / cfs_rq->load)
 
 2. calc_delta_fair(sched_slice(cfs_rq, se), se) = calc_delta_fair(slice, NICE_0_LOAD, se)
 
-3. 所以, vruntime = slice * (NICE_0_LOAD / se->load) = slice * (se->load / cfs_rq->load) * (NICE_0_LOAD / se->load)
+3. 所以, new_for_task->vruntime = min_vruntime + slice * (NICE_0_LOAD / se->load)
 
+                                = min_vruntime + base_slice * (se->load / cfs_rq->load) * (NICE_0_LOAD / se->load)
+
+place_entity交换父子task的vruntime
+=======================================
+
+在place_entity中, 计算了新创建的task的实际vruntime之后, 会根据是否配置了sysctl_sched_child_runs_first标志
+
+去决定是否交换父子task之间的vruntime
+
+
+如果配置了sysctl_sched_child_runs_first, 所以fork出来的子task的vruntime, 也就是经过 *min_vruntime +=sched_vslice* 计算之后
+
+的值大于父task(curr)的vruntime, 说明父task还是会先于子task运行, 那么交换两者的vruntime, 然后调用resched_curr去标识
+
+curr需要被抢占走
+
+
+.. code-block:: c
+
+    	if (sysctl_sched_child_runs_first && curr && entity_before(curr, se)) {
+    		/*
+    		 * Upon rescheduling, sched_class::put_prev_task() will place
+    		 * 'current' within the tree based on its new key value.
+    		 */
+    		swap(curr->vruntime, se->vruntime);
+                // 然后设置rq->curr为被抢占状态, 那么下一次检查是否需要被抢占的时候
+                // rq->curr则会被抢占走的
+    		resched_curr(rq);
+    	}
+
+
+**注意的是**:
+
+这里虽然调用resched_curr去标识curr应该被抢占走, 但是这里并没有把子task加入到cfs中
+
+也就是说虽然curr被标识被抢占走, 但是下一个task不一定是当前这个新建的task, 所以需要做一些操作去提醒cfs下一个
+
+运行的task是这个新建的task, 这就需要交给下面wake_up_new_task来操作了
 
 wake_up_new_task
 ===================
 
 这个函数是_do_fork中唤醒新task结构的地方
+
+https://elixir.bootlin.com/linux/v4.15/source/kernel/fork.c#L2015
+
+.. code-block:: c
+
+    long _do_fork(unsigned long clone_flags,
+    	      unsigned long stack_start,
+    	      unsigned long stack_size,
+    	      int __user *parent_tidptr,
+    	      int __user *child_tidptr,
+    	      unsigned long tls)
+    {
+    
+        p = copy_process(clone_flags, stack_start, stack_size,
+        			 child_tidptr, NULL, trace, tls, NUMA_NO_NODE);
+        if (!IS_ERR(p)) {
+            wake_up_new_task(p);
+        }
+    }
 
 https://elixir.bootlin.com/linux/v4.15/source/kernel/sched/core.c#L2447
 
@@ -1659,15 +1735,15 @@ https://elixir.bootlin.com/linux/v4.15/source/kernel/sched/core.c#L2447
 
 2. 调用activate_task函数去调用相关调度类的enqueue_task函数, 把task加入到cfs自己的红黑树中
 
-3. 注意的是, **wake_up_new_task传给activate_task的flag不是ENQUEUE_WAKEUP, 所以后面的操作不会调用place_entity去补偿task的vruntime**
+3. 注意的是, **wake_up_new_task传给activate_task的flag不是ENQUEUE_WAKEUP, 而是ENQUEUE_NOCLOCK, 所以后面的操作不会调用place_entity去补偿task的vruntime**
 
-4. 调用check_preempt_curr去做一次抢占操作
+4. 调用check_preempt_curr去做一次抢占操作, 传入的唤醒标志位是 **WF_FORK**, 表示这次唤醒是新建的task
 
 
 activate_task/enqueue_task
 ==============================
 
-该函数是直接调用enqueue_task, 而enqueue_task函数则是调用task自己的调度类的enqueue_task函数
+activeate_task是直接调用enqueue_task, 而enqueue_task函数则是调用task自己的调度类的enqueue_task函数
 
 .. code-block:: c
 
@@ -1759,6 +1835,8 @@ https://elixir.bootlin.com/linux/v4.15/source/kernel/sched/fair.c#L5206
     	hrtick_update(rq);
     }
 
+**如果是新建的task, 那么在copy_process初始化的on_rq是0, 所以会走到第一个for循环的enqueue_entity函数**
+
 关于第一个for循环
 
   *但是有个疑问是, 进程p所在的调度时提就一个, 为嘛要循环才能遍历啊?这是因为为了支持组调度.组调度下调度实体是有层次结构的, 我们将进程加入的时候, 同时要更新其父调度实体的调度信息, 而非组调度情况下, 就不需要调度实体的层次结构*
@@ -1839,21 +1917,41 @@ https://elixir.bootlin.com/linux/v4.15/source/kernel/sched/fair.c#L4006
     	}
     }
 
-1. 调用update_curr更新cfs_rq->curr的vruntime
+1. 关于renorm的判断, 这里有可能是说task从另外一个cfs_rq(也可说是另外一个cpu)移动当前的cfs_rq(当前的cpu)中
 
-2. 根据传入的flags中是否有ENQUEUE_WAKEUP标志去决定, 是否去调用place_entity去补偿vruntime
+   所以需要补偿, 参考 [16]_
+
+2. 调用update_curr更新cfs_rq->curr的vruntime
+
+3. 根据传入的flags中是否有ENQUEUE_WAKEUP标志去决定, 是否去调用place_entity去补偿vruntime
+
    显然, 在wake_up_new_task中传入的不是ENQUEUE_WAKEUP标志, 所以不会走vruntime
-   **后面的唤醒流程可以看到传入的flags中带有ENQUEUE_WAKEUP标志**
 
-2. 更新其他统计量
+   **后面的epoll唤醒流程(default_wake_function -> try_to_wake_up)可以看到传入的flags中带有ENQUEUE_WAKEUP标志**
 
-3. 如果cfs_rq->curr和传入的task不是同一个, 则调用__enqueue_entity, 把传入的task加入到红黑树.
+4. 更新其他统计量, 然后设置se->on_rq=1
+
+5. 如果cfs_rq->curr和传入的task不是同一个, 则调用__enqueue_entity, 把传入的task加入到红黑树.
+
    __enqueue_entity的流程只是加入红黑树, **并且去判断是否是leftmost, 是的话设置新的leftmost节点**, 代码先省略吧
 
 check_preempt_curr
 ======================
 
-在之前wake_up_new_task流程中, 调用activate_task去调用enqueue_task, 把task加入到cfs的红黑树中, 然后调用check_preempt_curr去做抢占操作
+wake_up_new_task调用activate_task去调用enqueue_task, 把task加入到cfs的红黑树之后, 然后调用check_preempt_curr去做抢占操作
+
+注意的是, 这里调用check_preempt_curr的时候, 传入的wake_flag是WF_FORK
+
+.. code-block:: c
+
+    void wake_up_new_task(struct task_struct *p)
+    {
+    
+        activate_task(rq, p, ENQUEUE_NOCLOCK);
+        
+        check_preempt_curr(rq, p, WF_FORK);
+    
+    }
 
 
 https://elixir.bootlin.com/linux/v4.15/source/kernel/sched/core.c#L880
@@ -1890,7 +1988,155 @@ https://elixir.bootlin.com/linux/v4.15/source/kernel/sched/core.c#L880
 
 如果task的调度类和rq->curr的调度类一致, 那么调用调度类的check_preempt_curr, 这里假设一直并且是cfs
 
-则会调用到cfs中的check_preempt_wakeup, 该函数会判断是否需要去抢占, 如果需要, 则还是调用resched_curr(rq), 所以主要看resched_curr
+则会调用到cfs中的check_preempt_wakeup, 该函数会判断是否需要去抢占
+
+check_preempt_wakeup
+=========================
+
+cfs中, 判断传入的task(se)->vruntime是否小于rq->curr->vruntime, 如果小, 则说明传入的se需要强抢占到curr, 则调用resched_curr
+
+设置curr为需要被抢占状态.
+
+需要注意一下的是cfs->next, cfs->last的设置, 相关的调度配置有, NEXT_BUDDY, LAST_BUDDY, WAKEUP_PREEMPTION
+
+
+.. code-block:: c
+
+    static void check_preempt_wakeup(struct rq *rq, struct task_struct *p, int wake_flags)
+    {
+        // rq的当前task
+    	struct task_struct *curr = rq->curr;
+        // 获取对应的se
+    	struct sched_entity *se = &curr->se, *pse = &p->se;
+        // 获取cfs_rq
+    	struct cfs_rq *cfs_rq = task_cfs_rq(curr);
+    	int scale = cfs_rq->nr_running >= sched_nr_latency;
+
+        // 注意一下next_buddy的配置
+    	int next_buddy_marked = 0;
+    
+    	if (unlikely(se == pse))
+    		return;
+    
+    	/*
+    	 * This is possible from callers such as attach_tasks(), in which we
+    	 * unconditionally check_prempt_curr() after an enqueue (which may have
+    	 * lead to a throttle).  This both saves work and prevents false
+    	 * next-buddy nomination below.
+    	 */
+    	if (unlikely(throttled_hierarchy(cfs_rq_of(pse))))
+    	    return;
+    
+        // 如果开启了NEXT_BUDDY特性, 然后传入的wake_flags有WF_FORK
+        // 设置cfs_rq->next = pse
+    	if (sched_feat(NEXT_BUDDY) && scale && !(wake_flags & WF_FORK)) {
+    	    set_next_buddy(pse);
+    	    next_buddy_marked = 1;
+    	}
+    
+    	/*
+    	 * We can come here with TIF_NEED_RESCHED already set from new task
+    	 * wake up path.
+    	 *
+    	 * Note: this also catches the edge-case of curr being in a throttled
+    	 * group (e.g. via set_curr_task), since update_curr() (in the
+    	 * enqueue of curr) will have resulted in resched being set.  This
+    	 * prevents us from potentially nominating it as a false LAST_BUDDY
+    	 * below.
+    	 */
+    	if (test_tsk_need_resched(curr))
+    	    return;
+    
+    	/* Idle tasks are by definition preempted by non-idle tasks. */
+    	if (unlikely(curr->policy == SCHED_IDLE) &&
+    	    likely(p->policy != SCHED_IDLE))
+    		goto preempt;
+    
+    	/*
+    	 * Batch and idle tasks do not preempt non-idle tasks (their preemption
+    	 * is driven by the tick):
+    	 */
+        // 如果没有开启WAKEUP_PREEMPTION特性, 那么
+        // 唤醒的task是不能抢占当前task的, 也就是必须等待当前task把时间片消耗完
+    	if (unlikely(p->policy != SCHED_NORMAL) || !sched_feat(WAKEUP_PREEMPTION))
+    	    return;
+    
+    	find_matching_se(&se, &pse);
+    	update_curr(cfs_rq_of(se));
+    	BUG_ON(!pse);
+        // 比对一下传入的task, 也就是唤醒的task, 和当前task那个优先级高(vruntime哪个小)
+        // 如果传入的task优先级高, 那么需要调用resched_curr
+        // 否则退出
+    	if (wakeup_preempt_entity(se, pse) == 1) {
+    	    /*
+    	     * Bias pick_next to pick the sched entity that is
+    	     * triggering this preemption.
+    	     */
+    	    if (!next_buddy_marked)
+    	    	set_next_buddy(pse);
+    	    goto preempt;
+    	}
+    
+    	return;
+    
+    preempt:
+    	resched_curr(rq);
+    	/*
+    	 * Only set the backward buddy when the current task is still
+    	 * on the rq. This can happen when a wakeup gets interleaved
+    	 * with schedule on the ->pre_schedule() or idle_balance()
+    	 * point, either of which can * drop the rq lock.
+    	 *
+    	 * Also, during early boot the idle thread is in the fair class,
+    	 * for obvious reasons its a bad idea to schedule back to it.
+    	 */
+    	if (unlikely(!se->on_rq || curr == rq->idle))
+    		return;
+    
+    	if (sched_feat(LAST_BUDDY) && scale && entity_is_task(se))
+    		set_last_buddy(se);
+    }
+
+
+调度特性, 是值调度的一些配置, 在https://elixir.bootlin.com/linux/v4.15/source/kernel/sched/features.h
+
+其中和上面提到的调度特性有, 下面是默认配置
+
+.. code-block:: c
+
+    // 新建的task的vruntime应该有演出
+    // 也就是place_entity中会对新建的task的vruntime进行sched_vslice补偿
+    SCHED_FEAT(START_DEBIT, true)
+    
+    /*
+     * Prefer to schedule the task we woke last (assuming it failed
+     * wakeup-preemption), since its likely going to consume data we
+     * touched, increases cache locality.
+     */
+    // 在选择下一个task的时候, 更倾向于cfs_rq->next
+    SCHED_FEAT(NEXT_BUDDY, false)
+    
+    /*
+     * Prefer to schedule the task that ran last (when we did
+     * wake-preempt) as that likely will touch the same data, increases
+     * cache locality.
+     */
+    // 在选择下一个task的时候, 更倾向于cfs_rq->last
+    SCHED_FEAT(LAST_BUDDY, true)
+    
+    // 唤醒的task一定会抢占掉当前task
+    SCHED_FEAT(WAKEUP_PREEMPTION, true)
+
+关于WAKEUP_PREEMPTION特性, 可以参考 [16]_, 关闭这个特性的话, 唤醒的task不会抢占掉正在运行的task了
+
+关于cfs_rq->next, cfs_rq->last
+
+resched_curr
+=================
+
+这个函数主要作用是把rq->curr这个task加上需要被抢占的标识(TIF_NEED_RESCHED), 这样某个地方(后面说)
+
+判断当前的curr是被设置上了被抢占的标识, 则强行进行一次抢占操作
 
 https://elixir.bootlin.com/linux/v4.15/source/kernel/sched/core.c#L481
 
@@ -1980,6 +2226,54 @@ https://elixir.bootlin.com/linux/v4.15/source/kernel/sched/core.c#L1705
 1. ttwu_activate最终也是调用enqueue_task函数, ttwu_activate -> activate_task -> enqueue_task
 
 2. ttwu_do_wakeup则是调用check_preempt_curr去跟当前task抢占, check_preempt_curr最终调用到cfs中的check_preempt_wakeup
+
+**这里注意的是:**
+
+调用default_wake_function的上一层函数, 比如socket可读的时候, 调用
+
+sock_def_readable -> wake_up_interruptible_sync_poll -> __wake_up_sync_key -> __wake_up_common这个路径中, 最终传递给default_wake_function的
+
+wait_flag是__wake_up_sync_key中设置的
+
+
+.. code-block:: c
+
+
+    // https://elixir.bootlin.com/linux/v4.15/source/include/linux/wait.h#L215
+    #define wake_up_interruptible_sync_poll(x, m)					\
+         __wake_up_sync_key((x), TASK_INTERRUPTIBLE, 1, (void *) (m))
+
+
+    // https://elixir.bootlin.com/linux/v4.15/source/kernel/sched/wait.c#L192
+    void __wake_up_sync_key(struct wait_queue_head *wq_head, unsigned int mode,
+    			int nr_exclusive, void *key)
+    {
+    	int wake_flags = 1; /* XXX WF_SYNC */
+    
+    	if (unlikely(!wq_head))
+    		return;
+    
+    	if (unlikely(nr_exclusive != 1))
+    		wake_flags = 0;
+    
+    	__wake_up_common_lock(wq_head, mode, nr_exclusive, wake_flags, key);
+    }
+
+可以看到, 在__wake_up_sync_key中, wait_flag一般是1, 因为一般传入的nr_exclusive是1来避免惊群
+
+关于wait_flag, 有
+
+https://elixir.bootlin.com/linux/v4.15/source/kernel/sched/sched.h#L1375
+
+.. code-block:: c
+
+    /*
+     * wake flags
+     */
+    #define WF_SYNC		0x01		/* waker goes to sleep after wakeup */
+    #define WF_FORK		0x02		/* child wakeup after fork */
+    #define WF_MIGRATED	0x4		/* internal use, task got migrated */
+
 
 
 ep_poll中休眠
@@ -2278,66 +2572,6 @@ dequeue_entity
     }
 
 
-schedule/_schedule
-==========================
-
-在epoll中, 调用schedule -> __schedule(false)去休眠和选择下一个task去运行
-
-.. code-block:: c
-
-    // schedule函数的内部
-    // https://elixir.bootlin.com/linux/v4.15/source/kernel/sched/core.c#L3427
-    asmlinkage __visible void __sched schedule(void)
-    {
-    	struct task_struct *tsk = current;
-    
-    	sched_submit_work(tsk);
-    	do {
-    	    preempt_disable();
-                // 调用__schedule
-    	    __schedule(false);
-    	    sched_preempt_enable_no_resched();
-    	} while (need_resched());
-    }
-    EXPORT_SYMBOL(schedule);
-
-    // __schedule会调用dequeue_task
-    // 然后选择下一个task去运行
-    // https://elixir.bootlin.com/linux/v4.15/source/kernel/sched/core.c#L3287
-    
-    static void __sched notrace __schedule(bool preempt)
-    {
-    
-        struct task_struct *prev, *next;
-        // 这里拿到当前cpu的rq的当前运行task
-        // 应该就是当前task了, 也就是current了
-        cpu = smp_processor_id();
-        rq = cpu_rq(cpu);
-        prev = rq->curr;
-    
-        if (!preempt && prev->state) {
-    
-            if (unlikely(signal_pending_state(prev->state, prev))) {
-    
-            }else{
-                // 这里调用dequeue_task
-                deactivate_task(rq, prev, DEQUEUE_SLEEP | DEQUEUE_NOCLOCK);
-    
-            }
-        }
-    
-        // 选择下一个task
-        next = pick_next_task(rq, prev, &rf);
-    
-        if (likely(prev != next)) {
-    
-            rq = context_switch(rq, prev, next, &rf);
-        }
-    
-        balance_callback(rq);
-    }
-
-
 pick_next_task/pick_next_task_fair
 ========================================
 
@@ -2511,6 +2745,13 @@ put_prev_task会调用到cfs中的put_prev_task_fair, 作用则是调用__enqueu
     
         // 后面代码先省略
     }
+
+
+scheduler_tick
+=================
+
+这个函数是每一个时钟周期都会去被调用, 主要是看有没有需要抢占的呀, 然后查看一下load_balance
+
 
 TIF_NEED_RESCHED
 ====================
@@ -2701,4 +2942,5 @@ https://elixir.bootlin.com/linux/v4.15/source/kernel/sched/core.c#L3605
         // 这个函数就是校验的地方
     	return unlikely(tif_need_resched());
     }
+
 

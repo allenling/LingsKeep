@@ -3112,7 +3112,7 @@ calc_delta_fair
 sched_slice
 -------------
 
-这个函数是计算指定的task在cfs_rq上, 应该得到多少时间, 计算方式是一个基准时间片, 然后取task在cfs_rq的load的比例
+这个函数是计算指定的task在cfs_rq上, 应该得到多少时间, 计算方式是: 一个基准时间片, 然后取task在cfs_rq的load的比例
 
 .. code-block:: c
 
@@ -3150,7 +3150,7 @@ sched_vslice
 
 这个是用在补偿新建task的vruntime的
 
-补偿的值是, task被分配的时间t, 然后取决于其load和NICE_0_LOAD的比例
+**补偿的值是: task被分配的时间t, 然后取决于其load和NICE_0_LOAD的比例**
 
 t  = sched_slice = slice * (se->load / cfs_rq-load)
 
@@ -3161,7 +3161,29 @@ vt = t * (NICE_0_LOAD / se->load)
     static u64 sched_vslice(struct cfs_rq *cfs_rq, struct sched_entity *se)
     {
     	return calc_delta_fair(sched_slice(cfs_rq, se), se);
+    } 
+
+wakeup_preempt_entity/wakeup_gran
+===================================
+
+这个是在check_preempt_wakeup中, 判断传入的task(se)是否抢占掉curr
+
+抢占的条件是, task->vruntime < curr->vruntime, 并且task->vruntime < curr->vruntime - wakeup_gran
+
+wakeup_gran = sysctl_sched_wakeup_granularity * (NICE_0_LOAD / se->load)
+
+.. code-block:: c
+
+    static unsigned long
+    wakeup_gran(struct sched_entity *curr, struct sched_entity *se)
+    {
+        // 基准值
+    	unsigned long gran = sysctl_sched_wakeup_granularity;
+    
+        // 调用之前的calc_delta_fair
+    	return calc_delta_fair(gran, se);
     }
+
 
 
 TIF_NEED_RESCHED
@@ -3221,9 +3243,16 @@ https://elixir.bootlin.com/linux/v4.15/source/kernel/sched/core.c#L3287
 
 1. 显式阻塞, 也就是主动放弃cpu, 包括锁, 信号量, waitqueue等待
 
-2. 
+2. TIF_NEED_RESCHED表示被设置上了, 也就是应该去做一次抢占操作, 比如在时钟周期中调用的scheduler_tick函数
 
-然后在resched_curr函数中, 只是对task结构设置了TIF_NEED_RESCHED标志位d的地方, 看起来两者并没有什么关联.
+   会设置上这个标志位
+
+3. 如果新建的task被加入到runqueue, 然后应该抢占掉curr的话, 可以对curr设置这个TIF_NEED_RESCHED标志位
+
+   然后, schedule函数会最近一次, 下面任一一种情况下被调用, 下面的情况没怎么看懂
+
+
+所以, 在resched_curr函数中, 只是对task结构设置了TIF_NEED_RESCHED标志位d的地方, 看起来两者并没有什么关联.
 
   *Even though this flag is set at this point, the task is not going to be preempted yet*
   
@@ -3235,65 +3264,17 @@ https://elixir.bootlin.com/linux/v4.15/source/kernel/sched/core.c#L3287
   
   --- 参考 20
 
-也就是这个标志位为设置的时候, 只是说明rq->curr需要被抢占掉, 把cpu让给其他task. 比如上面的epoll休眠是强行调用schedule函数, 而在一个时间周期(默认1ms)内的处理函数scheduler_tick
+也就是这个标志位为设置的时候, 只是说明rq->curr需要被抢占掉, 把cpu让给其他task. 而在一个时间周期(默认1ms)内的处理函数scheduler_tick也是设置TIF_NEED_RESCHED标志位而已. 
 
-则是设置TIF_NEED_RESCHED标志位而已. 然后在某个时间点会去校验task的TIF_NEED_RESCHED标志位, 如果被设置了, 则调用schedule(实际是__schedule)函数去强行切换task.
+然后在某个时间点会调用schedule/__schedule, 去强行抢占掉curr, 比如epoll中休眠的时候, 调用了schedule函数, 让出cpu
 
-比如在定时去调用scheduler_tick函数去处理时钟中断的时候, 调用顺序是scheduler_tick –> task_tick_fair –> entity_tick –> check_preempt_tick
+或者, 某个地方会去校验task的TIF_NEED_RESCHED标志位, 如果被设置了, 则调用schedule(实际是__schedule)函数去强行切换task.
 
-在check_preempt_tick中, 回去查看当前的task的时间片是否达到了限制, 是否需要抢占了
-
-https://elixir.bootlin.com/linux/v4.15/source/kernel/sched/fair.c#L4161
-
-.. code-block:: c
-
-    static void
-    check_preempt_tick(struct cfs_rq *cfs_rq, struct sched_entity *curr)
-    {
-    	unsigned long ideal_runtime, delta_exec;
-    	struct sched_entity *se;
-    	s64 delta;
-    
-    	ideal_runtime = sched_slice(cfs_rq, curr);
-        // 总执行时间和上一次执行时间的差值
-    	delta_exec = curr->sum_exec_runtime - curr->prev_sum_exec_runtime;
-        // if的判断没看懂
-        // 反正就是时间片达到了限制
-    	if (delta_exec > ideal_runtime) {
-                // 更新rq->curr为需要被抢占
-    		resched_curr(rq_of(cfs_rq));
-    		/*
-    		 * The current task ran long enough, ensure it doesn't get
-    		 * re-elected due to buddy favours.
-    		 */
-    		clear_buddies(cfs_rq, curr);
-    		return;
-    	}
-    
-    	/*
-    	 * Ensure that a task that missed wakeup preemption by a
-    	 * narrow margin doesn't have to wait for a full slice.
-    	 * This also mitigates buddy induced latencies under load.
-    	 */
-    	if (delta_exec < sysctl_sched_min_granularity)
-    		return;
-    
-    	se = __pick_first_entity(cfs_rq);
-    	delta = curr->vruntime - se->vruntime;
-    
-    	if (delta < 0)
-    		return;
-    
-    	if (delta > ideal_runtime)
-    		resched_curr(rq_of(cfs_rq));
-    }
-
-
-**那上面时候去校验TIF_NEED_RESCHED标志为然后调用schedule函数呢?**
+**那什么时候去校验TIF_NEED_RESCHED标志为然后调用schedule函数呢?**
 
 *If the tick interrupt happened user-mode code was running, then in somewhere in the interrupt exit path for x86, this call chain calls schedule ret_from_intr –> reint_user –> prepare_exit_to_usermode. Here the need_reched flag is checked, and if true schedule() is called.*
 
-比如当时钟中断发生的时候, 用户代码正在运行, 那么用户代码被中断, 然后时钟中断处理完成, 退回用户态的时候, prepare_exit_to_usermode函数将会去校验TIF_NEED_RESCHED标志位
+比如x86架构下, 当时钟中断发生的时候, 用户代码正在运行, 那么用户代码被中断, 然后时钟中断处理完成, 退回用户态的时候, prepare_exit_to_usermode函数将会去校验TIF_NEED_RESCHED标志位
 
 
 https://elixir.bootlin.com/linux/v4.15/source/arch/x86/entry/common.c#L182
@@ -3366,13 +3347,15 @@ https://elixir.bootlin.com/linux/v4.15/source/arch/x86/entry/common.c#L137
 This feature requires kernel preemption to be enabled. The call chain doing the preemption is: ret_from_intr –> reint_kernel –> preempt_schedule_irq (see arch/x86/entry/entry_64.S) which calls schedule. Note that, for return to kernel mode, I see that preempt_schedule_irq calls schedule anyway whether need_resched flag is set or not, this is probably Ok but I am wondering if need_resched should be checked here before schedule is called. Perhaps it would be an optimiziation to avoid unecessarily calling schedule*
 
 
-也可能是从中断回到内核态(这个情况我没清楚), 会调用到preempt_schedule_irq, 这个调用也直接调用schedule函数而不管TIF_NEED_RESCHED是否被设置上. 作者没明白为什么, 我也没明白为什么.
+也可能是从中断回到内核态(这个情况我没清楚), 也就是说, 一个中断也会回到内核态, 但是需要启用, 也就是配置CONFIG_PREEMPT=y,
+
+会调用到preempt_schedule_irq, 这个调用也直接调用schedule函数而不管TIF_NEED_RESCHED是否被设置上. 作者没明白为什么, 我也没明白为什么.
 
 后面还有作者的猜测, 这里就不贴出来了
 
 但其实在4.15的代码中, preempt_schedule_irq函数其实是去检查TIF_NEED_RESCHED标志位的
 
-下面是preempt_schedule_irq函数, 里面直接调用了__schedule函数, 注意的是, 传参是false而不是schedule函数调用__schedule的时候传入的true
+下面是preempt_schedule_irq函数, 里面直接调用了__schedule函数, 注意的是, 传参是false而不是schedule函数调用__schedule的时候传入的true, 传入的true和false有什么不同? 不清楚
 
 https://elixir.bootlin.com/linux/v4.15/source/kernel/sched/core.c#L3605
 

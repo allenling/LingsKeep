@@ -995,7 +995,7 @@ a, b两个任务, 优先级都是0, 两人的load weight都是1024, 然后占cpu
   
   check_preempt_tick  : **计算req->curr的时间片是否使用完了, 使用完了则调用resched_curr去设置被抢占状态, 相关的计算属性是sum_exec_runtime/prev_sum_exec_runtime**
 
-  check_preempt_wakeup: **判断传入的task的vruntime是否小于rq->curr, 如果小鱼, 则证明被唤醒的传入的task很喜欢运行, 所以调用resched_curr设置rq->curr被抢占状态**
+  check_preempt_wakeup: **判断传入的task的vruntime是否小于rq->curr, 如果小于, 则证明被唤醒的传入的task很渴望运行, 所以调用resched_curr设置rq->curr被抢占状态**
 
 * update_curr都是更新cfs_rq->curr的vruntime和sum_exec_runtime, 以及cfs_rq->min_vruntime的值
   
@@ -2728,7 +2728,11 @@ pick_next_entity
 
 5. 接着调用wakeup_preempt_entity(cfs_rq->next, se), 如果next小于se, 则se = next
 
-所以, 简单总结起来就是, curr, leftmost, next, last, 选一个最小的
+6. 最后, 因为我们已经判断next和last, 需要把cfs_rq->next, cfs_rq->last给置空
+
+所以, 简单总结起来就是, curr, leftmost, next, last, 选一个最小的, 先选leftmost, 如果leftmost是需要skip, 那么第二
+
+优先的应该是next, 最后和next/last做比较
 
 https://elixir.bootlin.com/linux/v4.15/source/kernel/sched/fair.c#L4240
 
@@ -2787,6 +2791,7 @@ https://elixir.bootlin.com/linux/v4.15/source/kernel/sched/fair.c#L4240
     	if (cfs_rq->next && wakeup_preempt_entity(cfs_rq->next, left) < 1)
     	    se = cfs_rq->next;
     
+        // 注意, 判断过next和last之后, 要把next, last置空
     	clear_buddies(cfs_rq, se);
     
     	return se;
@@ -2876,7 +2881,287 @@ put_prev_task会调用到cfs中的put_prev_task_fair, 作用则是调用__enqueu
 scheduler_tick
 =================
 
-这个函数是每一个时钟周期都会去被调用, 主要是看有没有需要抢占的呀, 然后查看一下load_balance
+这个函数是每一个时钟周期都会去被调用, 主要是看有没有需要抢占的呀, 然后做一下load_balance
+
+注意的是, 这里会调用cfs的task_tick函数, 也就是task_tick_fair
+
+
+.. code-block:: c
+
+    void scheduler_tick(void)
+    {
+    	int cpu = smp_processor_id();
+    	struct rq *rq = cpu_rq(cpu);
+    	struct task_struct *curr = rq->curr;
+    	struct rq_flags rf;
+    
+    	sched_clock_tick();
+    
+    	rq_lock(rq, &rf);
+    
+    	update_rq_clock(rq);
+        // 调用cfs的task_tick
+    	curr->sched_class->task_tick(rq, curr, 0);
+    	cpu_load_update_active(rq);
+    	calc_global_load_tick(rq);
+    
+    	rq_unlock(rq, &rf);
+    
+    	perf_event_task_tick();
+    
+    #ifdef CONFIG_SMP
+    	rq->idle_balance = idle_cpu(cpu);
+        // 这里是发一个软中断
+        // 然后软中断的handler函数就是去处理load_balance了
+    	trigger_load_balance(rq);
+    #endif
+    	rq_last_tick_reset(rq);
+    } 
+
+
+task_tick_fair
+=================
+
+这里的主要功能(也可以说是周期性调度的工作), 是判断curr的时间片是否用完, 如果用完了, 那么调用resched_curr设置curr为被抢占状态, 如果curr
+
+已经被设置为被抢占状态了, 则直接退出
+
+https://elixir.bootlin.com/linux/v4.15/source/kernel/sched/fair.c#L9423
+
+.. code-block:: c
+
+    static void task_tick_fair(struct rq *rq, struct task_struct *curr, int queued)
+    {
+    	struct cfs_rq *cfs_rq;
+    	struct sched_entity *se = &curr->se;
+    
+    	for_each_sched_entity(se) {
+    		cfs_rq = cfs_rq_of(se);
+                // 主要处理在这里!!!!!!!!!!!!!!!!!!
+    		entity_tick(cfs_rq, se, queued);
+    	}
+    
+    	if (static_branch_unlikely(&sched_numa_balancing))
+    		task_tick_numa(rq, curr);
+    }
+
+
+主要处理还是在entity_tick函数中
+
+
+.. code-block:: c
+
+    static void
+    entity_tick(struct cfs_rq *cfs_rq, struct sched_entity *curr, int queued)
+    {
+    	/*
+    	 * Update run-time statistics of the 'current'.
+    	 */
+        // 更新一下curr->vruntime
+    	update_curr(cfs_rq);
+    
+    	/*
+    	 * Ensure that runnable average is periodically updated.
+    	 */
+    	update_load_avg(cfs_rq, curr, UPDATE_TG);
+    	update_cfs_group(curr);
+    
+    #ifdef CONFIG_SCHED_HRTICK
+        // 里面的代码先省略
+    #endif
+    
+        // 如果cfs中有超过一个task在运行
+    	if (cfs_rq->nr_running > 1)
+            调用check_preempt_tick
+    	    check_preempt_tick(cfs_rq, curr);
+    }
+
+
+check_preempt_tick
+======================
+
+判断当前curr是否应该被抢占掉, 判断条件是:
+
+1. curr的运行时间delta_exec, 大于被分配的时间片ideal_runtime, 那么表示curr的时间片是用完了, 则调用resched_curr, 然后退出
+
+2. 没用完, 但是curr没达到最小运行时间sysctl_sched_min_granularity, 则绝对不能被抢占, 退出
+
+3. 如果curr时间片没用完, 并且大于sysctl_sched_min_granularity, 此时需要判断leftmost能不能抢占curr
+   
+   如果curr->vruntime和leftmost->vruntime的差值delta, 大于curr的被分配时间片, 则leftmost应该抢占掉curr
+
+**和check_preempt_wakeup(check_preempt_curr)的不同是, 前者是计算唤醒的task(包括新建的)的vruntime是否小于curr并且小于curr+gran**
+
+.. code-block:: c
+
+    static void
+    check_preempt_tick(struct cfs_rq *cfs_rq, struct sched_entity *curr)
+    {
+    	unsigned long ideal_runtime, delta_exec;
+    	struct sched_entity *se;
+    	s64 delta;
+    
+        // 这里有一个时间的计算, 是task被分配的时间
+    	ideal_runtime = sched_slice(cfs_rq, curr);
+        // 计算运行时间
+    	delta_exec = curr->sum_exec_runtime - curr->prev_sum_exec_runtime;
+        // 如果运行时间大于被分配的时间
+    	if (delta_exec > ideal_runtime) {
+
+            // 设置抢占标志位
+    	    resched_curr(rq_of(cfs_rq));
+    	    /*
+    	     * The current task ran long enough, ensure it doesn't get
+    	     * re-elected due to buddy favours.
+    	     */
+            // 清除last, next
+    	    clear_buddies(cfs_rq, curr);
+    	    return;
+    	}
+    
+    	/*
+    	 * Ensure that a task that missed wakeup preemption by a
+    	 * narrow margin doesn't have to wait for a full slice.
+    	 * This also mitigates buddy induced latencies under load.
+    	 */
+        // 如果运行时间不足最小的运行时间, 则绝对不能被抢占
+    	if (delta_exec < sysctl_sched_min_granularity)
+    	    return;
+    
+        // 选出最左节点
+        se = __pick_first_entity(cfs_rq);
+    	delta = curr->vruntime - se->vruntime;
+    
+    	if (delta < 0)
+    	    return;
+    
+        // 这里delta > ideal_runtime
+        // 基本上是判断leftmost < curr, 并且leftmost < curr - gran
+    	if (delta > ideal_runtime)
+    	    resched_curr(rq_of(cfs_rq));
+    }
+
+
+ideal_runtime
+================
+
+这里的ideal_runtime, 是curr被分配出来的运行时间, 是通过sched_slice计算
+
+而之前说明到, sched_slice的计算是根据当前运行的task计算出来的, 也就是一个task理想运行时间是
+
+取一个基准slice, 然后取该task的load在整个cfs_rq的load的比例
+
+base_slice = sysctl_sched_latency 或者 nr_running * sysctl_sched_min_granularity
+
+ideal_runtime = base_slice * (se->load / cfs_rq->load)
+
+运行的时间的计算
+===================
+
+当前task已经运行了多久, 是当前累计运行(sum_exec_runtime)和上一次累计运行时间(prev_sum_exec_runtime)的差值
+
+也就是t1这个task, prev_sum_exec_runtime=0, sum_exec_runtime=10, 然后被抢占, 然后下一次再选择t1的时候, prev_sum_exec_runtime记录下
+
+sum_exec_runtime, prev_sum_exec_runtime = sum_exec_runtime = 10, 然后t1一直运行, sum_exec_runtime一直增加, 有
+
+sum_exec_runtime = 20, prev_sum_exec_runtime=10, 此时进入check_preempt_tick, 那么delta_exec = 20 - 10 = 10
+
+prev_sum_exec_runtime的赋值是在 *__schedule -> pick_next_task - >pick_next_fair -> set_next_entity* 中
+
+一旦一个task被选择, 那么把上一次运行的时间保存到prev_sum_exec_runtime上
+
+
+.. code-block:: c
+
+    static void
+    set_next_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
+    {
+        // 省略代码
+
+        // 被选择为下一个运行的task, 保存下上一次运行时间
+    	se->prev_sum_exec_runtime = se->sum_exec_runtime;
+    }
+
+几个slice的计算总结
+======================
+
+calc_delta_fair
+-----------------
+
+这个函数是做这样的计算, 第一个参数是delta, 第二个参数是se, 
+
+1. 如果se->load == NICE_0_LOAD, 那么new_delta = delta
+
+2. 否则根据se->load和NICE_0_LOAD的比例, 取delta
+   
+   也就是new_delta = delta * (NICE_0_LOAD / se->load)
+
+.. code-block:: c
+
+    static inline u64 calc_delta_fair(u64 delta, struct sched_entity *se)
+    {
+    	if (unlikely(se->load.weight != NICE_0_LOAD))
+            // __calc_delta是计算delta * (NICE_0_LOAD / se->load)
+            delta = __calc_delta(delta, NICE_0_LOAD, &se->load);
+    
+    	return delta;
+    }
+
+
+
+sched_slice
+-------------
+
+这个函数是计算指定的task在cfs_rq上, 应该得到多少时间, 计算方式是一个基准时间片, 然后取task在cfs_rq的load的比例
+
+.. code-block:: c
+
+    static u64 sched_slice(struct cfs_rq *cfs_rq, struct sched_entity *se)
+    {
+    	u64 slice = __sched_period(cfs_rq->nr_running + !se->on_rq);
+    
+    	for_each_sched_entity(se) {
+    	    struct load_weight *load;
+    	    struct load_weight lw;
+    
+    	    cfs_rq = cfs_rq_of(se);
+    	    load = &cfs_rq->load;
+    
+    	    if (unlikely(!se->on_rq)) {
+    	    	lw = cfs_rq->load;
+    
+    	    	update_load_add(&lw, se->load.weight);
+    	    	load = &lw;
+    	    }
+    	    slice = __calc_delta(slice, se->load.weight, load);
+    	}
+    	return slice;
+    }
+
+首先, __sched_period返回的是基准的slice, slice = nr_running * sysctl_sched_min_granularity if nr_running > sched_nr_latency) else sysctl_sched_latency
+
+然后调用__calc_delta直接计算slice = slice * (se->load / cfs_rq->load)
+
+**也就是一个task被分配多少时间是: 取一个基准的slice, task分到多少取决于其在cfs_rq上所占的比例**
+
+
+sched_vslice
+---------------
+
+这个是用在补偿新建task的vruntime的
+
+补偿的值是, task被分配的时间t, 然后取决于其load和NICE_0_LOAD的比例
+
+t  = sched_slice = slice * (se->load / cfs_rq-load)
+
+vt = t * (NICE_0_LOAD / se->load)
+
+.. code-block:: c
+
+    static u64 sched_vslice(struct cfs_rq *cfs_rq, struct sched_entity *se)
+    {
+    	return calc_delta_fair(sched_slice(cfs_rq, se), se);
+    }
 
 
 TIF_NEED_RESCHED
@@ -2884,7 +3169,59 @@ TIF_NEED_RESCHED
 
 参考 [20]_
 
-上面那么多的流程, 可以看到, schedule函数是强制做一次抢占(pick_next_entity, put_prev_entity, set_next_entity)的地方
+上面那么多的流程, 可以看到, **__schedule函数(其实不是schedule函数)才是强制做一次抢占(pick_next_entity, put_prev_entity, set_next_entity)的地方**
+
+那么什么时候__schedule才会被调用呢? 可以看看__schedule函数的注释
+
+https://elixir.bootlin.com/linux/v4.15/source/kernel/sched/core.c#L3287
+
+.. code-block:: c
+
+    /*
+     * __schedule() is the main scheduler function.
+     *
+     * The main means of driving the scheduler and thus entering this function are:
+     *
+     *   1. Explicit blocking: mutex, semaphore, waitqueue, etc.
+     *
+     *   2. TIF_NEED_RESCHED flag is checked on interrupt and userspace return
+     *      paths. For example, see arch/x86/entry_64.S.
+     *
+     *      To drive preemption between tasks, the scheduler sets the flag in timer
+     *      interrupt handler scheduler_tick().
+     *
+     *   3. Wakeups don't really cause entry into schedule(). They add a
+     *      task to the run-queue and that's it.
+     *
+     *      Now, if the new task added to the run-queue preempts the current
+     *      task, then the wakeup sets TIF_NEED_RESCHED and schedule() gets
+     *      called on the nearest possible occasion:
+     *
+     *       - If the kernel is preemptible (CONFIG_PREEMPT=y):
+     *
+     *         - in syscall or exception context, at the next outmost
+     *           preempt_enable(). (this might be as soon as the wake_up()'s
+     *           spin_unlock()!)
+     *
+     *         - in IRQ context, return from interrupt-handler to
+     *           preemptible context
+     *
+     *       - If the kernel is not preemptible (CONFIG_PREEMPT is not set)
+     *         then at the next:
+     *
+     *          - cond_resched() call
+     *          - explicit schedule() call
+     *          - return from syscall or exception to user-space
+     *          - return from interrupt-handler to user-space
+     *
+     * WARNING: must be called with preemption disabled!
+     */
+
+也就是说, __schedule函数是主要的调度函数, 进入该函数意味着:
+
+1. 显式阻塞, 也就是主动放弃cpu, 包括锁, 信号量, waitqueue等待
+
+2. 
 
 然后在resched_curr函数中, 只是对task结构设置了TIF_NEED_RESCHED标志位d的地方, 看起来两者并没有什么关联.
 

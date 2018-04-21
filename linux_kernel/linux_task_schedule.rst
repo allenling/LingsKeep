@@ -3390,3 +3390,14 @@ https://elixir.bootlin.com/linux/v4.15/source/kernel/sched/core.c#L3605
     }
 
 
+小结一下就是:
+
+1. 要么主动调用schedule函数去做一次抢占, 此时一般是主动放弃cpu的情况, 比如epoll中的休眠
+
+2. 现在某个地方设置TIF_NEED_RESCHED, 然后返回用户态/内核态中, 去调用schedule(__schedule函数)
+   
+   比如, 时钟周期调用scheduler_tick, 去设置curr为TIF_NEED_RESCHED, 或者被唤醒的task(包括新建的task)抢占curr, 设置curr的TIF_NEED_RESCHED状态
+
+   然后, 在中断处理完之后, 返回用户态或者内核态中, 会判断curr的TIF_NEED_RESCHED状态, 如果为真, 那么调用schedule(__schedule)函数
+
+

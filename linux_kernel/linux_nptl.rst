@@ -385,24 +385,24 @@ glibc/sysdeps/unix/sysv/linux/createthread.c
     	       bool *stopped_start, STACK_VARIABLES_PARMS, bool *thread_ran)
     {
     
-    // 省略代码
-    
-    // 这里设置了clone的flag
-    const int clone_flags = (CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SYSVSEM
-          		   | CLONE_SIGHAND | CLONE_THREAD
-          		   | CLONE_SETTLS | CLONE_PARENT_SETTID
-          		   | CLONE_CHILD_CLEARTID
-          		   | 0);
-    
-    TLS_DEFINE_INIT_TP (tp, pd);
-    
-    // 调用平台相关的clone
-    if (__glibc_unlikely (ARCH_CLONE (&start_thread, STACK_VARIABLES_ARGS,
-          			    clone_flags, pd, &pd->tid, tp, &pd->tid)
-          		== -1))
-      return errno;
-    
-    // 省略代码
+        // 省略代码
+        
+        // 这里设置了clone的flag
+        const int clone_flags = (CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SYSVSEM
+              		   | CLONE_SIGHAND | CLONE_THREAD
+              		   | CLONE_SETTLS | CLONE_PARENT_SETTID
+              		   | CLONE_CHILD_CLEARTID
+              		   | 0);
+        
+        TLS_DEFINE_INIT_TP (tp, pd);
+        
+        // 调用平台相关的clone
+        if (__glibc_unlikely (ARCH_CLONE (&start_thread, STACK_VARIABLES_ARGS,
+              			    clone_flags, pd, &pd->tid, tp, &pd->tid)
+              		== -1))
+          return errno;
+        
+        // 省略代码
     
     }
 
@@ -455,17 +455,23 @@ task结构属性很多, 下面通过clone的代码流程去了解创建线程的
 主要的属性有:
 
 1. pid号(pid_t类型)和pids双链表(存储pid结构, 不是pid号), 内核中根据该链表去获取对应的task结构
+
    这里的pid号是task结构的, 也就是内核中每一个task都有自己的pid(叫pid是因为内核之前只有进程而没有线程), 但是
+
    现在称为tid可能更合适一些.
 
 2. thread_info, thread_group和group_leader
+
    thread_info是该task的一些标志位, 比如是否有待处理信号, 则是通过该标志位是否置位有关
+
    thread_group一个双链表结构, 把所有的线程都聚在一个链表中. 如果是创建线程, 那么会把task的thread_group加入到主线程的thread_group中.
+
    group_leader则是线程组的主线程, 每一个子线程都会记录下group_leader
 
 3. tgid, 也就是thread group id, 就是我们ps出来的pid, 同一个进程的线程们tgid都是主线程的pid, 用户看到的pid就是这个tgid
 
 4. signal, sighand, shared_pending, blocked, pending, 和信号处理有关, signal.shared_pending线程组的待处理信号队列
+
    而pending是每个task自己的signal处理队列, 可以看成每一个线程自己的信号处理队列
 
 pid结构和命名空间
@@ -794,7 +800,9 @@ pid_task
 3. 分配之后, 保存在pid这个结构的numbers数组中
 
 4. 注意的是, 在for循环里面只是新建了对应namespace的pid数字, 相当于从idr这个基数树中拿了一个数字, 但是没有把数字和pid结构给连接起来
+
    然后在最后的for循环里面, 调用idr_replace去把每一级namespace中, idr这个基数树中的数字(nr)和pid对应起来
+
    也就是说, 拿一个pid号对应的pid结构, 就是在命名空间中的idr搜索pid号, 然后就拿到对应的pid结构了
 
 

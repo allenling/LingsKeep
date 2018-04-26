@@ -1007,7 +1007,7 @@ a, b两个任务, 优先级都是0, 两人的load weight都是1024, 然后占cpu
 
   也就是谁调用schedule, 就是执行了一次强制抢占
 
-* 进行一次抢占的时候是否一定是最左叶节点? 不一定, 会拿leftmost和cfs_rq->next, cfs_rq->last三者比较, 选一个合适的.
+* 进行一次抢占的时候是否一定是最左叶节点? 不一定, 会拿curr, leftmost和cfs_rq->next, cfs_rq->last比较, 选一个合适的.
 
   这里配合check_preempt_wakeup和schedule一起看
 
@@ -1374,13 +1374,13 @@ https://elixir.bootlin.com/linux/v4.15/source/kernel/sched/fair.c#L515
     #endif
     }
 
-1. 如果curr和se都存在,     那么min_vruntime = max(min_vruntime, min(curr->vruntime, se->vruntime))
+1. 如果curr和leftmost都存在,     那么min_vruntime = max(min_vruntime, min(curr->vruntime, se->vruntime))
 
-2. 如果curr不存在而se存在, 那么min_vruntime = max(min_vruntime, se->vruntime)
+2. 如果curr不存在而leftmost存在, 那么min_vruntime = max(min_vruntime, se->vruntime)
 
-3. 如果curr存在而se不存在, 那么min_vruntime = max(min_vruntime, curr->vruntime)
+3. 如果curr存在而leftmost不存在, 那么min_vruntime = max(min_vruntime, curr->vruntime)
 
-4. 如果curr和se都不存在,   那么min_vruntime = max(min_vruntime, min_vruntime)
+4. 如果curr和leftmost都不存在,   那么min_vruntime = max(min_vruntime, min_vruntime)
 
 
 place_entity
@@ -1606,25 +1606,20 @@ place_entity补偿最终计算
 
 2. delta = sched_slice(cfs_rq, se), delta = slice = base_slice * (se->load / cfs_rq->load)
 
-2. calc_delta_fair(sched_slice(cfs_rq, se), se) = calc_delta_fair(slice, NICE_0_LOAD, se)
+2. calc_delta_fair(sched_slice(cfs_rq, se), se) = __calc_delta_fair(slice, NICE_0_LOAD, se)
 
 3. 所以, new_for_task->vruntime = min_vruntime + slice * (NICE_0_LOAD / se->load)
 
                                 = min_vruntime + base_slice * (se->load / cfs_rq->load) * (NICE_0_LOAD / se->load)
 
-place_entity交换父子task的vruntime
+sched_fork交换父子task的vruntime
 =======================================
 
-在place_entity中, 计算了新创建的task的实际vruntime之后, 会根据是否配置了sysctl_sched_child_runs_first标志
+在sched_fork中, 进行补偿计算(task_fork_fair)之后
 
-去决定是否交换父子task之间的vruntime
+如果配置了sysctl_sched_child_runs_first, 并且fork出来的子task的vruntime的值大于父task(curr)的vruntime, 说明父task还是会先于子task运行
 
-
-如果配置了sysctl_sched_child_runs_first, 所以fork出来的子task的vruntime, 也就是经过 *min_vruntime +=sched_vslice* 计算之后
-
-的值大于父task(curr)的vruntime, 说明父task还是会先于子task运行, 那么交换两者的vruntime, 然后调用resched_curr去标识
-
-curr需要被抢占走
+那么交换两者的vruntime, 然后调用resched_curr去标识curr需要被抢占走
 
 
 .. code-block:: c

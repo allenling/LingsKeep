@@ -219,8 +219,11 @@ http://elixir.free-electrons.com/linux/v4.15/source/fs/eventpoll.c#L186
 1. rdlist是把epoll把受信的event发送给用户态的时候, 遍历的已受信的链表
 
 2. 而ovflist则是为了无锁复制
+
    如果现在epoll正在发送event到用户态, 此时则正在受信的时间暂时放在ovflist中, 当epoll处理完rdllist的时候, 会把ovflist的event加入到rdllist中.
+
    也就是ovflist是为了不影响正在处理的rdllist, 暂时存放受信event的地方. 主要是发送event到用户态的时候是无锁状态(不会拿epoll中的lock这个自旋锁), 所以为了避免"污染"rdllist, 又没有拿锁, 则只能
+
    用一个临时链表来解决. 无锁是为了效率.
 
 ovflist参考: http://blog.csdn.net/mercy_pm/article/details/51381216, https://idndx.com/2015/07/08/the-implementation-of-epoll-4/
@@ -575,6 +578,7 @@ http://elixir.free-electrons.com/linux/v4.15/source/fs/eventpoll.c#L1992
 fd有效条件包括:
 
 1. 不能是epoll本身, 也就是不能把epoll加入到自己中, 强调自己是因为epoll对应的fd也可以加入到其他epoll中, 因为
+
    epoll对应的fd也继承了event_poll_fops这些操作.
 
 2. fd对应的file一定实现有poll操作.
@@ -1238,8 +1242,44 @@ https://elixir.bootlin.com/linux/v4.15/source/include/linux/wait.h#L215
 __wake_up_common
 ===================
 
-上面的__wake_up_sync_key会调用到__wake_up_common这个函数, 这个函数是基础的wake_up处理
+上面的__wake_up_sync_key会调用到__wake_up_common这个函数, 这个函数是基础的wake_up处理, 并且
 
+__wake_up_sync_key传给__wake_up_common中的wake_flags一般是WF_SYNC
+
+关于wakeup的flags
+
+https://elixir.bootlin.com/linux/v4.15/source/kernel/sched/sched.h#L1375
+
+.. code-block:: c
+
+    /*
+     * wake flags
+     */
+    #define WF_SYNC		0x01		/* waker goes to sleep after wakeup */
+    #define WF_FORK		0x02		/* child wakeup after fork */
+    #define WF_MIGRATED	        0x4		/* internal use, task got migrated */
+
+https://elixir.bootlin.com/linux/v4.15/source/kernel/sched/wait.c#L192
+
+.. code-block:: c
+
+    void __wake_up_sync_key(struct wait_queue_head *wq_head, unsigned int mode,
+    			int nr_exclusive, void *key)
+    {
+    	int wake_flags = 1; /* XXX WF_SYNC */
+    
+    	if (unlikely(!wq_head))
+    		return;
+    
+        // 如果nr_exclusive不等于1, 那么wake_flags则是0
+        // 0貌似没有定义
+    	if (unlikely(nr_exclusive != 1))
+    		wake_flags = 0;
+    
+    	__wake_up_common_lock(wq_head, mode, nr_exclusive, wake_flags, key);
+    }
+
+https://elixir.bootlin.com/linux/v4.15/source/kernel/sched/wait.c#L72
 
 .. code-block:: c
 
@@ -1701,6 +1741,7 @@ ep_scan_ready_list
 ep_scan_ready_list作用是:
 
 1. 把ovflist设置不为EP_UNACTIVE_PTR状态, 这样是保护就绪链表的. 因为如果遍历就绪链表的时候, 同时有event受信, 那么为了不污染就绪链表, 受信的event会查看ovflist
+
    是否是EP_UNACTIVE_PTR, 如果不是, 那么不操作就绪链表而是暂时添加到ovflist链表中.
    
 2. 但是对就绪链表的采取什么操作, 可以通过传入函数来指定.

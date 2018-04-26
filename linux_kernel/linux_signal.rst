@@ -41,15 +41,19 @@ task, 进程, 线程, lwp的概念, 以及pid的代码, 参考linux_nptl.rst
   --- 参考4
 
 1. 发送信号先通过pid拿到线程组, 然后选出其中一个线程/task(这里经测试, 一般是主线程, 除非主线程退出或者主动block了信号), 把信号加入到信号队列中
+
    这里的信号队列是线程组的shared_pending, 而不是每一个task结构自己的pending队列
 
 2. 然后把目标task的thread_info.flags设置上TIF_SIGPENDING标志位
 
 3. 唤醒是通过发送中断, 内核会 **强行** 中断目标task当前的程序, 然后目标task会进入内核态, 通过判断thread_info.flasg的标志位, 发现有信号处理, 则保存当前程序的栈等信息, 然后当前
+
    程序的地址切换成信号处理函数, 然后返回用户态. 判断是否有信号要处理是在返回用户态的时候判断的. 
 
 4. 强行中断的流程是在signal_wake_up_state函数中, 其中先调用wake_up_state(t, state | TASK_INTERRUPTIBLE)去唤醒task, 如果没有进行唤醒操作, wake_up_state会返回0, 那么
+
    signal_wake_up_state则判断返回0的话, 就调用kick_process函数去强制唤醒目标task. wake_up_state返回0的情况是有可能目标task是running状态, 而wake_up_state是唤醒满足条件(TASK_INTERRUPTIBLE)的
+
    task, 所以判断task->state & state为假的话, 不会去执行唤醒操作的. 所以当目标task是在处理计算密集任务的时候, 也会被强制唤醒的.
 
 5. 用户态执行完信号处理函数之后, 又切回内核态, 然后内核把原先保存的程序切换出来, 然后返回用户态继续处理之前的程序.
@@ -1320,7 +1324,9 @@ wants_signal
     }
 
 1. sigismember作用是: *test wehether signum is a member of set.(&p->blocked, sig)* , 也就是是否线程是否block了信号.
+
    因为线程可以调用sigprocmask/pthread_sigmask去block指定的信号, 如果结果为真, 表示线程屏蔽了信号.
+
    可以看参考 [3]_
    
 2. PF_EXITING表示进程退出状态

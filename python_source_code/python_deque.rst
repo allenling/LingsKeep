@@ -128,7 +128,7 @@ deque
 
     那么设置leftindex和right从中间开始
 
-    |      leftindex=31|rightindex=33             |
+    |      leftindex=31|rightindex=32             |
     +---------------------------------------------+
     
     '''

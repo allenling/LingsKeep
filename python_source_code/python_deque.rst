@@ -36,6 +36,8 @@ deque
     全局定义有BLOCK_LEN = 64, 然后中间值自然为CENTER = (64 - 1) / 2 = 31
     
     1. 初始化x = deque(), 分配一个block, 假设是b0, 有leftblock = rightblock = b0, leftindex = 31, rightindex = 32
+
+       所以初始化的左右指针是从中间开始, 分别往左右走(中间开花 :)
     
     
     deque +---------------------+ leftblock +--->>>>-+
@@ -116,7 +118,18 @@ deque
     
     pop则出了设置rightblock和rightlink之外, 还是会回收block的
 
-    比如上面一直pop, b1完全没有使用了, 那么直接释放掉b1
+    比如上面一直pop, b1完全没有使用了, 那么直接释放掉b1, 然后如果pop之后deque为空, 那么把左右index重新设置为中心开始!!!
+
+           rightindex 
+    |      leftindex  |            |
+    +------------------------------+
+
+    pop的时候, 使得rightindex--, 然后判断deque.size = 0
+
+    那么设置leftindex和right从中间开始
+
+    |      leftindex=31|rightindex=33             |
+    +---------------------------------------------+
     
     '''
 

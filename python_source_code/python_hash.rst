@@ -9,7 +9,9 @@ python中调用hash的时候的流程
    
    空字符串(长度为0)的hash是0, 长度大于0的字符串使用hash算法计算, 默认hash算法是siphash24
 
-2. long对象的hash = value % (2**61), 计算过程有点绕.
+2. long对象的hash有, 64位机器下, 基准值x = 2**61, 如果a小于x, 那么hash(a) = a, 如果a>x, a=2**n + m, n > 61,
+
+   有hash(a) = 2**(n-61) + m
 
 3. object对象的hash是其内存地址经过偏移计算后的返回值, 并没有缓存, 每次都计算
 
@@ -157,11 +159,11 @@ hash值赋值为-1
     PyUnicode_New(Py_ssize_t size, Py_UCS4 maxchar)
     {
     
-    // 省略了很多代码
-    
-    _PyUnicode_HASH(unicode) = -1;
-    
-    // 省略了很多代码
+        // 省略了很多代码
+        
+        _PyUnicode_HASH(unicode) = -1;
+        
+        // 省略了很多代码
     
     }
 
@@ -222,7 +224,7 @@ cpython/Python/pyhash.c
         return x;
     }
 
-一般我们都是关闭Py_HASH_CUTOFF配置的, 然后在Ubuntu14.04, python3.6中, 默认的hash算法是siphash24, 可以通过Py_HASH_ALGORITHM宏定义修改.
+一般我们都是关闭Py_HASH_CUTOFF配置的, 然后在Ubuntu16.04, python3.6中, 默认的hash算法是siphash24, 可以通过Py_HASH_ALGORITHM宏定义修改.
 
 
 
@@ -333,28 +335,47 @@ cpython/Objects/longObject.c
 
 1. 0的hash就是0
 
-2. 看注释计算的过程以及_PyHASH_BITS这个宏的定义在64位平台上是61, 所以就是longobject的hash是其值模2**61
+2. 看注释计算的过程以及_PyHASH_BITS这个宏的定义在64位平台上是61, 所以就是longobject的hash值, 在2**61之后
+
+   就有点区别了, 看下面的例子
+
+
+* a > 2**61, 并且a = 2**n, n >= 61, 那么, hash(a) = 2**(n-61)
 
 
 .. code-block:: python
 
-    In [161]: for i in ['2**31', '2**60', '2**61', '2**62', '2**63', '2**65', '2**90']:
-         ...:     print(i, hash(eval(i)))
-         ...:     
-         ...:     
-         ...:     
-         ...:     
-         ...:     
+    In [24]: for i in ['2**31', '2**60', '2**61', '2**62', '2**63', '2**65', '2**90']:
+        ...:     int_i = eval(i)
+        ...:     if int_i < 2**61:
+        ...:         print(i, hash(int_i))
+        ...:     else:
+        ...:         m = int(i.split('**')[1])
+        ...:         left_m = m - 61
+        ...:         print(i, hash(int_i), '2**%s = ' % left_m, 2**left_m)
+        ...:         
+        ...:         
     2**31 2147483648
     2**60 1152921504606846976
-    2**61 1
-    2**62 2
-    2**63 4
-    2**65 16
-    2**90 536870912
 
+    2**61 1                    2**0 =  1
+    2**62 2                    2**1 =  2
+    2**63 4                    2**2 =  4
+    2**65 16                   2**4 =  16
+    2**90 536870912            2**29 =  536870912
 
+* 如果a > 61, 并且a = 2**n + m, hash(a) = 2**(n-61) + m
 
+.. code-block:: python
+
+    In [26]: for i in ['2**63', '2**63+1', '2**63+2', '2**63+3']:
+        ...:     int_i = eval(i)
+        ...:     print(i, hash(int_i))
+        ...:     
+    2**63   4
+    2**63+1 5
+    2**63+2 6
+    2**63+3 7
 
 
 object对象

@@ -24,7 +24,8 @@ python3.6的实现
 10. py2和3中, 调用dict函数和调用{}创建字典的区别和性能.
 
 11. 感觉比较奇怪的是为什么dict中就算占据了dummy的槽位, 依然会减少usable的值, 这样dict很容易就增加, 但是set中占据dummy并不会
-    增加fill数据. 个人感觉占据dummy槽位的话比减少可用槽位的个数比较好一点.
+
+    增加fill数据. 个人感觉占据dummy槽位不减少可用槽位的个数比较好一点.
 
 
 
@@ -328,15 +329,12 @@ dict区分有split和combined两种模式. `pep412 <https://www.python.org/dev/p
 split
 --------
 
-pep412的motivation中提到, 之前__dict__是会把类中的属性的名字, 作为key复制到每一个key到对应的实例中的__dict__的,
+pep412的motivation中提到, 之前__dict__是会把实例中的属性的名字, 作为key复制到每一个key到对应的实例中的__dict__的,
 
 这样内存有点浪费:
 
 *The current dictionary implementation uses more memory than is necessary when used as a container 
 for object attributes as the keys are replicated for each instance rather than being shared across many instances of the same class.*
-
-
-而在多个实例之间共享key, 也就是共享类定义的属性, 这样会提高内存利用:
 
 *By separating the keys (and hashes) from the values it is possible to share the keys between multiple dictionaries and improve memory use.*
 
@@ -345,40 +343,48 @@ split字典是在获取obj.__dict__属性的时候, 会生成并返回一个spli
 
 *When dictionaries are created to fill the __dict__ slot of an object, they are created in split form.*
 
+下面的例子可以清楚解释下:
+
 .. code-block:: python
 
    class A:
-       def __init__(self):
-           self.a, self.b, self.c = 1, 2, 3
+       data = 'A'
+
    a = A()
-   d = a.__dict__
+   b = A()
 
-此时d就是一个split模式的字典.
+此时获取a.__dict__和b.__dict__都是空, 也就是说, **key的共享不是基于类属性的, 而是基于实例属性的**
 
-split模式的字典下, 添加字符串的key会反射到object中:
-
-.. code-block:: python
-
-   d['new_key'] = 100
-   a.new_key == 100
-
-非字符串的key不会反射到object中:
+然后我们分别赋值
 
 .. code-block:: python
 
-   d[10] = 'new_value'
-   # 下面会报语法错误
-   a.10
+    a.data = 'a'
+    
+    b.data = 'b'
+
+
+那么, data这个key会在a和b之间共享, 当我们访问a.__dict__['data']和b.__dict__['data']
+
+我们可以看到, lookup函数是lookdict_split, 也就是split模式的dict, keys数组共享, value存在各种的values数组中
+
+可以看看ma_keys, ep, me_key这几个属性都是共享的
+
+1. a对象中, makeys: 0x7ffff0b030, ep: 0x7ffff0b060, me_key: 0x7ffff87ed8
+
+2. b对象中, makeys: 0x7ffff0b030, ep: 0x7ffff0b060, me_key: 0x7ffff87ed8
 
 
 combined
 -----------
 
-除了访问obj.__dict__之外, 都是combined模式的字典, pep412:
+除了访问obj.__dict__之外, 都是combined模式的字典
 
-*Explicit dictionaries (dict() or {}), module dictionaries and most other dictionaries are created as combined-table dictionaries.
-A combined-table dictionary never becomes a split-table dictionary.
-Combined tables are laid out in much the same way as the tables in the old dictionary, resulting in very similar performance.*
+    *Explicit dictionaries (dict() or {}), module dictionaries and most other dictionaries are created as combined-table dictionaries.
+    A combined-table dictionary never becomes a split-table dictionary.
+    Combined tables are laid out in much the same way as the tables in the old dictionary, resulting in very similar performance.*
+    
+    --- 参考pep412
 
 
 模式互转
@@ -386,32 +392,40 @@ Combined tables are laid out in much the same way as the tables in the old dicti
 
 一旦split模式的dict有删除操作, 那么就变成combined, combined的字典会转成split的, 只有访问__dict__属性的时候才会构造split模式.
 
+比如我们接上面的例子, 删除操作:
 
 .. code-block:: python
 
-    class A:
-        def __init__(self):
-            self.a, self.b, self.c = 1, 2, 3
-    a = A()
-    m = a.__dict__
+    del a.__dict__['data']
 
-此时m就是一个split字典, 然后对其删除操作:
+    # 然后我们继续去打印
+    a.__dict__['data']
 
+然后我们发现, 此时的lookup函数是lookdict_unicode_nodummy, 也就是是一个combined的字典
 
-.. code-block:: python
+其中, makeys, ep, me_key等属性都变化了, 关键代码是:
 
-   del m['a']
+.. code-block:: c
+    
+    int
+    _PyDict_DelItem_KnownHash(PyObject *op, PyObject *key, Py_hash_t hash)
+    {
+    
+        // 省略了代码
 
-那么m就变成了一个combined字典
-
-每次新建一个A对象实例, 访问实例__dict__属性都会新建一个split字典, 比如下面的n:
-
-.. code-block:: python
-
-   b = A()
-   n = b.__dict__
-
-
+        // 注释说, split模式的dict不允许删除
+        // 合并, 也就是生成一个新的字典
+        // 也就是新的keys数组等等
+        // Split table doesn't allow deletion.  Combine it.
+        if (_PyDict_HasSplitTable(mp)) {
+            if (dictresize(mp, DK_SIZE(mp->ma_keys))) {
+                return -1;
+            }
+            ix = (mp->ma_keys->dk_lookup)(mp, key, hash, &value_addr, &hashpos);
+            assert(ix >= 0);
+        }
+        return delitem_common(mp, hashpos, ix, value_addr);
+    }
 
 区别
 -----------
@@ -538,6 +552,7 @@ cpython/Objects/dictobject.c
         if ((d)->ma_keys->dk_lookup == lookdict_unicode_nodummy) { \
             (d)->ma_keys->dk_lookup = lookdict_unicode; \
         }
+
 
 
 look函数顺序
@@ -1615,7 +1630,8 @@ pop和del操作对key数组有同样的操作:
 
 2. 设置hash表槽位为dummy
 
-3. 设置PyDictKeyEntry数组中, 对应位置的元素的ma_key为NULL, 表示删除.
+3. 设置PyDictKeyEntry数组中, 对应位置的元素的me_key为NULL, 表示删除.
+
    相同点是都不会把me_value设置为NULL, 不同点是pop不会减少me_value的引用计数, 而del操作却会
 
 

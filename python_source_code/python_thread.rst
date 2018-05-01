@@ -61,6 +61,154 @@ self._stop和self.join参考下面
 **python2的threading.Thread有一个__stop方法, 但是在python3中被去掉了**
 
 
+线程状态
+============
+
+每一个线程被创建的时候都会在C代码基本创建一个PyThreadState类型的变量来表示该thread, 一般名称叫做tstate
+
+然后tstate里面都保存了线程id, 当前执行的帧(frame), 当前异常等等信息, **但是解释器都指向一个!!!!!**
+
+创建线程创建新的tstate对象
+
+.. code-block:: c
+
+    static PyObject *
+    thread_PyThread_start_new_thread(PyObject *self, PyObject *fargs)
+    {
+        // 生成一个新的tstate, 保存到启动函数的tstate属性中
+        boot->tstate = _PyThreadState_Prealloc(boot->interp);
+    }
+
+在_PyThreadState_Prealloc中, 新建tstate, 然后把interp赋值到tstate中
+
+.. code-block:: c
+
+    PyThreadState *
+    _PyThreadState_Prealloc(PyInterpreterState *interp)
+    {
+        return new_threadstate(interp, 0);
+    }
+
+new_threadstate中, 基本上是分配一个解释器结构, 然后赋值interp为传入的解释器
+
+.. code-block:: c
+
+    static PyThreadState *
+    new_threadstate(PyInterpreterState *interp, int init)
+    {
+        // 分配tstate内存
+        PyThreadState *tstate = (PyThreadState *)PyMem_RawMalloc(sizeof(PyThreadState));
+        if (tstate != NULL) {
+            // 赋值解释器对象
+            tstate->interp = interp;
+    
+            // 后面就是一些状态信息赋值
+            tstate->frame = NULL;
+        }
+    }
+
+当然, 每次线程结束都会销毁对应的tstate结构
+
+什么时候切换tstate?
+========================
+
+线程切换的时候, 都是调用 *PyThreadState_GET* 获取当前的tstate, 那么什么时候设置当前的tstate呢?
+
+1. 线程第一次开始执行的时候, 调用PyEval_AcquireThread, 其中调用take_gil, 然后调用PythreadState_Swap切换
+
+2. drop_gil之前, 会调用PyhreadState_Swap切换
+
+3. take_gile之后, 调用PyThreadState_Swap切换
+
+切换的流程是:
+
+1. PythreadState_Swap会返回old_tstate, 那么要求old_state必须是NULL, 也就是说, 你swap之前就必须把
+
+   当前的tstate置空了
+
+2. 因为1的要求, 所以每次切换线程(take_gil和drop_gil), 必须判断当前tstate是否已经可用, 也就是可设置, 也就是为NULL
+
+   也就是swap返回值是否是NULL
+
+**注意的是, take_gil和drop_gil并不切换tstate, 需要手动再调用PyThreadState_Swap去手动设置当前的tstate**
+
+
+线程第一次执行的时候, 是t_bootstrap函数, 调用PyEval_AcquireThread函数
+
+
+.. code-block:: c
+
+    static void
+    t_bootstrap(void *boot_raw)
+    {
+    
+        PyEval_AcquireThread(tstate);
+    
+    }
+
+在PyEval_AcquireThread函数中, 调用take_gil, 获取到gil之后, 切换当前的tstate
+
+.. code-block:: c
+
+    void
+    PyEval_AcquireThread(PyThreadState *tstate)
+    {
+        if (tstate == NULL)
+            Py_FatalError("PyEval_AcquireThread: NULL new thread state");
+        /* Check someone has called PyEval_InitThreads() to create the lock */
+        assert(gil_created());
+
+        // 拿到gil
+        take_gil(tstate);
+
+        // 设置当前的tstate
+        // 必须判断下返回值是否是NULL
+        if (PyThreadState_Swap(tstate) != NULL)
+            Py_FatalError(
+                "PyEval_AcquireThread: non-NULL old thread state");
+    }
+
+
+在线程执行的时候, drop_gil和take_gil的流程:
+
+
+.. code-block:: c
+
+    PyObject *
+    _PyEval_EvalFrameDefault(PyFrameObject *f, int throwflag)
+    {
+    
+    #ifdef WITH_THREAD
+        // 发现需要drop_gil
+        if (_Py_atomic_load_relaxed(&gil_drop_request)) {
+
+             // 注意!!!!先切换tstate
+            /* Give another thread a chance */
+            // 注意判断返回值和当前的tstate是否一致
+            if (PyThreadState_Swap(NULL) != tstate)
+                Py_FatalError("ceval: tstate mix-up");
+            // 然后释放gil
+            drop_gil(tstate);
+    
+            /* Other threads may run now */
+            // 然后再获取gil
+            take_gil(tstate);
+    
+            /* Check if we should make a quick exit. */
+            if (_Py_Finalizing && _Py_Finalizing != tstate) {
+                drop_gil(tstate);
+                PyThread_exit_thread();
+            }
+            // 获取gil之后, 设置当前的tstate!!!!!!!!!!
+            // 必须判断当前的tstate是不是NULL!!!!!!!!!!
+            if (PyThreadState_Swap(tstate) != NULL)
+                Py_FatalError("ceval: orphan tstate");
+        }
+    #endif
+    
+    
+    }
+
 daemon
 ==========
 

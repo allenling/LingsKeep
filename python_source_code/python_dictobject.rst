@@ -25,7 +25,19 @@ python3.6的实现
 
 11. 感觉比较奇怪的是为什么dict中就算占据了dummy的槽位, 依然会减少usable的值, 这样dict很容易就增加, 但是set中占据dummy并不会
 
-    增加fill数据. 个人感觉占据dummy槽位不减少可用槽位的个数比较好一点.
+    增加fill数据
+    
+12. 为什么dict不像set一样, 一旦插入的是dummy槽位, 不减少usable的个数呢?
+
+    这是因为usable是数据数组的可用长度, 并且数组是append的
+    
+    自然, 每插入一个元素, 那么只能apppend, 当然可用长度就减少1了
+
+    而关于dummy槽位, 很大的区别是set数据数组和hash表是同一个(严格来说没有hash表, 只有数组长度作为hash mask)
+
+    而dict是hash表和数据数组分离的, 所以插入的是hash表的dummy, 和数据数组没什么关系
+
+13. 由于12的特点, 所以look函数则返回的时候, 如果找到了dummy槽位, 但是返回的状态一定是empty的
 
 
 

@@ -388,6 +388,9 @@ pop
         if (i < 0)
             i += Py_SIZE(self);
 
+        // 拿到对应下标的对象
+        v = self->ob_item[i];
+
         // 如果是pop最后一个, 直接改变list长度就可以了~~~
         // 所以最后一个的pop是很快的
         if (i == Py_SIZE(self) - 1) {

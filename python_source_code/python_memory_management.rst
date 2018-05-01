@@ -863,5 +863,213 @@ init_pool
 回收内存
 ============
 
-先看参考 [1]_
+先看参考 [1]_, 然后下面都是_PyObject_Free函数的代码片段
+
+假设回收的block是x, x所在的pool是xp, xp所在的arena是xarean, 那么
+
+1. 如果xp依然是used状态, 也就是xp中还有其他的pool在使用, 则把xp->freeblock=x, 那么下次使用xp的时候优先使用freeblock, 也就是x
+
+   然后退出
+
+.. code-block:: c
+
+    static void
+    _PyObject_Free(void *ctx, void *p)
+    {
+        // 拿到pool
+        pool = POOL_ADDR(p);
+        
+        // 这个判断先不管
+        if (address_in_range(p, pool)) {
+        
+            // 拿到pool的freeblock
+            // 记录在lastfree中, 也就是此时拿到的pool->freeblock
+            // 是要判断下pool->freeblock是否存在, 也就是如果不存在, 那么
+            // 表示pool中, 之前所有的block都被使用了
+            // 此时刚刚释放第一块block
+            // 如果存在, 也就是lastpool不是NULL
+            // 表示该pool之前就是处于使用状态, 也就是一部分可用
+            *(block **)p = lastfree = pool->freeblock;
+            
+            // 这里, 把pool中最新被回收的block(也就是freeblock)指向p
+            pool->freeblock = (block *)p;
+            
+            if (lastfree) {
+                if (--pool->ref.count != 0) {
+                    // 根据注释说的, 什么也不做
+                    /* pool isn't empty:  leave it in usedpools */
+                    UNLOCK();
+                    return;
+                }
+            }
+
+        }
+    
+    
+    }
+
+2. 如果xp当前是full状态, 然后有一个block处于可用状态, 那么说明xp没有在usedpools中, 则把xp加入到usedpools中(头插), 优先使用xp
+
+.. code-block:: c
+
+    static void
+    _PyObject_Free(void *ctx, void *p)
+    {
+    
+        // 拿到pool
+        pool = POOL_ADDR(p);
+        
+        // 这个判断先不管
+        if (address_in_range(p, pool)) {
+        
+            // 拿到pool的freeblock
+            // 记录在lastfree中, 也就是此时拿到的pool->freeblock
+            // 是要判断下pool->freeblock是否存在, 也就是如果不存在, 那么
+            // 表示pool中, 之前所有的block都被使用了
+            // 此时刚刚释放第一块block
+            *(block **)p = lastfree = pool->freeblock;
+            
+            // 这里, 把pool中最新被回收的block(也就是freeblock)指向p
+            pool->freeblock = (block *)p;
+            
+            if (lastfree) {
+                // 先省略代码
+            }
+            
+            // 下面的流程就是说
+            // 之前pool是full的, 那么此时变成used, 需要把pool加入到
+            // usedpools中, 头插
+            
+            /* Pool was full, so doesn't currently live in any list:
+             * link it to the front of the appropriate usedpools[] list.
+             * This mimics LRU pool usage for new allocations and
+             * targets optimal filling when several pools contain
+             * blocks of the same size class.
+             */
+            --pool->ref.count;
+            assert(pool->ref.count > 0);            /* else the pool is empty */
+            size = pool->szidx;
+            next = usedpools[size + size];
+            prev = next->prevpool;
+            /* insert pool before next:   prev <-> pool <-> next */
+            pool->nextpool = next;
+            pool->prevpool = prev;
+            next->prevpool = pool;
+            prev->nextpool = pool;
+        
+        
+        }
+    
+    }
+
+   
+3. 如果xp回收之后是empty状态, 首先把xp从usedpools中给移除, 把pool加入到xarean中的freepools的头部
+   
+   然后需要考虑xarena的状态了, 注意的是, usable_arenas也是一个链表!!!!!不仅仅是一个对象
+
+   xarena有四种情况, 看下代码
+
+
+.. code-block:: c
+
+    static void
+    _PyObject_Free(void *ctx, void *p)
+    {
+    
+        // 拿到pool
+        pool = POOL_ADDR(p);
+        
+        // 这个判断先不管
+        if (address_in_range(p, pool)) {
+            
+            if (lastfree) {
+                if (--pool->ref.count != 0) {
+                    // 看上面的流程
+                }
+            }
+
+            // 这里就是进入如果pool是empty的状态了
+            // 注释说了,先把它从usedpools中移除
+
+            /* Pool is now empty:  unlink from usedpools, and
+             * link to the front of freepools.  This ensures that
+             * previously freed pools will be allocated later
+             * (being not referenced, they are perhaps paged out).
+             */
+            next = pool->nextpool;
+            prev = pool->prevpool;
+            next->prevpool = prev;
+            prev->nextpool = next;
+
+            // 然后加入到xarena中的freepools的头部
+            /* Link the pool to freepools.  This is a singly-linked
+             * list, and pool->prevpool isn't used there.
+             */
+            ao = &arenas[pool->arenaindex];
+            pool->nextpool = ao->freepools;
+            ao->freepools = pool;
+
+            // 统计xarena中已回收的pool的数量nf
+            nf = ++ao->nfreepools;
+
+            /* All the rest is arena management.  We just freed
+             * a pool, and there are 4 cases for arena mgmt:
+             * 1. If all the pools are free, return the arena to
+             *    the system free().
+             *    所有的pool都是被回收了, 也就是该arena是从used变为empty, 那么说明该arena是在usable_arenas链表中
+             *    把该arena从usable_arenas链表移除, 调用系统的free去回收这个arena
+             *
+             * 2. If this is the only free pool in the arena,
+             *    add the arena back to the `usable_arenas` list.
+             *    也就是xarena之前是full的, 然后回收了一块, 所以之前
+             *    该arena不在usable_arenas链表中, 现在需要加上去(头插)
+             * 3. If the "next" arena has a smaller count of free
+             *    pools, we have to "slide this arena right" to
+             *    restore that usable_arenas is sorted in order of
+             *    nfreepools.
+             *   
+             * 4. Else there's nothing more to do.
+             */
+
+
+            if (nf == ao->ntotalpools) {
+                // 第一种情况, 所有的pool都是可用的, 那么arnea是empty状态了
+                /* Case 1.  First unlink ao from usable_arenas.
+                 */
+                // 里面的代码先省略
+                UNLOCK();
+                return;
+            }
+            if (nf == 1) {
+                // 第二种情况, nf等于1表示该arena出现了第一块被回收的
+                // 的pool, 也就是说之前该arena是full状态, 不在usable_arenas链表中
+                // 所以需要加上去
+                /* Case 2.  Put ao at the head of
+                 * usable_arenas.  Note that because
+                 * ao->nfreepools was 0 before, ao isn't
+                 * currently on the usable_arenas list.
+                 */
+                ao->nextarena = usable_arenas;
+                ao->prevarena = NULL;
+                if (usable_arenas)
+                    usable_arenas->prevarena = ao;
+                usable_arenas = ao;
+                assert(usable_arenas->address != 0);
+
+                UNLOCK();
+                return;
+            }
+
+            // 后面的代码是第三种情况
+            // 把arena在usable_arenas中的顺序改一下
+            // 目的就是使得usable_arenas中排序是按freepools排序的
+            // 越多的则越后面
+
+
+            // 或者第四种情况, 该arena的顺序不需要变化, 怎么什么也不做
+             
+        }
+    
+    }
+
 

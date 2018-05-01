@@ -79,7 +79,7 @@ cpython/Objects/unicodeobject.c
                                  Py_ssize_t *consumed)
     {
     
-        // 这里!!!!!把writer0->buffer赋值为一个新的PyUnicodeObject
+        // 这里!!!!!把writer->buffer赋值为一个新的PyUnicodeObject
         if (_PyUnicodeWriter_Prepare(&writer, writer.min_length, 127) == -1)
             goto onError;
         
@@ -178,6 +178,8 @@ cpython/Objects/unicodeobject.c
         _PyUnicodeWriter_Update(writer);
     
     }
+
+关于PyUnicode_New, 这里是生成一个平台相关
 
 所以, 该函数就是把writer->buffer初始化一个ascii类型的PyUnicodeObject
 
@@ -321,7 +323,6 @@ cpython/Objects/unicodeobject.c
 
 decode的流程涉及到unicode, utf8的编码和转码, 比如 *你* 这个字, 值是20320, 但是存储的时候, 是用三个字节存储[x, y, z], 但是python内部对于'你们’是使用两个字节存储, 这部分先略过
 
-
 在接下来的switch语句, 走default分支, 调用_PyUnicodeWriter_WriteCharInline函数
 
 
@@ -444,6 +445,7 @@ resize_compact则是重新分配大小, 先略过
 4. 最后finish的时候, 设置正确的length
 
 5. 存储的时候, 一旦有unicode, 就会变成n个字节存储一个字符, 比如'12你们', '你们'都是用两个字节, 那么本来'12'都是用一个字节, 最后也会改为两个字节,
+
    也就是说存储会变为: ['1', '', '2', '', 'x1', 'x2', 'y1', 'y2]
 
 
@@ -557,6 +559,8 @@ is操作的区别
 
 
 在编译中看看foo!和awd的区别, **每一个语句都会编译成一个codeobject, 每一个codeobject都有自己的consts常量**, 然后其中常量会保存在codeobject.consts中
+
+同时, 常量(满足条件的)会被加入到全局intern这个dict里面
 
 
 .. code-block:: c
@@ -828,7 +832,7 @@ awd这个字符串
                  22 RETURN_VALUE
     
 
-看到带有LOAD_CONST语句, 看看LOAD_CONST是干嘛的
+看到带有LOAD_CONST语句, 并且传入的参数都是1, 看看LOAD_CONST是干嘛的
 
 
 .. code-block:: c
@@ -871,11 +875,12 @@ awd这个字符串
 
 我们看到, consts包含了一个foo!字符串(虽然我们赋值了两次, 但是只有一个), 然后保存到consts中, 所以当LOAD_CONST执行的时候,
 
-从consts拿到的是同一个foo!
+从consts拿到的是同一个foo!(传入的参数都是1)
 
 **所以, 虽然foo!没有被缓存掉(intern), 但是由于codeobject中只存储了一个foo!, 但是LOAD_CONST拿到的是同一个对象, 搜易is返回True**
 
 **这里跟缓存没关系, 只是说函数中拿到的foo!是同一个.**
+
 
 运行时的缓存(编译优化)
 ==============================

@@ -143,3 +143,51 @@ cpython/Python/error.c
         return tstate == NULL ? NULL : tstate->curexc_type;
     }
 
+
+异步异常
+=============
+
+在python中, 线程无法主动停止, 但是python提供了一个插入异步异常的api
+
+异步异常会在每次要执行opcode的时候, 去判断
+
+
+当然, 如果线程是卡在计算中, 那么自然也无法被引发异常, 所以是"异步异常"嘛
+
+在解释器执行函数_PyEval_EvalFrameDefault中 
+
+.. code-block:: c
+
+    for (;;) {
+    
+        // 显然, 解释器的执行需要被中断
+        // 为什么呢,　在if块中判断
+        if (_Py_atomic_load_relaxed(&eval_breaker)) {
+        
+            // 签名还会判断是不是因为信号, 是不是因为有drop_gil_request
+            
+            // 是因为有异步异常
+            if (tstate->async_exc != NULL) {
+            
+                // 拿出异步异常
+                // 注意的是, 拿出异步异常之后, tstate上的异步异常就被清除了
+                PyObject *exc = tstate->async_exc;
+                tstate->async_exc = NULL;
+                UNSIGNAL_ASYNC_EXC();
+                PyErr_SetNone(exc);
+                Py_DECREF(exc);
+                goto error;
+            
+            }
+        
+        }
+        
+        // 执行opcode
+    
+    }
+
+
+
+
+
+

@@ -3,15 +3,37 @@ signal
 
 信号处理模块
 
-1. 只能在主线程中使用系统调用sigaction去设置对应信号的handler, handler不是python代码, 而是c函数signal_handler, 毕竟内核又不能直接执行python代码.
+**前提: 信号的回调是保存在signal模块中, 但是执行是解释器调用signal模块的函数去执行的(因为只有解释器能执行opcode), 然后解释器自己模块中的信号回调其实wake_fd机制的报错函数**
 
-2. signal_handler(实际是trip_signal函数)去设置全局Handlers这个数组中对应的信号为受信状态, 然后通知vm有信号受信.
+1. 只能在主线程中使用系统调用sigaction去设置对应信号的handler, **在signal.signal中会有是否是主线程判断**
+  
+   handler不是python代码, 而是c函数signal_handler, **毕竟内核又不能直接执行python代码.**
 
-3. 如果你自己设置了监听fd, 就是你调用signal.sets_wakeup_fd这个函数设置自己的wakup_fd, 那么signal_handler会把信号的信号码写入wakeup_fd, 这样你自己监听wakup_fd也就会被唤醒了.
+2. signal_handler(实际是trip_signal函数)去设置signal模块中, Handlers这个数组中对应的信号为受信状态, 然后通知解释器有信号受信, 设置两个变量
 
-4. 通知vm是通过设置runtime变量来实现的, 这样vm执行到下一个字节码的时候, 发现有待处理的调用(pendding_call), 那么去调用PyErr_CheckSignals去执行信号对应的python代码.
+   ceval.c中的ceval_breaker为1, 说明解释器执行需要中断
+   
+   ceval.c中的pendingcalls_to_do为1, 说明解释器中断是因为有信号进来
 
-5. PyErr_CheckSignals会遍历全局的Handlers这个数组, 找到受信的信号, 调用对应的python代码.
+3. 如果你自己设置了监听fd, 就是你调用signal.sets_wakeup_fd这个函数设置自己的wakup_fd, 那么signal_handler会把信号的信号码写入wakeup_fd, 这样接下来trip_signal
+   
+   会去唤醒wakup_fd. wakeup_fd是因为主能在主线程中执行信号处理函数, 那么其他线程需要知道信号是否受信, 那么可以设置wakeup_fd
+
+4. 解释器执行的时候, 判断到ceval_breaker为1, 知道自己需要中断, 然后继续去判断到pendingcalls_to_do为1, 那么说明是有信号进来
+   
+   然后函数Py_MakePendingCalls调用signal模块中的PyErr_CheckSignals函数, 去遍历signal模块中的Handlers数据, 然后执行回调
+
+   **Py_MakePendingCalls中, 也会去判断是否是主线程**
+
+5. 注意的是, 如果设置了wakeup_fd, 由于trip_signal通知完解释器有信号, 会去写入(唤醒)wakeup_fd,
+   
+   那么如果唤醒wakeup_fd出错, trip_signal会把报错回调设置到解释器模块的信号回调函数, 也就是ceval.c中的
+
+   pendingcalls这个结构, 中对应信号的回调就是一个报错函数, report_wakeup_write_error
+
+   这样解释器执行完函数的回调(signal模块中的Handler结构)的时候, 会for循环去遍历pendingcalls这个结构, 发现
+   
+   有回调, 则执行回调(report_wakeup_write_error)
 
 6. python并不是把信号的handler加入队列, 然后一个个调用的形式, 而是受到信号之后, 通知vm有信号然后立即执行.
 
@@ -340,7 +362,11 @@ _PyEval_SignalReceived
 
 SIGNAL_PENDING_CALLS的定义在cpython/Python/ceval.c:
 
-设置runtime的变量
+设置runtime的变量, 包括:
+
+1. eval_breaker为1, 说明解释器执行的时候需要中断
+
+2. pending.calls_to_do设置为1, 表示有信号要处理
 
 .. code-block:: c
 
@@ -350,8 +376,8 @@ SIGNAL_PENDING_CALLS的定义在cpython/Python/ceval.c:
             _Py_atomic_store_relaxed(&_PyRuntime.ceval.eval_breaker, 1); \
         } while (0)
 
-vm执行signal
-================
+解释器执行signal
+====================
 
 在_PyEval_EvalFrameDefault这个执行字节码的函数中, 每次执行字节码的时候, 回去判断是否有待处理的调用(pendding call)
 
@@ -366,19 +392,21 @@ vm执行signal
         for (;;) {
         
             // 肯定是省略了一大堆代码了
-            
-            // 这个就是判断上之前提到的calls_to_do变量了
-            if (_Py_atomic_load_relaxed(
-                        &_PyRuntime.ceval.pending.calls_to_do))
-            {
-            
-            // 执行一下待处理调用
-            if (Py_MakePendingCalls() < 0)
-                goto error;
+
+            // 执行opcode之前, 先判断是否需要被中断, eval_breaker
+            if (_Py_atomic_load_relaxed(&eval_breaker)) {
+
+                // 如果是因为信号导致被中断
+                if (_Py_atomic_load_relaxed(&pendingcalls_to_do)) {
+                    // 调用Py_MakePendingCalls去处理信号
+                    if (Py_MakePendingCalls() < 0)
+                        goto error;
+                }
             }
-        
-        
+            
         }
+
+        // 执行opcode
     
     }
 
@@ -394,7 +422,27 @@ Py_MakePendingCalls
     int
     Py_MakePendingCalls(void)
     {
-        // 肯定省略了很多代码的啦
+        static int busy = 0;
+        int i;
+        int r = 0;
+
+        assert(PyGILState_Check());
+
+        if (!pending_lock) {
+            /* initial allocation of the lock */
+            pending_lock = PyThread_allocate_lock();
+            if (pending_lock == NULL)
+                return -1;
+        }
+
+        /* only service pending calls on main thread */
+        // 如果不是主线程, 退出!!!!!
+        if (main_thread && PyThread_get_thread_ident() != main_thread)
+            return 0;
+        /* don't perform recursive pending calls */
+        if (busy)
+            return 0;
+        busy = 1;
 
         /* unsignal before starting to call callbacks, so that any callback
            added in-between re-signals */
@@ -403,13 +451,22 @@ Py_MakePendingCalls
     
         /* Python signal handler doesn't really queue a callback: it only signals
            that a signal was received, see _PyEval_SignalReceived(). */
-        // 这里就是调用信号处理函数的地方了
+        // 这里是调用signal模块里面的函数执行受信的信号
         if (PyErr_CheckSignals() < 0) {
             goto error;
         }
 
-        // 肯定省略了很多代码的啦
+        // 那么, 下面的循环是干嘛的呢?
+        for (i=0; i<NPENDINGCALLS; i++) {
+            // 其他操作    
+        }
     }
+
+1. 这里也会去校验是否是主线程
+
+2. 为什么调用了PyErr_CheckSignals调用了信号回调之后, 还需好继续for循环?
+
+   继续看下面
 
 PyErr_CheckSignals
 =====================
@@ -456,6 +513,111 @@ PyErr_CheckSignals
     
         return 0;
     
+    
+    }
+
+Py_MakePendingCalls中继续的for循环
+======================================
+
+在Py_MakePendingCalls中, 调用到PyErr_CheckSignals之后, 继续的for循环是干嘛的呢?
+
+之前看到过, python中的信号还支持一个叫wake_fd的机制, 也就是支持其他线程监听是否受信的功能
+
+因为信号只能在主线程中执行(ceval.c和signal模块都有保证), 所以其他线程需要知道信号是否受信的话, 可以设置wake_fd
+
+然后在trip_signal中, 会执行:
+
+1. 通知ceval.c有信号, 需要调用PyErr_CheckSignals去执行信号回调
+
+2. 然后去写入wake_fd, 也就是让wake_fd受信, 如果失败, 那么把报错函数设置到
+
+   全局信号的回调中
+
+
+所以for循环中就是去调用, 设置了wake_fd之后, 如果trip_signal中唤醒wakeup_fd有错误的话, 在ceval.c中报错
+
+在trip_signal中, 会去根据是否设置了wake_fd, 然后唤醒wakeup_fd, 如果有错, 设置报错回调
+
+.. code-block:: c
+
+    static void
+    trip_signal(int sig_num)
+    {
+    
+    
+    #ifdef MS_WINDOWS
+    #else
+        // 获取wake_fd
+        fd = wakeup_fd;
+    #endif
+    
+        if (fd != INVALID_FD) {
+            byte = (unsigned char)sig_num;
+    #ifdef MS_WINDOWS
+    #endif
+            {
+                // 下面的Py_AddPendingCall则是去把
+                // report_wakeup_write_error这个函数设置为
+                // ceval.c中全局的信号回调函数
+                byte = (unsigned char)sig_num;
+    
+                /* _Py_write_noraise() retries write() if write() is interrupted by
+                   a signal (fails with EINTR). */
+                // 唤醒wakeup_fd
+                rc = _Py_write_noraise(fd, &byte, 1);
+    
+                // 如果唤醒有错
+                // 需要在ceval.c中报错
+                // 所以设置了ceval.c中信号的回调会报错函数
+                if (rc < 0) {
+                    /* Py_AddPendingCall() isn't signal-safe, but we
+                       still use it for this exceptional case. */
+                    Py_AddPendingCall(report_wakeup_write_error,
+                                      (void *)(intptr_t)errno);
+                }
+            }
+        }
+    
+    }
+
+所以, 在Py_MakePendingCalls中, **for循环就是寻找哪个信号的wakeup_fd出错了**
+
+.. code-block:: c
+
+    int
+    Py_MakePendingCalls(void)
+    {
+        if (PyErr_CheckSignals() < 0) {
+            goto error;
+        }
+    
+        /* perform a bounded number of calls, in case of recursion */
+        // 下面就是获取信号的wakeup_fd报错的回调
+        // 也就是trip_signal中设置的report_wakeup_write_error
+        for (i=0; i<NPENDINGCALLS; i++) {
+            int j;
+            int (*func)(void *);
+            void *arg = NULL;
+    
+            /* pop one item off the queue while holding the lock */
+            PyThread_acquire_lock(pending_lock, WAIT_LOCK);
+            j = pendingfirst;
+            if (j == pendinglast) {
+                func = NULL; /* Queue empty */
+            } else {
+                func = pendingcalls[j].func;
+                arg = pendingcalls[j].arg;
+                pendingfirst = (j + 1) % NPENDINGCALLS;
+            }
+            PyThread_release_lock(pending_lock);
+            /* having released the lock, perform the callback */
+            if (func == NULL)
+                break;
+            r = func(arg);
+            if (r) {
+                goto error;
+            }
+        }
     
     }
 

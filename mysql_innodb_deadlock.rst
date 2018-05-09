@@ -162,30 +162,30 @@ and does not prevent other sessions from inserting into the gap before the inser
 
 .. code-block:: python
 
-'''
-
-mysql> select * from t1;
-+----+------+
-| id | name |
-+----+------+
-|  1 | t1   |
-|  3 | t11  |
-|  4 | t110 |
-|  5 | t111 |
-|  6 | t112 |
-|  2 | t2   |
-+----+------+
-6 rows in set (0.00 sec)
-
-事务1:
-
-INSERT INTO t1(name) VALUES('t113');
-
-事务2:
-
-INSERT INTO t1(name) VALUES('t114');
-
-'''
+    '''
+    
+    mysql> select * from t1;
+    +----+------+
+    | id | name |
+    +----+------+
+    |  1 | t1   |
+    |  3 | t11  |
+    |  4 | t110 |
+    |  5 | t111 |
+    |  6 | t112 |
+    |  2 | t2   |
+    +----+------+
+    6 rows in set (0.00 sec)
+    
+    事务1:
+    
+    INSERT INTO t1(name) VALUES('t113');
+    
+    事务2:
+    
+    INSERT INTO t1(name) VALUES('t114');
+    
+    '''
 
 然后事务2对name=t113进行去select for update
 
@@ -266,7 +266,7 @@ At this point, sessions 2 and 3 deadlock: Neither can acquire an exclusive lock 
 
 1. 事务1插入成功, 在记录上设置互斥锁
 
-2. 事务2, 3请求插入的时候发现记录存在(因为互斥锁), 所以发送duplicate error, 然后
+2. 事务2, 3请求插入的时候发现记录存在(因为互斥锁), 所以发生duplicate error, 然后
 
    事务2, 3都请求索引的共享锁
 
@@ -274,8 +274,31 @@ At this point, sessions 2 and 3 deadlock: Neither can acquire an exclusive lock 
 
    同样事务3也一样, 造成死锁
 
-三个插入一个提交死锁
-========================
+插入/删除死锁进一步分析
+===========================
+
+前面我们知道
+
+1. 三个插入, 然后第一个rollback之后会发生死锁, 那如果第一个插入是commit呢?
+
+2. 一个删除, 然后第二第三个插入, 第一个commit之后发生死锁, 那么第一个删除rollback呢?
+
+经过实验, 情况1中不会死锁, 情况2中也不会死锁
+
+**为什么呢?**
+
+显然, 情况1中, 事务1插入commit之后, 此时记录已经存在, 那么事务2, 3再次插入就不能插入了, 发生duplicate key的错误, 如果是rollback, 那么事务2, 3都能插入, 所以出现死锁
+
+情况2中一样, 如果事务1的delete进行rollback之后, 事务2, 3的插入会直接不能插入, 报duplicate key error
+
+所以, 插入的死锁分析就是需要出现这样的情况:
+
+1. 一开始事务2, 3被事务1的互斥锁阻塞, 然后转而申请共享锁, 共享锁一般申请成功
+
+2. 然后事务1的操作导致事务2, 3都能插入, 此时事务2, 3的就会死锁
+
+一个删除两个插入死锁
+============================
 
 下面参考: https://dev.mysql.com/doc/refman/5.7/en/innodb-locks-set.html
 
@@ -334,7 +357,7 @@ select for update然后insert死锁
 或者insert into on duplicate key update
 
 
-select for update然后update死锁
+update顺序导致死锁
 =================================
 
 顺序不同互相等待导致死锁

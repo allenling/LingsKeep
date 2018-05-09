@@ -3,23 +3,15 @@ nptl创建的大纲
 
 1. kernel调度单位task
 
-2. nptl, clone, clone的标志位: CLONE_THREAD, CLONE_CHILD_SET_TID, CLONE_CHILD_CLEAR_TID
+2. 下面是copy_process的流程
 
-3. copy_process的流程
+3. dup_task_struct: 复制task结构
 
-4. dup_task_struct: 复制task结构
+5. 初始化信号队列(链表)
 
-5. set_tid和clear_tid赋值, 当线程结束的时候, detach线程是由join的线程去清理, 非detach线程, 设置了set_tid和clear_tid, 由内核清理
+6. sched_fork, copy_sighand, 处理io, fs, file
 
-   CLONE_PARENT_SETTID 参数要求内核在 clone 操作完成前将父进程空间的某个指定内存位置填上子线程的 ID 值
-   
-   CLONE_CHILD_CLEARTID 则要求内核在线程结束后将子线程空间的某个指定内存位置处的值清零。当然，针对线程而言都是在同一个内存空间中
-
-6. 初始化信号队列(链表)
-
-7. sched_fork, copy_sighand, 处理io, fs, file
-
-8. 创建pid和pid_amespace
+7. 创建pid和pid_amespace
 
    pid namespace的层级和映射, clone参数是CLONE_NEWPID
 
@@ -33,9 +25,9 @@ nptl创建的大纲
 
    pid namespace中, 分配pid号和attach到pid namespace是分两步
 
-9. 设置tgid(pid号), thread_group, group_leader
+8. 设置tgid(pid号), thread_group, group_leader
 
-10. init_pid/attach_pid: pid结构和task结构关联起来
+9. init_pid/attach_pid: pid结构和task结构关联起来
 
 epoll大纲
 ============
@@ -100,7 +92,7 @@ cfs调度大纲
    
    base_slice = nr_running * sysctl_sched_min_granularity if nr_running > sysctl_sched_nr_latency else sysctl_sched_latency
 
-   然后计算task在cfs_rq中的load的占比, 获得最终的slice, slice = base_slice * (NICE_0_LOAD / task->load_weight)
+   然后计算task在cfs_rq中的load的占比, 获得最终的slice, slice = base_slice * (task->load_weight / cfs->load)
 
    然后根据slice, task的load_weight(和nice_0对比), 去计算最终的增加的vruntime: vruntime += slice * (NICE_0_LOAD / task->load_weight)
 
@@ -114,7 +106,7 @@ cfs调度大纲
    default_wake_function -> ttwu_queue -> ttwu_do_active -> (ttwu_active, ttwu_do_wakeup),  ttwu_active会调用enqueue_task加入红黑树, 然后调用ttwu_do_wakeup, 也会调用到check_preempt_curr
 
 
-10. check_preempt_curr, 判断传入(唤醒)的task是否抢占当前task, 调用cfs的check_preempt_wakup
+10. check_preempt_wakeup, 判断传入(唤醒)的task是否抢占当前task, 调用cfs的check_preempt_wakup
 
     其中唤醒的task会根据配置优先设置到next/last中, 这样选择下一个task的时候, 会对比leftmost, curr, next/last, 选一个合适的
 
@@ -128,7 +120,9 @@ cfs调度大纲
 12. 做一次context_switch的地方是schedule(__schedule)函数, 比如epoll中休眠的时候, 放弃cpu对调用schedule函数
 
 
-13. __schedule函数是pick_next_task, 调用到cfs的pick_next_task_fair, 对比curr, leftmost, next/last, 调用wakeup_preempt_entity    
+13. __schedule函数是pick_next_task, 调用到cfs的pick_next_task_fair, 对比curr, leftmost, next/last, 对比的过程是变量left=min(leftmost, curr),
+    
+    然后如果next有值, 那么调用wakeup_preempt_entity去校验next和left, 如果last有值, 然后调用wakeup_preempt_entity去校验last和left
 
 14. 然后周期性的schedule_tick也会校验当前curr是否已经用完时间片了, 计算条件当前总运行时间是否大于被分配的运行时间
 

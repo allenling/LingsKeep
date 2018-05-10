@@ -96,6 +96,15 @@ epoll在大多数情况是空闲的时候, 比起select快很多, 若fd大多数
 
 3. 执行epoll_wait时立刻返回准备就绪链表里的数据即可.
 
+4. 复制就绪链表到用户态的时候, 复制是操作的是就绪链表的一份copy, 然后把就绪链表置空, 因为有锁, 所以感觉就算多个task调用ep_poll的时候问题也不大
+
+   也就是txlist = copy(rdllist), 然后rdllist = [], 然后操作txlist
+
+   操作txlist的时候, 会把遍历过的, 满足条件的元素删除, 然后最后可能txlist会变为空, txlist = [], 或者因为LT/ET模式, txlist不为空
+
+   然后把ovlist中的event加入到rdllist, 然后再把txlist加入rdllist, 此时rdllist又有可能不是空了
+
+   如果不为空, 则调用wake_up_locked再次去唤醒监听epoll的task
 
 参考: http://blog.csdn.net/kai8wei/article/details/51233494
 

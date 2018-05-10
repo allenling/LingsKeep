@@ -65,8 +65,6 @@ cfs调度大纲
 3. sched_fork中, 先把调用__sched_for, 把task->vruntime, task->sum_exec_runtime/prev_exec_runtime置0
 
    然后调用cfs的task_fork_fair
-
-   如果定义了child_run_first, 交换父子task的vruntime
    
 4. task_fork_fair
    
@@ -74,6 +72,7 @@ cfs调度大纲
    
    调用place_entity, 新的task的vruntime初始化为cfs->min_vruntime, 如果定义了新fork出来的task需要延迟执行, 那么进行vrumtime的补偿
 
+   如果定义了child_run_first, 交换父子task的vruntime, 然后调用resched_curr去设置父task的TIF_NEED_RESCHED标志位
 
 5. update_curr中, curr->vruntime增加的值是now - exec_start = delta, 然后cfs->curr->vruntime += delta * (NICE_0_LOAD / se->load_weight)
 
@@ -101,7 +100,7 @@ cfs调度大纲
 
    前者是clone中去唤醒, 后者是当有时间通知的时候, 调用的回调
 
-9. wake-up_new_task: activate_task, 加入cfs红黑树, check_preempt_curr会调用check_preempt_wakeup, 判断唤醒的task是否应该去抢占掉当前task
+9. wake_up_new_task: activate_task, 加入cfs红黑树, 然后check_preempt_curr会调用check_preempt_wakeup, 判断唤醒的task是否应该去抢占掉当前task
 
    default_wake_function -> ttwu_queue -> ttwu_do_active -> (ttwu_active, ttwu_do_wakeup),  ttwu_active会调用enqueue_task加入红黑树, 然后调用ttwu_do_wakeup, 也会调用到check_preempt_curr
 
@@ -124,15 +123,25 @@ cfs调度大纲
     
     然后如果next有值, 那么调用wakeup_preempt_entity去校验next和left, 如果last有值, 然后调用wakeup_preempt_entity去校验last和left
 
-14. 然后周期性的schedule_tick也会校验当前curr是否已经用完时间片了, 计算条件当前总运行时间是否大于被分配的运行时间
+14. 每一个时钟周期都会调用到scheduler_tick这个调度函数, 目的是检查当期那的curr是否应该被抢占出去
+    
+    最终会调用到cfs的task_tick_fair, cfs->curr如果已经运行的时间大于理想的时间, 那么应该被抢占掉
 
-    sum_exec = sum_exec_runtime - prev_exec_runtime
+    sum_exec = sum_exec_runtime - prev_exec_runtime, 总运行时间
 
-    ideal = sched_slice = base_slice * (curr->load / cfs->load)
+    ideal_runtime = sched_slice = base_slice * (curr->load / cfs->load), 理想的运行时间
 
-    sum_exec > ideal and sum_exec > sysctl_sched_min_granularity
+    如果sum_exec > ideal_runtime, 那么直接调用resched_curr
+   
+    如果sum_exec > ideal_runtime, 那么还需要判断sum_exec是否小于sysctl_sched_min_granularity, 如果小于, 则退出, 这是为了防止curr没有执行到最小的调度时间而被抢占掉
 
-    然后调用resched_curr
+    如果sum_exec > ideal_runtime, 并且sum_exec > sysctl_sched_min_granularity, 那么还需要判断, delta = curr->vruntime - leftmost->vruntime,
+
+    delta是否大于0, 如果大于0, 那么表示leftmost比curr更应该运行, 然后再判断delta是否大于ideal_runtime, 如果大于, 则调用resched_curr
+
+    其中, 当判断curr和leftmost的时候, 不要和之前校验是否抢占curr搞混了, 之前的curr-gran > task, 这里是
+
+    也就是curr->vruntime - leftmost->vruntim > ideal_runtime = base_slice * (curr->load/cfs->load), 也就是
 
 15. 处理中断, 然后返回用户态的时候, exit_to_usermode会检查TIF_NEED_RESCHED, 然后调用__schedule
 

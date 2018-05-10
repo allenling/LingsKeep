@@ -3061,7 +3061,7 @@ sum_exec_runtime, prev_sum_exec_runtime = sum_exec_runtime = 10, 然后t1一直�
 
 sum_exec_runtime = 20, prev_sum_exec_runtime=10, 此时进入check_preempt_tick, 那么delta_exec = 20 - 10 = 10
 
-prev_sum_exec_runtime的赋值是在 *__schedule -> pick_next_task - >pick_next_fair -> set_next_entity* 中
+prev_sum_exec_runtime的赋值是在 *__schedule -> pick_next_task - >pick_next_task_fair -> set_next_entity* 中
 
 一旦一个task被选择, 那么把上一次运行的时间保存到prev_sum_exec_runtime上
 

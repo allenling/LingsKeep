@@ -315,7 +315,7 @@ celery不再是watch要操作的key, 而是watch操作的key, 也就是key_handl
 如何获取bucket数据
 ======================
 
-我们一般直接smembers, 拿到bucket所有的数据, 但是, 同时我们需要删除bucket, 否则
+我们一般直接zrange, 拿到bucket所有的数据, 但是, 同时我们需要删除bucket, 否则
 
 1. 处理完bucket之后, 那么下一次task执行的话, 发现bucket依然有值, 但是其实我们已经处理过了, 会
 
@@ -327,7 +327,7 @@ celery不再是watch要操作的key, 而是watch操作的key, 也就是key_handl
 
 3. 删除bucket记得使用pipeline, 否则丢数据, 
    
-   worker1, smembers bucket, keys = [a, b, c]
+   worker1, zrange(bucket, 0, -1), keys = [a, b, c]
 
    client(其他redis客户端), zadd(bucket score, d), 此时bucket = {d}
 
@@ -342,7 +342,7 @@ celery不再是watch要操作的key, 而是watch操作的key, 也就是key_handl
     def fetch_bucket_keys(r, bucket_name)：
         
         with r.pipeline() as p:
-            p.smembers(bucket_name)
+            p.zrange(bucket_name, 0, -1)
             p.delete(bucket_name)
 
             res = p.execute()
@@ -706,13 +706,13 @@ v2, 这和worker1拿到v1矛盾
         # 任务的时间戳
         stamp = timezone.now()
         with r.pipeline() as p:
-            # 这里是smembers, 然后del, 避免重复
+            # 这里是zrange, 然后del, 避免重复
             # 如果我们不del bucket的话, 那么比如worker2就会重新去
             # 处理相同的key, 这样是不好的
-            # 所以smembers-del之后, bucket = {}
+            # 所以zrange-del之后, bucket = {}
             # 如果此时又有key有变动, 比如a = 2, 然后bucket = {2}
             # 那么worker2去处理的就是新的a, 这里就比较符合逻辑
-            p.smembers(bucket)
+            p.zrange(bucket, 0, -1)
             p.delete(bucket)
             res = p.execute()
         keys = res[0]

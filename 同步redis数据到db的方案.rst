@@ -397,13 +397,13 @@ worker1执行任务t没有执行完, 此时有celery beat又会发送任务t, �
 
 如果:
 
-1. worker1, for key=1, value=1
+1. worker1, update key=1, value=1
 
-2. worker2, for key=2, value=2
+2. worker2, update key=2, value=2
 
-3. worker1, for key=2, value=2
+3. worker1, update key=2, value=2
 
-4. worker2, for key=1, value=1
+4. worker2, update key=1, value=1
 
 那么3, 4中就会死锁, 因为worker1等待worker2释放key=2的锁, 而worker2等待worker1释放key=1的锁
 
@@ -422,15 +422,11 @@ worker1执行任务t没有执行完, 此时有celery beat又会发送任务t, �
 
 那么有可能出现数据覆盖的问题, 比如
 
-1. worker1, get key=2, value=1
+1. worker2, for key=2, value=2
 
-2. worker2, get key=2, value=2
+2. worker1, for key=2, value=1
 
-3. worker2, update key=2, value=2
-
-4. worker1, update key=2, value=1
-
-显然, worker1会覆盖worker2的数据
+显然, worker1执行update key=2晚于worker2执行的话, 会覆盖worker2的数据
 
 比如worker1获取的keys比较多, 得到keys=[a, b, c, d], values=[1, 2, 3, 4], 然后worker2拿到的keys = [d], values=[5]
 

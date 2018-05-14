@@ -230,6 +230,20 @@ PyRun_InteractiveOneObjectEx -> PyParser_ASTFromFileObject -> PyParser_ParseFile
     
     }
 
+所以, 这里有个重点: **每次你输入一行, 那么python就解析一行**
+
+*比如你要定义函数, 第一行输入 def test():, 然后回车, 那么python从PyOS_Readline中, 就得到这个语句, 然后发现是定义函数, 则
+
+继续, 然后你输入第二行是4个空格+一个语句, 比如    a = 1, 那么python再次解析这行, 然后发现当前是函数定义, 然后继续
+
+所以就是, 在函数定义的时候, 你每输入一行, python就把语句编译成字节码, 加入到函数的code object中的字节码中, code_object->co_code,
+
+直到你定义完函数(输入两个回车), 然后python之前生成的code object和名称给对应起来. 具体过程请参考python_function.rst*
+
+parsetok
+===============
+
+
 而在parsetok中, 有:
 
 .. code-block:: c

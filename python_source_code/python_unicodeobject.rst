@@ -9,6 +9,12 @@ unicode
 
 3. find算法(BM和Horspool的综合)
 
+4. PyUnicodeObject中, 实际的数据不一定存储在PyUnicodeObject中, 如果是一个纯ascii字符串, 并且
+
+   不是compact类型的话, 数据是存储在PyUnicodeObject->data.any
+
+   但是通过PyUnicode_New新建的对象默认都是compact的
+
 
 缓存参考: http://guilload.com/python-string-interning/
 
@@ -319,9 +325,7 @@ cpython/Objects/unicodeobject.c
 
 所以接下来的流程的关键是几个字符串decode的库, asciilib_utf8_decode等等, 这几个函数大同小异, 都是对unicode进行编码, 然后返回字符的unicode值
 
-比如'你'这个字符, 经过asciilib_uf8_decode编码之后, 使用三个字节去存储该字符, 返回的ch则是'你'这个字符的unicode值, 也就是20320, 当然也是复制到writer->data
-
-decode的流程涉及到unicode, utf8的编码和转码, 比如 *你* 这个字, 值是20320, 但是存储的时候, 是用三个字节存储[x, y, z], 但是python内部对于'你们’是使用两个字节存储, 这部分先略过
+涉及到unicode的编码和转码, 这里可以直接理解为把'你'这个字符, 转成了数字20320, 也就是说, '你'这个字符的unicode是20320
 
 在接下来的switch语句, 走default分支, 调用_PyUnicodeWriter_WriteCharInline函数
 
@@ -373,23 +377,77 @@ cpython/Objects/unicodeobject.c
         }
     }
 
-因为之前writer->max_char是127, 也就是writer->buffer默认是ascii类型的PyUnicodeObject, 这次要变成compact类型的PyUnicodeObject
+因为之前writer->max_char是127, 也就是writer中的buffer, 也就是PyUnicodeObject, 不符合要求, 需要重新新建一个符合要求的PyUnicodeObject
 
-所以调用PyUnicode_New去新建一个compact类型的PyUnicodeObject
+新的PyUnicodeObject根据maxchar去设置kind, data的地址, 比如如果带有中文, 比如是'你', maxchar=20320, 那么需要用2字节去存储, 所以
 
-然后继续处理'们‘这个字符, 编码, 把该字符赋值到writer->data
+kind=PyUnicode_2BYTE_KIND, 然后如果是全都是ascii字符, 那么对象大小就是struct_size = sizeof(PyASCIIObject);, 否则struct_size = sizeof(PyCompactUnicodeObject);
+
+所以, 当处理到'你'这个字符的时候:
+
+1. 把'你'编码成20320
+
+2. 为writer->buffer, 然后重新生成一个PyUnicodeObject, 其中kind=PyUnicode_2BYTE_KIND, struct_size = sizeof(PyCompactUnicodeObject)
+
+   所以可知, PyASCIIObject->state.compact = 1, PyASCIIObject->state.ascii = 0
+
+3. 实际存储数据的数组data的地址就变成了data=(PyCompactUnicodeObject \*)obj + 1
+
+   如果全是ascii, 那么地址就是data = data = ((PyASCIIObject \*)obj) + 1;
+
+4. 把writer->buffer的数据复制到2, 3中新建返回的obj的data中, 然后把writer->buffer指向obj
+
+5. 调用_PyUnicodeWriter_Update去把writer->data指向obj的data
+
+6. 这样, 就重构了writer
+
+
+PyUnicode_WRITE
+==================
+
+所以, 我们是把字符串写入到writer中, 是调用PyUnicode_WRITE这个函数
+
+其实writer->buffer就是一个PyUnicodeObject对象, 也就是我们返回给用户的对象, 所以, 这里的写入就看成写入到PyUnicodeObject指定的data
+
+就好了. 显然, 带有unicode的PyUnicodeObject, 其data数组并不是在PyUnicodeObject中, 是(PyCompactUnicodeObject \*)obj + 1
+
+或者((PyASCIIObject \*)obj) + 1
+
+所以, 这里的写入就很直接了, 就是一个数组下标赋值的过程, 大小根据kind来决定
+
+.. code-block:: c
+
+    #define PyUnicode_WRITE(kind, data, index, value) \
+        do { \
+            switch ((kind)) { \
+            case PyUnicode_1BYTE_KIND: { \
+                ((Py_UCS1 *)(data))[(index)] = (Py_UCS1)(value); \
+                break; \
+            } \
+            case PyUnicode_2BYTE_KIND: { \
+                ((Py_UCS2 *)(data))[(index)] = (Py_UCS2)(value); \
+                break; \
+            } \
+            default: { \
+                assert((kind) == PyUnicode_4BYTE_KIND); \
+                ((Py_UCS4 *)(data))[(index)] = (Py_UCS4)(value); \
+            } \
+            } \
+        } while (0)
 
 
 最后调用_PyUnicodeWriter_Finish
 ==================================
 
+我们处理完'你'这个字符串之后, 接着处理'们'
+
+因为经过上一个步骤, writer->buffer已经是合适的kind了, 所以, 直接写入writer->data就好了
+
+写完之后, 需要调用_PyUnicodeWriter_Finish, 去设置正确的长度, 因为我们之前writer->size和
+
+writer->buffer->size都是默认的是传入的长度, 也就是strlen返回的长度, 有unicode的话自然不正确
+
 cpython/Objects/unicodeobject.c
-
-这个函数基本上是说, 处理writer->buffer, 返回一个正确的unicode对象.
-
-比如之前writer->buffer指向的PyUnicodeObject中, length=8, 这个8是strlen返回的, 但是我们调用len的时候, 应该是4, 也就是writer->pos的值
-
-也就是length != pos, 表示有unicode, 所以finish函数就是把length = pos, 当然还是其他操作
 
 
 .. code-block:: c
@@ -436,17 +494,31 @@ resize_compact则是重新分配大小, 先略过
 小结
 ======
 
-1. 初始化writer, writer->buffer先默认是一个ascii字符串, 创建为一个ascii类型的PyUnicodeObject
+字符串'12你们':
 
-2. 找到第一个非ascii字符, 把该字符之前的字符都复制到writer->data, 比如例子的中'12'
+0. writer->buffer是一个PyUnicodeObject, writer->data是存储unicode字符的地方
 
-3. 然后一个接一个字符去decode(编码), 编码的同时把unicode复制到writer->data中, 同时把writer->buffer变为一个compact类型的PyUnicodeObject
+   writer->buffer就是返回给用户的PyUnicodeObject, 所以下面的kind和data都可以直接理解为我们生成的PyUnicodeObject的属性
 
-4. 最后finish的时候, 设置正确的length
+1. 初始化writer, writer->buffer新建为一个compact类型的PyUnicodeObject
 
-5. 存储的时候, 一旦有unicode, 就会变成n个字节存储一个字符, 比如'12你们', '你们'都是用两个字节, 那么本来'12'都是用一个字节, 最后也会改为两个字节,
+   kind=PyUnicode_1BYTE_KIND, maxchar=127, data=((PyASCIIObject \*)obj) + 1;
 
-   也就是说存储会变为: ['1', '', '2', '', 'x1', 'x2', 'y1', 'y2]
+2. 然后, 先找到第一个非ascii字符, 把该字符之前的字符都复制到writer->data, 比如例子的中'12'
+
+3. 然后一个接一个字符去decode(编码), 比如, 把'你'这个字符, 变成20320, 此时发现1中的writer->buffer不能存储这个字符
+
+   因为1中的kind是1字节的, 而20320需要用4字节来存储, 所以, 传入20320给PyUnicode_New, 生成一个合适的PyUnicodeObject, 比如称为obj
+
+   其中, 根据20320, obj->kind=PyUnicode_1BYTE_KIND, new_data = (PyCompactUnicodeObject \*)obj + 1
+   
+4. 把writer->data的数据复制到3返回的obj, 然后把writer->buffer指向obj, writer->data = new_data
+
+5. 同时, 把'你'这个字符复制到writer->data中, 然后继续, 处理'们', 因为writer->buffer已经是一个合适的对象了(kind, data)
+
+   所以把'们'直接写入writer->data就好
+
+5. 最后finish的时候, 设置正确的length
 
 
 获取unicode的字符串
@@ -496,29 +568,14 @@ resize_compact则是重新分配大小, 先略过
          ((void*)((PyASCIIObject*)(op) + 1)) :              \
          ((void*)((PyCompactUnicodeObject*)(op) + 1)))
 
-注释上说, 返回一个元素的unicode的buffer, 然后调用的是 *((void\*)((PyCompactUnicodeObject*)(op) + 1)))*, 也就是说是unicode的下一个地址
-
-然后在debug中看到, idata的地址正好是创建的时候, writer-data的地址: 0x7ffff6bcee18, idata的接下去的地址是:
+根据之前生成的步骤, 我们知道, 调用PyUnicode_New生成的默认都是compact类型的对象, 所以来看看PyUnicode_READ读取的结果则是:
 
 .. code-block:: python
 
     '''
-    (char *)idata   + 0   0x7ffff6bcee18 "1"
-    ((char *)idata) + 1   0x7ffff6bcee19 ""
-    ((char *)idata) + 2   0x7ffff6bcee1a "2"
-    ((char *)idata) + 3   0x7ffff6bcee1b ""
-    ((char *)idata) + 4   0x7ffff6bcee1c "`OìN"
-    ((char *)idata) + 5   0x7ffff6bcee1d "OìN"
-    ((char *)idata) + 6   0x7ffff6bcee1e "ìN""
-    ((char *)idata) + 7   0x7ffff6bcee1f "N"
-    ((char *)idata) + 8   0x7ffff6bcee20 ""
-    '''
 
-而PyUnicode_READ读取的结果则是:
-
-.. code-block:: python
-
-    '''
+    x = PyUnicodeObject, ((PyASCIIObject *)x)->state.compact == 1
+    idata = (((PyCompactUnicodeObject *)x) + 1
 
     ((Py_UCS2 *)idata)[0] = 49(1)
     ((Py_UCS2 *)idata)[1] = 50(2)
@@ -526,6 +583,58 @@ resize_compact则是重新分配大小, 先略过
     ((Py_UCS2 *)idata)[3] = 20204(们)
 
     '''
+
+打印字符串都是新建一个字符串
+==============================
+
+比如, 我们的字符串对象是x, 那么其保存的数据是 12你们, 让我们打印的是, 新建一个unicode object对象y, y存储的数据是
+
+'12你们', **注意, 多了首尾两个单引号.**
+
+来看看unicode_repr函数
+
+cpython/Objects/unicodeobject.c
+
+.. code-block:: c
+
+    static PyObject *
+    unicode_repr(PyObject *unicode)
+    {
+        // 定义一个新的PyObject
+        PyObject *repr;
+
+        osize = 0;
+        max = 127;
+
+        // 下面的for循环是遍历传入的unicode
+        // 然后修改oszie和max为合适的值
+        for() {
+
+        }
+    
+    
+        // osize和max, 新建一个unicode object
+        repr = PyUnicode_New(osize, max);
+    
+        // 下面两个write是写入首尾单引号
+        PyUnicode_WRITE(okind, odata, 0, quote);
+        PyUnicode_WRITE(okind, odata, osize-1, quote);
+    
+        // 下面的if else都是把原字符串写入到
+        // repr这个新的unicode object中的过程
+        if (unchanged) {
+            _PyUnicode_FastCopyCharacters(repr, 1,
+                                          unicode, 0,
+                                          isize);
+        }else{
+    
+        }
+    
+        return repr;
+    
+    }
+
+
 
 
 PyUnicodeObject

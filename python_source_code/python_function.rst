@@ -334,6 +334,26 @@ cpython/Include/funcobject.h
 
 我们强行改变func.\_\_defaults\_\_, 然后python也修改了函数code object中的consts, 然后影响了函数的执行
 
+这是因为在执行函数的时候, 调用路径是: 
+
+call_function -> fast_function -> _PyEval_EvalCodeWithName
+
+在fast_function中, 从function object中拿到默认参数, 也就是function.func_defaults
+
+.. code-block:: c
+
+    static PyObject *
+    fast_function(PyObject *func, PyObject **stack,
+                  Py_ssize_t nargs, PyObject *kwnames)
+    {
+    
+        // 显然, 这个宏就是拿到function.func_defaults
+        kwdefs = PyFunction_GET_KW_DEFAULTS(func);
+    
+    }
+
+
+然后把kwdefs传入给_PyEval_EvalCodeWithName, 这样, 字节码中拿到的默认值就是修改过后的了!!!
 
 \_\_module\_\_
 ===============

@@ -41,6 +41,8 @@ python接口分层
 启动python
 ==============
 
+**更具体的流程在python_main.rst**
+
 python的入口main函数是在cpython/Programs/main.c, 该main函数会调用Py_Main这个函数, Py_Main是在
 
 cpython/Modules/main.c
@@ -230,9 +232,9 @@ PyRun_InteractiveOneObjectEx -> PyParser_ASTFromFileObject -> PyParser_ParseFile
     
     }
 
-所以, 这里有个重点: **每次你输入一行, 那么python就解析一行**
+所以, 这里有个重点: **shell模式下, 每次你输入一行, 那么python就解析一行, 而执行文件的模式也一样, 读取一行, 解析一行**
 
-*比如你要定义函数, 第一行输入 def test():, 然后回车, 那么python从PyOS_Readline中, 就得到这个语句, 然后发现是定义函数, 则
+*比如shell模式下, 你要定义函数, 第一行输入 def test():, 然后回车, 那么python从PyOS_Readline中, 就得到这个语句, 然后发现是定义函数, 则
 继续, 然后你输入第二行是4个空格+一个语句, 比如a = 1, 那么python再次解析这行为字节码, 然后发现当前是处于函数定义中, 则把这个a=1的字节码
 加入到函数code object中的co_code中, 所以就是, 在函数定义的时候, 你每输入一行, python就把语句编译成字节码
 直到你定义完函数(输入两个回车), 然后python之前生成的code object和名称给对应起来. 具体过程请参考python_function.rst*
@@ -423,11 +425,22 @@ python的解释器也是一个栈执行的机器, 就是入栈, 然后出栈的�
 
 这里用frame object保存code object, 然后把frame object传给解释器
 
+调用关系
+
+.. code-block:: python
+
+    '''
+    
+    PyEval_EvalCode -> _PyEval_EvalCodeWithName -> PyFrame_New
+    
+                                                -> PyEval_EvalFrameEx
+    
+    '''
+
+cpython/Python/ceval.c
 
 .. code-block:: c
 
-    // cpython/Python/ceval.c
-    // 这个函数是被上面的PyEval_EvalCode调用
     static PyObject *
     _PyEval_EvalCodeWithName(PyObject *_co, PyObject *globals, PyObject *locals,
                PyObject **args, Py_ssize_t argcount,

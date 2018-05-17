@@ -57,6 +57,8 @@ indicating that another thread was able to take the GIL.*
 
 被释放这个信号传递到其他线程需要点时间, 而a是直接又抢锁, 所以a很大可能又抢到锁了, 这会导致一个叫护航效应(convey effect)的问题
 
+所以, 强制等待其他线程拿到gil之后, 再继续等待gil, 这样可以解决护航效应
+
 gil结构
 =========
 
@@ -190,16 +192,18 @@ cpython/Python/ceval_gil.h
             int timed_out = 0;
             unsigned long saved_switchnum;
     
-            // 这里记录下switch_number, 如果在等待期间改变了, 表示其他线程去发送drop request, 就没有必要发了
+            // 这里记录下switch_number
             saved_switchnum = gil_switch_number;
 
             // 在竞态上等待
             // 这里会调用到pthread_cond_timedwait系统调用, 释放gil_mutex
             // 让其他线程可以释放gil或者等待gil
             COND_TIMED_WAIT(gil_cond, gil_mutex, INTERVAL, timed_out);
+            /* If we timed out and no switch occurred in the meantime, it is time
+            to ask the GIL-holding thread to drop it. */
+            // 注释上就是说, 如果超时了, 并且没有抢到锁, 并且期间没有发生switch
             if (timed_out &&
                 _Py_atomic_load_relaxed(&gil_locked) &&
-                // 超时了, 并且没有抢到锁, 并且期间没有人发drop request
                 gil_switch_number == saved_switchnum) {
                 // 自己发个drop, 然后继续吧
                 SET_GIL_DROP_REQUEST();
@@ -236,6 +240,22 @@ cpython/Python/ceval_gil.h
         MUTEX_UNLOCK(gil_mutex);
         errno = err;
     }
+
+发送drop gil request的时候, 发送的条件是超时, 没拿到, 并且没有switch发生
+
+switch没有发生的话, 就算同一个时间段内有多个线程发送drop请求也没关系, 因为drop请求只是设置drop变量为1而已
+
+多个请求也只是一个1, 不是说多个请求就多个排队, 并不会出现说, 在dabeaz分析gil的时候, a, b, c去抢gil, 然后a拿到gil之后
+
+马上b又发送drop请求, 这样gil会出现抖动
+
+所以就是, drop请求是一个变量, 这样就消除了多个请求导致抖动, 并且, 如果发生了switch, 那么不发drop请求而是再继续等待interval
+
+两个方式就限制了gil抖动行为
+
+并且拿到gil之后, 会把drop_gil_request置0, 这样, 就算a线程拿到gil, 但是还没有增加switch_number的时候, b又发送了一个drop_gil_request
+
+这样a会直接把drop_gil_request置0, 不理会这个drop请求
 
 pthread_cond_timedwait
 =======================

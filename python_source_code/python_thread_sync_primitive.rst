@@ -2,7 +2,41 @@
 这里是threading这个库的同步原语的实现
 #####################################
 
-一个锁就支持了所有原语的实现!
+锁的目的是为了防止线程不安全, 也就是多线程下出现数据错误, 所以多线程操作的时候, 必须拿到锁才能操作
+
+一个例子就是, python中的字节码a +=1分为:
+
+1. 获取a值
+   
+2. tmp=a+1
+
+3. a = tmp
+
+那么, 假设a=2, 当线程x执行到2的时候, 然后当前线程切换到线程y, 此时y也要执行a+=1, 然后
+
+y获取a, a=2, 然后tmp=a+1, 最后a=tmp, 当y执行完了, a的值变为3, 然后切换到线程x, 那么x继续执行字节码的第二步
+
+tmp = a + 1, 然后更新a = tmp, 此时我们希望a=4, 但是由于对同一个资源操作没有限制, 导致覆盖, 此时a=3
+
+1. 锁的结构和系统定义有关, 如果定义了posix sem支持, 那么锁就是count=1的sem, acquire和release都使用sem_*函数去执行
+
+2. 锁的等待有个注意点就是会调用Py_BEGIN_ALLOW_THREADS和Py_END_ALLOW_THREADS这组宏, 这组宏的目的是
+
+   切换tstate为NULL, 释放gil, 等到锁acquire返回之后, 在获取gil, 设置上tstate
+
+3. 锁和condtion看起来功能差不多, cond是支持多个线程等待通知的, 然后锁的话, 也可以多个线程一起acquire, 然后只有一个线程
+
+   能获取锁, cond则是支持通知所有人, 返回True表示拿到资源控制权.
+
+   但是有个小细节就是, 锁的timeout是针对锁, 而cond中的timeout是针对等待, 也就是说, 访问cond一定是阻塞的, 没有timeout
+
+   比如x, y, z三个线程去获取锁, timeout都是1s, 那么1s之后, x, y, z就会返回False
+
+   如果是a拿到cond, 然后不释放cond的锁, 那么x, y, z在cond上等待, 设置timeout是1s, 则1s之后, x, y, z不会返回
+
+   因为cond的锁的获取是阻塞无timeout的(acquire函数, 不带timeout), cond的timeout是说, x, y, z三个都进入wait状态了, 1s之后
+
+   x, y, z都返回
 
 Lock
 ======

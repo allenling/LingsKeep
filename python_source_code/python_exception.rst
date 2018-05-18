@@ -591,13 +591,76 @@ try/except
 
 3. 40只是一个END_FINALLY, 也就是出现异常, 但是不是我们捕获的异常, 所以这个字节码就是设置异常然后退出的操作
 
+4. 如果定义了finally, 那么无论try/except出现什么情况, 最后都会跳转到finally中定义的字节码, 然后再顺序执行就好了
+
+
+.. code-block:: python
+
+    In [8]: def test():
+       ...:     try:
+       ...:         print(pq)
+       ...:     except KeyError:
+       ...:         print('ke')
+       ...:     finally:
+       ...:         print('finally')
+       ...:     k = 1
+       ...:     return k
+       ...: 
+    
+    In [9]: dis.dis(test)
+      2           0 SETUP_FINALLY           46 (to 48)
+                  2 SETUP_EXCEPT            12 (to 16)
+    
+      3           4 LOAD_GLOBAL              0 (print)
+                  6 LOAD_GLOBAL              1 (pq)
+                  8 CALL_FUNCTION            1
+                 10 POP_TOP
+                 12 POP_BLOCK
+                 14 JUMP_FORWARD            28 (to 44)
+    
+      4     >>   16 DUP_TOP
+                 18 LOAD_GLOBAL              2 (KeyError)
+                 20 COMPARE_OP              10 (exception match)
+                 22 POP_JUMP_IF_FALSE       42
+                 24 POP_TOP
+                 26 POP_TOP
+                 28 POP_TOP
+    
+      5          30 LOAD_GLOBAL              0 (print)
+                 32 LOAD_CONST               1 ('ke')
+                 34 CALL_FUNCTION            1
+                 36 POP_TOP
+                 38 POP_EXCEPT
+                 40 JUMP_FORWARD             2 (to 44)
+            >>   42 END_FINALLY
+            >>   44 POP_BLOCK
+                 46 LOAD_CONST               0 (None)
+    
+      7     >>   48 LOAD_GLOBAL              0 (print)
+                 50 LOAD_CONST               2 ('finally')
+                 52 CALL_FUNCTION            1
+                 54 POP_TOP
+                 56 END_FINALLY
+    
+      8          58 LOAD_CONST               3 (1)
+                 60 STORE_FAST               0 (k)
+    
+      9          62 LOAD_FAST                0 (k)
+                 64 RETURN_VALUE
+
+
+显然, 记住了finally和try的handler字节码的地址, finally是48, try则是16
+
+所以, 无论如何, try/except要么跳到42(地址为22的字节码), 说明发生的异常不是我们需要捕获的, 抛出异常, 然后顺序执行到finally(48)
+
+要么跳转到44(地址是40的字节码, 也就是except里面的代码), 顺序执行到finally(地址是48)
 
 看看具体的C代码:
 
-SETUP_EXCEPT
----------------
+SETUP_EXCEPT/SETUP_FINALLY
+--------------------------------
 
-这个是try语句, 保存处理异常的handler, 也就是遇到异常, 去哪个字节码开始处理流程
+这个是try/finally语句, 保存处理异常的handler, 也就是遇到异常, 去哪个字节码开始处理流程
 
 .. code-block:: c
 
@@ -635,6 +698,8 @@ SETUP_EXCEPT
         // 传入的14就是handler
         b->b_handler = handler;
     }
+
+注意, 保存的handler是存入数组的, 注意看b的赋值. 所以计算try和finally都保存handler到frame, 但是不会覆盖
 
 
 error/exception handler

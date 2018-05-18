@@ -89,7 +89,7 @@ self._stop和self.join参考下面
         return new_threadstate(interp, 0);
     }
 
-new_threadstate中, 基本上是分配一个解释器结构, 然后赋值interp为传入的解释器
+new_threadstate中, 基本上是拿到全局解释器(也就是当前线程的解释器)结构, 然后赋值interp为传入的解释器
 
 .. code-block:: c
 
@@ -816,6 +816,8 @@ cpython/Modules/_threadmodule.c
 PyEval_AcquireThread
 =======================
 
+获取gil和切换tstate
+
 .. code-block:: c
 
     void
@@ -847,7 +849,7 @@ PyThreadState_Clear
 PyThreadState_DeleteCurrent
 ==============================
 
-主要是删除tstate中的锁, 这样py代码的join会返回
+主要是删除tstate中的锁, 切换tstate为NULL, 最后释放gil, 这样py代码的join会返回
 
 .. code-block:: c
 
@@ -868,6 +870,7 @@ PyThreadState_DeleteCurrent
         {
             PyThread_tss_set(&_PyRuntime.gilstate.autoTSSkey, NULL);
         }
+        // 切换当前tstate为NULL
         SET_TSTATE(NULL);
         // 释放gil
         PyEval_ReleaseLock();

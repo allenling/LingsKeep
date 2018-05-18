@@ -439,6 +439,48 @@ do_raise函数的话, 就是
     
     }
 
+其中, 如果raise的是异常类的话, 那么调用到ob_type->tp_call函数
+
+_PyExc_KeyError的ob_type是PyType_Type, 也就是通用类型对象, 然后继承自BaseException, 所以, 调用当调用PyObject_CallObject, 传入参数_PyExc_KeyError
+
+的时候, 在python中, 就是type object也是一个callable对象, 其call方法就是tp_call, 而_PyExc_KeyError中由于继承自BaseException, 那么PyObject_CallObject
+
+函数会调用传入参数的ob_type->tp_call, 其中, tp_call会调用tp_new去生成一个新实例, 也就是调用到BaseException中的tp_new
+
+也就是BaseException_new, 其返回一个PyBaseExceptionObject
+
+.. code-block:: c
+
+    static PyObject *
+    BaseException_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
+    {
+        // 会返回self, 也就是PyBaseExceptionObject对象
+        PyBaseExceptionObject *self;
+    
+        self = (PyBaseExceptionObject *)type->tp_alloc(type, 0);
+        if (!self)
+            return NULL;
+        /* the dict is created on the fly in PyObject_GenericSetAttr */
+        self->dict = NULL;
+        self->traceback = self->cause = self->context = NULL;
+        self->suppress_context = 0;
+    
+        if (args) {
+            self->args = args;
+            Py_INCREF(args);
+            return (PyObject *)self;
+        }
+    
+        self->args = PyTuple_New(0);
+        if (!self->args) {
+            Py_DECREF(self);
+            return NULL;
+        }
+    
+        return (PyObject *)self;
+    }
+
+
 
 异步异常
 =============
@@ -480,5 +522,214 @@ do_raise函数的话, 就是
         // 执行opcode
     
     }
+
+try/except
+===============
+
+基本上就是字节码之间跳来跳去的
+
+先看看try/except的字节码:
+
+.. code-block:: python
+
+    In [1]: def test():
+       ...:     try:
+       ...:         print(a)
+       ...:     except NameError:
+       ...:         print('no a')
+       ...:     return
+       ...: 
+    
+    In [2]: import dis
+    
+    In [3]: dis.dis(test)
+      2           0 SETUP_EXCEPT            12 (to 14)
+    
+      3           2 LOAD_GLOBAL              0 (print)
+                  4 LOAD_GLOBAL              1 (a)
+                  6 CALL_FUNCTION            1
+                  8 POP_TOP
+                 10 POP_BLOCK
+                 12 JUMP_FORWARD            28 (to 42)
+    
+      4     >>   14 DUP_TOP
+                 16 LOAD_GLOBAL              2 (NameError)
+                 18 COMPARE_OP              10 (exception match)
+                 20 POP_JUMP_IF_FALSE       40
+                 22 POP_TOP
+                 24 POP_TOP
+                 26 POP_TOP
+    
+      5          28 LOAD_GLOBAL              0 (print)
+                 30 LOAD_CONST               1 ('no a')
+                 32 CALL_FUNCTION            1
+                 34 POP_TOP
+                 36 POP_EXCEPT
+                 38 JUMP_FORWARD             2 (to 42)
+            >>   40 END_FINALLY
+    
+      6     >>   42 LOAD_CONST               0 (None)
+                 44 RETURN_VALUE
+
+1. 从字节码中, 我们可以看到, SETUP_EXCEPT是遇到了try关键字, 后面跟的14则是如果出现异常
+
+   需要跳到哪一行字节码处理, 在例子中, 如果出现异常, 那么会走到14开头的字节码流程
+
+   如果没有出现异常, 那么会走到12, 一个跳转字节码, 会跳转到42
+
+   其中14这个字节码地址是需要保存的, 保存到当前frame中
+
+2. 14是DUP_TOP, 所以我们可知, 异常会放到栈顶, 然后14就DUP_TOP获得异常(注意, 不是POP_TOP, 只是获取栈顶而已), 接着16, 18是判断异常是否是我们except的
+
+   20则是获得18的判断, 如果异常是我们except的, 那么一直走, 走到28开始执行except里面的代码块, 然后一直执行到38, 会跳到42
+   
+   如果不是我们捕获的异常, 那么跳到40
+
+3. 16到36是我们在execpt中的代码块, 走完之后需要跳出try/execpt代码块, 所以, 38则是一个跳转, 跳转到42
+
+   42是在40这个END_FINALLY字节码之后, 显然, 是try/except之后的代码
+
+3. 40只是一个END_FINALLY, 也就是出现异常, 但是不是我们捕获的异常, 所以这个字节码就是设置异常然后退出的操作
+
+
+看看具体的C代码:
+
+SETUP_EXCEPT
+---------------
+
+这个是try语句, 保存处理异常的handler, 也就是遇到异常, 去哪个字节码开始处理流程
+
+.. code-block:: c
+
+        TARGET(SETUP_LOOP)
+        TARGET(SETUP_EXCEPT)
+        TARGET(SETUP_FINALLY) {
+            /* NOTE: If you add any new block-setup opcodes that
+               are not try/except/finally handlers, you may need
+               to update the PyGen_NeedsFinalizing() function.
+               */
+
+            // 这个函数就是保存异常处理的字节码的地方
+            PyFrame_BlockSetup(f, opcode, INSTR_OFFSET() + oparg,
+                               STACK_LEVEL());
+            DISPATCH();
+        }
+
+
+1. 其中, INSTR_OFFSET + oparg就是得到处理异常的字节码的地址了, 在上面的例子中就是14
+
+2. PyFrame_BlockSetup就是保存所谓的exception handler了, 也就是地址为14的字节码
+
+
+.. code-block:: c
+
+    void
+    PyFrame_BlockSetup(PyFrameObject *f, int type, int handler, int level)
+    {
+        PyTryBlock *b;
+        if (f->f_iblock >= CO_MAXBLOCKS)
+            Py_FatalError("XXX block stack overflow");
+        b = &f->f_blockstack[f->f_iblock++];
+        b->b_type = type;
+        b->b_level = level;
+        // 传入的14就是handler
+        b->b_handler = handler;
+    }
+
+
+error/exception handler
+=========================
+
+虽然是叫exception handler, 其实只是异常处理的字节码地址, 跳转到该地址继续执行, 一般来说就是比较异常和except后面跟的异常
+
+一般, 当字节码出错的时候, 会走到error代码块, error代码块中会判断当期那frame中是否保存了exception handler, 如果有, 则跳转
+
+error代码块
+
+.. code-block:: c
+
+    PyObject *
+    _PyEval_EvalFrameDefault(PyFrameObject *f, int throwflag)
+    {
+    
+    error:
+    
+            assert(why == WHY_NOT);
+            why = WHY_EXCEPTION;
+    
+    
+    fast_block_end:
+            assert(why != WHY_NOT);
+    
+            /* Unwind stacks if a (pseudo) exception occurred */
+            while (why != WHY_NOT && f->f_iblock > 0) {
+                /* Peek at the current block. */
+                PyTryBlock *b = &f->f_blockstack[f->f_iblock - 1];
+    
+                assert(why != WHY_YIELD);
+                if (b->b_type == SETUP_LOOP && why == WHY_CONTINUE) {
+                    why = WHY_NOT;
+                    JUMPTO(PyLong_AS_LONG(retval));
+                    Py_DECREF(retval);
+                    break;
+                }
+                /* Now we have to pop the block. */
+                f->f_iblock--;
+    
+                if (b->b_type == EXCEPT_HANDLER) {
+                    UNWIND_EXCEPT_HANDLER(b);
+                    continue;
+                }
+                UNWIND_BLOCK(b);
+                if (b->b_type == SETUP_LOOP && why == WHY_BREAK) {
+                    why = WHY_NOT;
+                    JUMPTO(b->b_handler);
+                    break;
+                }
+                // 如果是出现异常, 并且是try/except代码块, 也即是block type(b_type)
+                // 是SETUP_EXCEPT
+                if (why == WHY_EXCEPTION && (b->b_type == SETUP_EXCEPT
+                    || b->b_type == SETUP_FINALLY)) {
+                    PyObject *exc, *val, *tb;
+
+                    // 找到handler
+                    int handler = b->b_handler;
+
+                    PUSH(tb);
+                    PUSH(val);
+                    PUSH(exc);
+                    why = WHY_NOT;
+                    // 跳转到handler
+                    JUMPTO(handler);
+                    break;
+                }
+                // 如果是finally字节码
+                // 那么跳转到handler的字节码
+                if (b->b_type == SETUP_FINALLY) {
+                    if (why & (WHY_RETURN | WHY_CONTINUE))
+                        PUSH(retval);
+                    PUSH(PyLong_FromLong((long)why));
+                    why = WHY_NOT;
+                    JUMPTO(b->b_handler);
+                    break;
+                }
+            } /* unwind stack */
+    
+            /* End the loop if we still have an error (or return) */
+    
+            if (why != WHY_NOT)
+                break;
+    
+            assert(!PyErr_Occurred());
+    
+        } /* main loop */
+    
+    }
+
+1. error代码块会判断, 如果是处于try/except(b_type, block_type, 是SETUP_EXCEPT)
+
+   那么会跳转到handler
+
+2. 同样, 如果是处于finally代码块(SETUP_FINALLY), 那么同样会跳到handler字节码处
 
 

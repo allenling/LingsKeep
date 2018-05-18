@@ -38,6 +38,8 @@ tmp = a + 1, 然后更新a = tmp, 此时我们希望a=4, 但是由于对同一�
 
    x, y, z都返回
 
+4. 当然, Condtion也可以为访问锁加上超时, 但是必须显式的调用cond.acquire, cond.acquire直接调用cond.lock.acquire
+
 Lock
 ======
 

@@ -41,22 +41,96 @@ python中函数
 
 继续, 然后你输入第二行是4个空格+一个语句, 比如a = 1, 那么python再次解析这行, 然后发现当前是函数定义, 然后继续
 
-所以就是, 在函数定义的时候, 你每输入一行, python就把语句(a=1)编译成字节码, 加入到函数的code object中的字节码中, code_object->co_code,
+**最后, 当你定义完函数之后, 语法解析就知道你是在定义函数, 所以, 先把函数的代码编译成字节码, 这里还没有赋值函数名和函数对象
 
-直到你定义完函数(输入两个回车), 然后此时被编译成另外一组字节码, 就是我们在上面看到的dis.dis的输出
+只是生成函数code object而已!!!**
 
-也就是, 函数定义会生成一个code object, 然后存储起来, 函数定义完成之后, 又生成一组字节码, 是关联函数code object和函数名称的
+也就是, ast函数返回, 编译的时候, 调用compiler_function去编译函数, 也就是调用PyCode_New去生成一个函数的code object!!
+
+然后继续生成一个code object, 执行LOAD_CONST, MAKE_FUNCTION等操作!! 所以, 有两个编译过程(生成两个code object):
+
+编译函数定义
+-------------------
+
+调用路径:
+
+run_mod -> PyAST_CompileObject -> compiler_mod -> compiler_function -> assemble -> makecode -> PyCode_New
+
+.. code-block:: c
+
+    static PyCodeObject *
+    compiler_mod(struct compiler *c, mod_ty mod)
+    {
+    
+        switch (mod->kind) {
+            case Interactive_kind:
+                if (find_ann(mod->v.Interactive.body)) {
+                    ADDOP(c, SETUP_ANNOTATIONS);
+                }
+                c->c_interactive = 1;
+                // 这里!!!!!会去调用compiler_function!!!
+                VISIT_SEQ_IN_SCOPE(c, stmt,
+                                        mod->v.Interactive.body);
+                break;
+        
+        }
+    
+    }
+
+其中, mod->kind是Interactive_kind, mod->v.Interactive.body转成smt之后, Interactive.body->kind=FunctionDef_kind
+
+会走到VISIT_SEQ_SCOPE, 调用到compiler_function去编译函数的code object
+
+
+生成新的字节码
+------------------------------------------
+
+在compiler_function中, 得到编译好的函数定义code object之后
+
+新生成一个新的code object, 替换掉之前生成的函数code object, 新的code object中, 保存了
+
+函数的code object到函数closure中
+
+.. code-block:: c
+
+    static int
+    compiler_function(struct compiler *c, stmt_ty s, int is_async)
+    {
+    
+        // 这里, 生成函数的code object
+        co = assemble(c, 1);
+        
+        // 这里, co就是函数的code object
+        // 生成新的code object, 把函数code object保存到closure中
+        compiler_make_closure(c, co, funcflags, qualname);
+    
+    
+    }
+
+看看compiler_make_closure
+
+.. code-block:: c
+
+    static int
+    compiler_make_closure(struct compiler *c, PyCodeObject *co, Py_ssize_t flags, PyObject *qualname)
+    {
+    
+        // 下面三个就是我们dis出来的新的字节码了!!!!!!!!!
+        ADDOP_O(c, LOAD_CONST, (PyObject*)co, consts);
+        ADDOP_O(c, LOAD_CONST, qualname, consts);
+        ADDOP_I(c, MAKE_FUNCTION, flags);
+    }
+
 
 所以
 
-1. 第一个LOAD_CONST则python解析函数定义的每一行之后, 生成的函数的code object, 也就是例子中, 这个code object就是test函数的code object
+1. compiler_function负责生成函数定义的code object
 
-2. 然后LOAD_CONST, 加载字符串对象test
+2. 然后compiler_function然后生成新的字节码, 新的code object, 把1中
 
-3. 然后MAKE_FUNCTION, 生成function对象
+   函数本身的code object保存到新的code object中的consts中
 
-4. 然后把函数和函数名给对应起来, STORE_NAME
-
+3. 然后执行新的字节码, 生成函数对象, 关联函数名称和函数对象
 
 所以, 我们来看看MAKE_FUNCTION
 

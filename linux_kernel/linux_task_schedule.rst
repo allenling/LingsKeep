@@ -114,7 +114,7 @@ SMP架构中, 两个或多个同样的处理器通过一块共享内存彼此连
 
 *Contrast this with the Non-Uniform Memory Access (NUMA) architecture. For example, each processor has its own memory but also access to shared memory with a different access latency.*
 
-SMP一般和NUMA架构比较, NUMA是每个cpu都有自己的内存地址(通过地址划分), 而不是共享的.
+SMP一般和NUMA架构比较, NUMA是每个cpu都有自己的内存地址(通过地址划分), 而不是共享的, 但是, 依然能访问到其他NUMA域(node)的内存, 只是相比自己NUMA域(node)的访问, 速度比较慢.
 
 *To make use of SMP with Linux on SMP-capable hardware, the kernel must be properly configured. The CONFIG_SMP option must be enabled during kernel configuration to make the kernel SMP aware*
 
@@ -144,7 +144,9 @@ NUMA, Non-Uniform Memory Access, 非均匀访问存储模型, 如果说smp 相�
 
 当cpu增多的情况下，性能提升的幅度并不是很高。所以可以看到很多明明有很多core的服务器却只有2个node区
 
-MPP, Massive Parallel Processing, 这个其实可以理解为刀片服务器，每个刀扇里的都是一台独立的smp架构服务器，且每个刀扇之间均有高性能的网络设备进行交互，保证了smp服务器之间的数据传输性能。相比numa 来说更适合大规模的计算，唯一不足的是，当其中的smp 节点增多的情况下，与之对应的计算管理系统也需要相对应的提高。
+MPP, Massive Parallel Processing, 这个其实可以理解为刀片服务器，每个刀扇里的都是一台独立的smp架构服务器
+
+且每个刀扇之间均有高性能的网络设备进行交互，保证了smp服务器之间的数据传输性能。相比numa 来说更适合大规模的计算，唯一不足的是，当其中的smp 节点增多的情况下，与之对应的计算管理系统也需要相对应的提高。
 
 阿姆达尔定律
 ===============
@@ -173,6 +175,7 @@ cpu亲和性
 *简单地说，CPU 亲和性（affinity） 就是进程要在某个给定的 CPU 上尽量长时间地运行而不被迁移到其他处理器的倾向性。Linux 内核进程调度器天生就具有被称为 软 CPU 亲和性（affinity） 的特性，这意味着进程通常不会在处理器之间频繁迁移。这种状态正是我们希望的，因为进程迁移的频率小就意味着产生的负载小。*
 
 *其中与 亲和性（affinity）相关度最高的是 cpus_allowed 位掩码。这个位掩码由 n 位组成，与系统中的 n 个逻辑处理器一一对应。 具有 4 个物理 CPU 的系统可以有 4 位。如果这些 CPU 都启用了超线程，那么这个系统就有一个 8 位的位掩码。
+
 如果为给定的进程设置了给定的位，那么这个进程就可以在相关的 CPU 上运行。因此，如果一个进程可以在任何 CPU 上运行，并且能够根据需要在处理器之间进行迁移，那么位掩码就全是 1。实际上，这就是 Linux 中进程的缺省状态。*
 
 也就是把task绑定到指定的cpu上, 因为task切换会减少cpu缓存的命中.
@@ -188,7 +191,7 @@ cpu亲和性
 
 内核的调度单位是task, 无论是进程还是线程, 都会映射到task结构中, 也就是lwp(Light Weight Process).
 
-而linux的线程的实现是glibc下的nptl实现的, 具体参考: glibc_nptl.rst
+而linux的线程的实现是glibc下的nptl实现的, 具体参考: linux_nptl.rst
 
 KThread
 ===============

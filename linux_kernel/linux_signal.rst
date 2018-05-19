@@ -46,7 +46,7 @@ task, 进程, 线程, lwp的概念, 以及pid的代码, 参考linux_nptl.rst
 
 2. 然后把目标task的thread_info.flags设置上TIF_SIGPENDING标志位
 
-3. 唤醒是通过发送中断, 内核会 **强行** 中断目标task当前的程序, 然后目标task会进入内核态, 通过判断thread_info.flasg的标志位, 发现有信号处理, 则保存当前程序的栈等信息, 然后当前
+3. 唤醒是通过发送中断, 内核会 **强行** 中断目标task当前的程序, 然后目标task会进入内核态, 然后返回用户态的时候, 通过判断thread_info.flasg的标志位, 发现有信号处理, 则保存当前程序的栈等信息, 然后当前
 
    程序的地址切换成信号处理函数, 然后返回用户态. 判断是否有信号要处理是在返回用户态的时候判断的. 
 
@@ -1472,8 +1472,6 @@ https://elixir.bootlin.com/linux/v4.15/source/kernel/sched/core.c#L2155
         if (!(p->state & state))
             goto out;
 
-
-        success = 1;
 
         return success;
     

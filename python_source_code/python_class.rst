@@ -38,7 +38,14 @@ dis里面的内容就是:
 
 定义一个名字为A的类
 
-tp_new, tp_call, object_new, tp_init
+builtins.builtin\_\_\_build\_class\_\_ -> type_prepare
 
+PyType_Type.tp_call -> tp_new(type_new)
+                    -> tp_init(type_init)
+
+
+object_new
+
+slot_tp_init
 
 

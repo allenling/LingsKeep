@@ -340,8 +340,6 @@ cpython/Include/funcobject.h
 \_\_defaults\_\_
 =====================
 
-**函数的默认值既存在code object中(co_consts中), 也存储在function object中**
-
 先来看看默认值函数定义时候的字节码:
 
 .. code-block:: python
@@ -364,55 +362,68 @@ cpython/Include/funcobject.h
 
 .. code-block:: c
 
+            if (oparg & 0x02) {
+                assert(PyDict_CheckExact(TOP()));
+                func->func_kwdefaults = POP();
+            }
+
             if (oparg & 0x01) {
                 assert(PyTuple_CheckExact(TOP()));
                 func->func_defaults = POP();
             }
 
-因为在code object中已经把默认值给存储到code object中的consts属性了, 最后我们还需要把默认值tuple赋值到func.\_\_defaults\_\_中
+从创建函数的字节码中看到, 栈顶会存储默认值的tuple(当然, 还会包含closure, closure那一节会看到), 然后我们会在MAKE_FUNCTION
 
-**所以, 当函数有默认值的时候, 既存储在函数对象的func_defaults属性中, 也就是func.\_\_defaults\_\_, 也存储在code object(consts属性)中**
+中POP出默认值tuple, 赋值到func->func_defaults(也就是func.\_\_defaults\_\_), 所以, 我们就把默认值给保存起来了
 
-然后字节码执行的时候, 是从co_consts中获取默认值
+**那么, kwdefaults是什么呢? 和defaults有什么区别?**
+
+考虑到这样定义函数:
 
 .. code-block:: python
 
-    In [45]: def default_func(a, b='b'):
-        ...:     return a, b
-        ...: 
+    In [24]: def test(*args, k=1, m=2):
+        ...:     return args, k, m
         ...: 
     
-    In [46]: dis.dis(default_func)
+    In [25]: test.__kwdefaults__
+    Out[25]: {'k': 1, 'm': 2}
+
+所以, kwdefaults是*args后面的默认值, 带key的, 是一个dict, 而这种定义方式在python2中是不允许的!!!!
+
+这里, 我们只看defaults, kwdefaults也差不多, 那么, 执行函数的时候, 默认值如何存储的呢?
+
+先来看看默认函数的执行字节码:
+
+.. code-block:: python
+
+    In [16]: def test(a, b=1):
+        ...:     return a, b
+        ...: 
+    
+    In [17]: dis.dis(test)
       2           0 LOAD_FAST                0 (a)
                   2 LOAD_FAST                1 (b)
                   4 BUILD_TUPLE              2
                   6 RETURN_VALUE
-    
-    In [47]: default_func.__defaults__
-    Out[47]: ('b',)
 
+我们看到, a和b都是LOAD_FAST, 而LOAD_FAST则是从fastlocals数组中拿值, 而fastlocals数组则是 *fastlocals = f->f_localsplus*
 
-在函数的\_\_defaults\_\_属性中, 存储有默认值, 但是!
+所以, 我们看到, 函数中的变量都是从fastlocals数组中拿的(包括传参变量和函数体内的变量, 甚至外部函数的变量也是, 可以看看closure那一节)
 
-看起来改变func.\_\_defaults\_\_不会影响函数的默认值, 因为执行的时候是从code_object中的consts中拿, consts在函数
-
-定义的时候就赋值好了, 其实, 修改 **func.__defaults__** 依然会影响函数默认值
+那么显然, 在执行函数的时候, 我们必须把值复制到f->f_localsplus中, 调用一般python函数的时候, 调用路径是:
 
 .. code-block:: python
 
-    In [48]: default_func.__defaults__ = ('c',)
+    '''
     
-    In [49]: default_func('a')
-    Out[49]: ('a', 'c')
+    CALL_FUNCTION(字节码) -> call_function -> fast_function
+    
+    '''
 
+在fast_function中, 我们拿到了保存在函数对象中保存的变量, 比如defaults(也就是创建函数的defaults的tuple)
 
-我们强行改变func.\_\_defaults\_\_, 然后python也修改了函数code object中的consts, 然后影响了函数的执行
-
-这是因为在执行函数的时候, 调用路径是: 
-
-call_function -> fast_function -> _PyEval_EvalCodeWithName
-
-在fast_function中, 从function object中拿到默认参数, 也就是function.func_defaults
+传给_PyEval_EvalCodeWithName, 其中就把默认值等等保存的信息给组装起来给f->f_localsplus
 
 .. code-block:: c
 
@@ -420,14 +431,101 @@ call_function -> fast_function -> _PyEval_EvalCodeWithName
     fast_function(PyObject *func, PyObject **stack,
                   Py_ssize_t nargs, PyObject *kwnames)
     {
-    
-        // 显然, 这个宏就是拿到function.func_defaults
+        // 拿到默认值defaults(也就是tuple)
+        PyObject *argdefs = PyFunction_GET_DEFAULTS(func);
+
+
+        // 拿到kwdefaults, 是一个dict
         kwdefs = PyFunction_GET_KW_DEFAULTS(func);
+        // 拿到闭包
+        closure = PyFunction_GET_CLOSURE(func);
+        // 函数名
+        name = ((PyFunctionObject *)func) -> func_name;
+        // 真正的函数名
+        qualname = ((PyFunctionObject *)func) -> func_qualname;
+
+        // 这里, argdefs就是defaults的tuple
+        // 在test函数的例子中, argdefs=(1,)
+        if (argdefs != NULL) {
+            // 然后, 我们获取defaults的的数组
+            // 以及个数, 分别是d和nd
+            // d是tuple对象中的ob_item数组的开始位置
+            d = &PyTuple_GET_ITEM(argdefs, 0);
+            nd = Py_SIZE(argdefs);
+        }
+        else {
+            d = NULL;
+            nd = 0;
+        }
+    
+        // 传参
+        return _PyEval_EvalCodeWithName((PyObject*)co, globals, (PyObject *)NULL,
+                                        stack, nargs,
+                                        nkwargs ? &PyTuple_GET_ITEM(kwnames, 0) : NULL,
+                                        stack + nargs,
+                                        nkwargs, 1,
+                                        d, (int)nd, kwdefs,
+                                        closure, name, qualname);
     
     }
 
+_PyEval_EvalCodeWithName负责组装数据的, 根据上面的传参, **我们知道我们传入了defualts的数组和个数!!!!!**
 
-然后把kwdefs传入给_PyEval_EvalCodeWithName, 这样, 字节码中拿到的默认值就是修改过后的了!!!
+其中, 需要注意一点的是, co->co_argcount是函数参数的个数, 而argcount是传入的参数, 是通过栈上的传参知道传参的个数的
+
+然后, test例子中, argcount=1, 也就是我们传入a, 个数是1, 然后co_argcount=2, 因为我们定义了2个传参, 其中一个是默认值
+
+默认参数的tuple=(1,), 默认参数的个数nd = size((1,)) = 1
+
+.. code-block:: c
+
+    static PyObject *
+    _PyEval_EvalCodeWithName(PyObject *_co, PyObject *globals, PyObject *locals,
+               PyObject **args, Py_ssize_t argcount,
+               PyObject **kwnames, PyObject **kwargs,
+               Py_ssize_t kwcount, int kwstep,
+               PyObject **defs, Py_ssize_t defcount,
+               PyObject *kwdefs, PyObject *closure,
+               PyObject *name, PyObject *qualname)
+    {
+    
+        // 看到了, 我们的fastlocals!!!
+        fastlocals = f->f_localsplus;
+        // freevars是和闭包有关的, 下一节再看
+        freevars = f->f_localsplus + co->co_nlocals;
+    
+        /* Add missing positional arguments (copy default values from defs) */
+        // 显然, argcount是传参的变量的个数, 不包括默认参数
+        // 而co_argcount则是全部的参数, 包含默认值参数
+        // 那么这里在函数test例子的就是, argcount=1, 因为有个传参a
+        // co_argscount是2, 因为所有的参数是a, b, 有两个
+        if (argcount < co->co_argcount) {
+    
+            // 这里, defcount就是默认参数的个数
+            for (; i < defcount; i++) {
+                if (GETLOCAL(m+i) == NULL) {
+                    PyObject *def = defs[i];
+                    Py_INCREF(def);
+
+                    // 其中, SETLOCAL就是赋值fastlocals数组了
+                    // 第一个参数是数组下标
+                    SETLOCAL(m+i, def);
+                }
+            }
+    
+    
+        }
+    
+    }
+
+当我们执行 *test('a')* 的时候, fastlocals(f->f_localsplus)数组经过之后, 就是['a', 1]
+
+然后, 我们之前看到, 获取默认值b是 *LOAD_FAST 1*, 也就是从fastlocals数组中, 拿到下标为1的值, 也就是1
+
+所以, 当我们手动修改func.\_\_defaults\_\_的话, 也就会影响函数执行, 因为默认值是记录在func.\_\_defaults\_\_, 然后
+
+会把\_\_defaults\_\_中的数据复制到fastlocals这个数组, 然后通过下标去访问fastlocals, 从而获取默认值
+
 
 \_\_module\_\_
 ===============
@@ -503,7 +601,7 @@ call_function -> fast_function -> _PyEval_EvalCodeWithName
     test.<locals>.inner ('spam',) ()
     test () ('spam',)
 
-所以, freevars表示需要从父函数中获取的变量, 而cellvars则是表示内联函数需要的变量
+所以, freevars表示需要从父函数中获取的变量, 而cellvars则是存储的是内联函数需要的变量
 
 所以, inner_func有co_freevars, 表示其需要从父函数test中拿变量, 而父函数test有co_cellvars, 表示存在内联函数, 并且内联函数需要引用父函数的变量
 
@@ -538,11 +636,11 @@ call_function -> fast_function -> _PyEval_EvalCodeWithName
 
 python经过语法解析之后, 创建code object的时候, 知道spam这个变量是需要额外处理的, 也就是调用LOAD_CLOSURE创建闭包的
 
-当我们调用函数 *test()*, 执行的时候, 把spam的值设置到内联函数inner中的\_\_closure\_\_的, 然后在inner函数, 查找spam不是LOAD_CONST, LOAD_NAME, 而是
+当我们调用函数 *test('data')*, 执行的时候, 把spam的值设置到内联函数inner中的\_\_closure\_\_的, 然后在inner函数, 查找spam不是LOAD_CONST, LOAD_NAME, 而是
 
 LOAD_DEREF, 去freevars中查找, 也就是_\_\_closure\_\_中查找, 所以找到父函数test中, spam的值了
 
-当我们执行 *x=test('asd')* 的时候, 流程如下:
+当我们执行 *x=test('data')* 的时候, 流程如下:
 
 设置cellvars
 ----------------
@@ -600,22 +698,22 @@ cpython/Python/ceval.c
     
     }
 
+1. 其中co_nlocals表示的是, 函数中局部变量的个数, 这里函数test中显然co_nlocals=2, 一个是inner_test, 一个是spam
 
-1. 在frame中, consts, names, freevars等等变量不是用字典, 而是用数组, 然后用偏移量去
+2. 在defaults中, 我们知道, 函数的传参变量会设置到fastlocals这个数组中, 然后, cellvars和freevars也会被设置到fastlocals数组中
 
-   拿到对应子数组, 这样可以快速查找. 比如上面的SETLOCAL宏中, 
+   其实, 局部变量都会被设置到fastlocals这个数组中, 顺序是: 传参变量, 局部变量, cellvars/freevars
+
+   其中, 传参变量和局部变量的总数是co_nlocals, 所以, freevars(注意, 是字节码中)数组就是fastlocals数组中, 除了co_nlocals, 之后的子数组
+
+   比如test函数例子中, co_nlocals = 2, inner_test和x, spam不算, spam算freevar, 所以假设fastlocals = [1, 2, 3, ...], 那么
    
-   co->co_nlocals是2, 然后i=0, 然后SETLOCAL就是把c设置到fastlocals[2](f->f_localsplus)中, 那么frame中,
-
-   freevars的数组就是f->f_localsplus[2], 那么如果执行freevars[1], 就是f->f_localsplus[3]
+   freevars = [3, ...]
 
 
-2. 这里有一个cell object, cell object是一个数据结构, 有一个ob_ref, 表示指向的是哪个对象
+3. 所以, 我们执行 *test('data')* 的时候, 发现函数有cellvars, 那么生成一个cell object, 把他存到fastlocals中freevars数组部分
 
-   我们可以猜测, 最终cell object中的ob_ref会指向我们传入的值为asd的unicode对象
-
-
-3. 然后, 这里是生成一个指向NULL的cell object, **所以cell object中的指向是在函数执行的时候赋值的!!!!!!!!!**
+   fastlocals = ['data', cell oebjct]
 
 
 PyEval_EvalFrameEx则是调用_PyEval_EvalFrameDefault去执行frame中的code object, 也就是执行字节码了
@@ -635,7 +733,7 @@ PyEval_EvalFrameEx则是调用_PyEval_EvalFrameDefault去执行frame中的code o
         names = co->co_names;
         consts = co->co_consts;
         // fastlocals赋值为f->f_localsplus
-        // 而freevars则是fastlocals中, 常量之后的子数组!!!!!
+        // 而freevars则是fastlocals中, 局部变量之后的子数组!!!!!
         fastlocals = f->f_localsplus;
         freevars = f->f_localsplus + co->co_nlocals;
     
@@ -661,41 +759,6 @@ LOAD_CLOSURE
 之前, 我们是把一个指向NULL的, 空的cell object放入到freevars[0]中, 所以, 自然, oparg=0
 
 所以, cell就是我们之前生成的指向空的cell object, 然后PUSH入栈!!!
-
-此时, 栈从高到低, 有:
-
-.. code-block:: python
-
-
-    '''
-    
-    +
-    |
-    |
-    |
-    + cell
-    
-    '''
-
-
-接下来是BUILD_TUPLE, 其中BUILD_TUPLE则会POP一下得到cell, 然后生成一个(cell, )的元祖, 然后PUSH元祖入栈
-
-
-此时, 栈从高到低, 有:
-
-.. code-block:: python
-
-
-    '''
-    
-    +
-    |
-    |
-    |
-    + (cell, )
-    
-    '''
-
 
 然后, 接下来是生成内联函数的过程, 也就是LOAD_CONST, MAKE_FUNCTION
 
@@ -781,9 +844,9 @@ STORE_DEREF是拿到cell object, 然后赋值cell object的指向(ob_ref)
         }
 
 
-我们POP, 拿到的就是我们之前LOAD_FAST x, 也就是传入的x的值, 也就是test('asd')中, 传入的值为asd的unicode object
+我们POP, 拿到的就是我们之前LOAD_FAST x, 也就是传入的x的值, 也就是test('data')中, 传入的值为asd的unicode object
 
-然, 我们设置cell->ob_ref = 'asd', 这样, 父子函数都关联上具体的值了
+然, 我们设置cell->ob_ref = unicode_object('data'), 这样, 父子函数都关联上具体的值了
 
 
 那么, 在内联在获取父函数的变量的时候, 是LOAD_DEREF字节码

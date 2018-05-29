@@ -523,17 +523,25 @@ usedpools
 
 
 1. used, 也就是一个pool正在使用(至少有一个block已经被分配), 但是不是full状态(至少有一个block可以被分配)
+
    (At least one block in the pool is currently allocated, and at least one block in the pool is not currently allocated)
+
    这个状态的pool会被加入到usedpool中(It's linked to the other used pools of the same size class via the pool_header's nextpool and prevpool members)
 
 2. full, 没有可以分配的block了, 这个状态的pool会被从usedpools中移除(On transition to full, a pool is unlinked from its usedpools[] list)，
+
    当该pool变为不满的时候, 也就是有一个block被释放的时候, pool又会变为used状态(A free of a block in a full pool puts the pool back in the used state),
+
    此时会被插入到usedpools中(Then it's linked in at the front of the appropriate usedpools[] list)
+
    所以下一次获取block的时候, 会优先从该pool中获取(由full变为used状态)(that the next allocation for its size class will reuse the freed block)
 
 3. empty, 所有的block都是可分配状态(可能有n个是回收的block, 有m个是未使用的, m可能等于0), 会被从usedpools中移除(On transition to empty, a pool is unlinked from its usedpools[] list),
+
    然后加入到对应的arena中的freepools这个单链表中(and linked to the front of its arena_object's singly-linked freepools list)
+
    然后从arena中拿一个可用的pool的时候, 优先拿freepools(the next time a malloc finds an empty list in usedpools[], it takes the first pool off of freepools)
+
    然后需要根据idx去确定是否初始化, 比如被回收的pool的idx是4, 而我们需要的pool的idx是3, 则需要把被回收的pool的idx和分配大小设置一下
 
 
@@ -683,7 +691,9 @@ cpython/Objects/obmalloc.c
 1. 如果没有可用的arena, 也就是usable_arenas这个全局变量, 调用 *new_arena* 那么去拓展arenas数组, 该函数参考之前的arena的分析
 
 2. 拿到可用的arena之后, 拿到其中的freepool, 也就是先拿一个回收过的pool, 如果拿到了, 则进行初始化, 也就是init_pool代码块.
+
    初始化的时候注意一下, 比如freepool被释放的pool的index=3, 如果我们需要的pool的index是4, 则需要重新把pool初始化为固定分配4*8=32字节空间的pool
+
    所以这里就说明了, arena中的pool可以被重复使用, 并且回收的pool可以重新初始化成另外一个定额分配的pool.
 
 

@@ -8,6 +8,13 @@ Python中的自定义类
 
 显然PyTypeObject的ob_type就是PyType_Type
 
+参考:
+
+.. [1] http://hyry.dip.jp/tech/slice/slice.html/33
+
+
+参考1是类中获取属性的时候, 使用全局数组缓存了最近使用的方法
+
 PyType_Type
 ==============
 
@@ -178,7 +185,7 @@ dis里面的内容就是:
 
    也就是4函数执行的时候, 其f->f_globals和f->f_locals就是类的作用域字典了, 所以, 4中的字节码执行MAKE_FUNCTION去生成各个方法的时候
 
-   保存在f->f_locals, 也就是PyTypeObject自己的属性dict中
+   保存在f->f_locals, 也就是局部作用域.
 
 6. 经过一系列处理之后, PyTypeObject和PyUnicodeObject('A')就关联起来了!!!!
 
@@ -359,4 +366,17 @@ lookup_method则会去查找self对象, self已经是一个所谓的实例了, s
 传入的属性名所对应的对象, 这里, \_\_init\_\_在PyTypeObject(tp_name='H')中就找到了
 
 然后调用PyObject_Call去调用\_\_init\_\_对应的py函数
+
+
+属性查询
+=============
+
+  *Python的确需要通过继承树搜索属性，但是它会缓存最近的1024个搜索结果，如果没有下标冲突问题，这样做能极大提高循环中对某几个属性的访问
+  
+  但是如果存在下标冲突，则访问速度又降回到无缓存的情况，会有一定的速度损失。如果你真的很在乎属性访问速度，那么可以在进行大量循环之前
+  
+  将所有要访问的属性用局域变量进行缓存，这应该是最快捷的方案了*
+  
+  --- 参考1
+
 

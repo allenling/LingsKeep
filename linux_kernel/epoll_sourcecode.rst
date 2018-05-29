@@ -13,6 +13,14 @@ epoll
 
 .. [5] http://guojing.me/linux-kernel-architecture/posts/wait-queue/
 
+.. [6] https://idea.popcount.org/2017-02-20-epoll-is-fundamentally-broken-12/
+
+.. [7] https://www.cnblogs.com/Anker/p/7071849.html
+
+.. [8] https://blog.csdn.net/mumumuwudi/article/details/50552470
+
+参考6和7是惊群的参考, 而参考8中, 说exclusive标志位能解决惊群, 但是其实是错的
+
 
 小结
 ======
@@ -1883,10 +1891,14 @@ ep_scan_ready_list作用是:
 6. 如果ovflist复制到就绪链表之后, 就绪链表不为空, 那么表示同时有event受信, 然后唤醒进程.
 
 
-关于惊群
-============
+只会唤醒一个
+===============
 
 代码流程分两部分
+
+这里会和惊群有点理解上的疑惑, 后面讲
+
+这里先讲如何只唤醒wait_queue上其中一个wait_queue_entry
 
 回调的exclusive
 -------------------
@@ -1949,6 +1961,7 @@ https://elixir.bootlin.com/linux/v4.15/source/kernel/sched/wait.c#L72
         // 省略代码
     
         // 遍历wait_queue
+        // 注意, 这里遍历的时候也会删除遍历到的元素的!!!!
     	list_for_each_entry_safe_from(curr, next, &wq_head->head, entry) {
     		unsigned flags = curr->flags;
     		int ret;
@@ -2026,6 +2039,9 @@ https://elixir.bootlin.com/linux/v4.15/source/kernel/sched/wait.c#L72
 
     if (ret && (flags & WQ_FLAG_EXCLUSIVE) && !--nr_exclusive)
         break
+
+
+3. list_for_each_entry_safe_from遍历的时候, 会把遍历到的元素给删除掉!!!!
 
 是否是只唤醒一个进程, 只需要看看flag是否是WQ_FLAG_EXCLUSIVE了.
 
@@ -2125,5 +2141,214 @@ ep_poll的时候, 给ep_scan_ready_list传入的函数是ep_send_events_proc
 1. 如果你是LT模式的话, 你读了一部分数据, 不校验数据是否读完了, 然后继续ep_poll, 还是能被提醒说有数据可读的.
 
 2. 在ET模式下, 如果你读了某fd的数据n大于你要读的大小m, 此时你读取的m, 但是还剩下n-m, 如果你不继续检验数据是否读完了
+
    那么你继续ep_poll的话, rdllist上没有该fd, 所以是不会拿到通知的.
+
+
+多核惊群!!!!!!
+=================
+
+多个task去调用同一个socket的accept, 不会惊群, 这个问题是内核里面解决了, 代码没找到, 而epoll多核会惊群的
+
+**根据上面的流程, 看起来epoll是不会惊群的, 但是其实还是会的, exclusive只是说同一时间只有一个task(线程)被唤醒**
+
+**但是在LT模式下, 如果多个线程使用用一个epoll对象去监听同一个fd, 那么epoll依然会唤醒多个task(线程)**
+
+**而ET模式下会发送饿死现象(starvation), ET模式下面没有分析, 只分析了LT模式**
+
+下面的例子都是在ubuntu 18(内核4.15)下进行的, 主线程称为A, 子线程称为B
+
+例子1, A, B都使用同一个epoll对象, 去监听同一个fd是否可读, 并且A一次读完数据
+
+.. code-block:: python
+
+    import threading
+    import socket
+    import selectors
+    
+    
+    def read(name, fobj):
+        data = fobj.recv(1024)
+        print('%s got data' % name, data)
+        return
+    
+    
+    def child(stor, sock):
+        print('child runing')
+        while True:
+            events = stor.select()
+            print('---------------child wake up', key, mask)
+            for key, mask in events:
+                if mask == selectors.EVENT_READ:
+                    read('-----------child', key.fileobj)
+                else:
+                    print('--------------child got nothing')
+                    print(key.fileobj == sock, mask == selectors.EVENT_READ)
+        return
+    
+    
+    def main():
+        accept_sock = socket.socket()
+        accept_sock.bind(('0.0.0.0', 1993))
+        accept_sock.listen(100)
+        # accept!!!!!!!!!!!!!!
+        sock = accept_sock.accept()[0]
+        sock.setblocking(False)
+        stor = selectors.DefaultSelector()
+        stor.register(sock, selectors.EVENT_READ, None)
+        th = threading.Thread(target=child, args=(stor, sock))
+        th.start()
+        while True:
+            events = stor.select()
+            print('++++++++++++++++master wake up', key, mask)
+            for key, mask in events:
+                if mask == selectors.EVENT_READ:
+                    read('++++++++++++++master', key.fileobj)
+                else:
+                    print('+++++++++++++++master got nothing')
+                    print(key.fileobj == sock, mask == selectors.EVENT_READ)
+        return
+    
+    
+    if __name__ == '__main__':
+        main()
+
+如果发送10个字节, 那么看到结果就是, A被唤醒, 然后打印出结果, 然后B被唤醒, 然后B
+
+在调用read函数的时候, recv会报错, EAGAIN(erron=11), 也就是说, A, B均被唤醒
+
+我们来看看源码, 回到ep_scan_ready_list和ep_send_events_proc中
+
+先看看ep_send_events_proc如果处理LT模式的
+
+.. code-block:: c
+
+    static int ep_send_events_proc(struct eventpoll *ep, struct list_head *head,
+    			       void *priv)
+    {
+    
+    	for (eventcnt = 0, uevent = esed->events;
+    	     !list_empty(head) && eventcnt < esed->maxevents;) {
+                // 拿到epi, 这里总是拿第一个
+                // 下面会把遍历到的epi从rdllist中给删除掉
+    	    epi = list_first_entry(head, struct epitem, rdllink);
+    
+    	    ws = ep_wakeup_source(epi);
+    	    if (ws) {
+    	    	if (ws->active)
+    	    		__pm_stay_awake(ep->ws);
+    	    	__pm_relax(ws);
+    	    }
+    
+                // 把遍历到的epi从rdllist中删除
+    	    list_del_init(&epi->rdllink);
+    
+    	    revents = ep_item_poll(epi, &pt, 1);
+    
+    	    /*
+    	     * If the event mask intersect the caller-requested one,
+    	     * deliver the event to userspace. Again, ep_scan_ready_list()
+    	     * is holding "mtx", so no operations coming from userspace
+    	     * can change the item.
+    	     */
+                // 注意, put_user就是把数据赋值到uevent
+                // uevent = priv, 也就是上一层传入的, 返回给用户的数据结构
+    	    if (revents) {
+    	    	if (__put_user(revents, &uevent->events) ||
+    	    	    __put_user(epi->event.data, &uevent->data)) {
+    	    		list_add(&epi->rdllink, head);
+    	    		ep_pm_stay_awake(epi);
+    	    		return eventcnt ? eventcnt : -EFAULT;
+    	    	}
+    	    	eventcnt++;
+    	    	uevent++;
+    	    	if (epi->event.events & EPOLLONESHOT)
+    	    		epi->event.events &= EP_PRIVATE_BITS;
+                    // 这里!!!!!!
+                    // 如果是LT模式, 那么直接再加入到rdllist中
+    	    	else if (!(epi->event.events & EPOLLET)) {
+    	    		/*
+    	    		 * If this file has been added with Level
+    	    		 * Trigger mode, we need to insert back inside
+    	    		 * the ready list, so that the next call to
+    	    		 * epoll_wait() will check again the events
+    	    		 * availability. At this point, no one can insert
+    	    		 * into ep->rdllist besides us. The epoll_ctl()
+    	    		 * callers are locked out by
+    	    		 * ep_scan_ready_list() holding "mtx" and the
+    	    		 * poll callback will queue them in ep->ovflist.
+    	    		 */
+    	    		list_add_tail(&epi->rdllink, &ep->rdllist);
+    	    		ep_pm_stay_awake(epi);
+    	    	}
+    	    }
+    	}
+    
+    
+    }
+
+
+所以, 如果是LT模式, 一个fd会被再次加入到rdllist中, 在我们的例子中, 也就是复制数据A的时候, ep_wait没有返回给A
+
+之前, fd将被再次加入到rdllist!!! 然后我们看看ep_scan_ready_list
+
+
+.. code-block:: c
+
+    static int ep_scan_ready_list(struct eventpoll *ep,
+    			      int (*sproc)(struct eventpoll *,
+    					   struct list_head *, void *),
+    			      void *priv, int depth, bool ep_locked)
+    {
+    
+        // 这里, 传入的sproc就是ep_send_events_proc
+        error = (*sproc)(ep, &txlist, priv);
+        
+        // ep_send_events_proc返回了, 也就是
+        // 复制了数据到用户空间, 也就是传入的priv
+        // priv这个结构是上一层传入的
+        ep->ovflist = EP_UNACTIVE_PTR;
+        
+        /*
+         * Quickly re-inject items left on "txlist".
+         */
+        // 我们把txlist加入到rdllist
+        list_splice(&txlist, &ep->rdllist);
+        
+        __pm_relax(ep->ws);
+        
+        // 如果rdllist不为空, 那么继续去唤醒task
+        if (!list_empty(&ep->rdllist)) {
+        	/*
+        	 * Wake up (if active) both the eventpoll wait list and
+        	 * the ->poll() wait list (delayed after we release the lock).
+        	 */
+        	if (waitqueue_active(&ep->wq))
+        		wake_up_locked(&ep->wq);
+        	if (waitqueue_active(&ep->poll_wait))
+        		pwake++;
+        }
+    
+    }
+
+其中会判断rdllist是否为空, 而我们例子中不为空, 因为线程B依然在监听, 我们唤醒A的时候, 因为exclusive标志位的关系
+
+只会唤醒线程A, 这个没问题, 然后LT下, 唤醒A的同时, ep_scan_ready_list会判断rdllist中依然有fd, 那么, 再次去唤醒
+
+线程B, 所以接下来的流程就是, A先读取数据, B之后也被唤醒, 然后B又读取数据, 加入我们一次发送10字节
+
+然后此时A一次读取完10字节的数据, 那么B会发生EAGAIN(erron=11)
+
+如果A和B都只读取1字节(比如我们把例子中read函数中的recv的参数改为1), 我们发送10字节的时候
+
+就会发现A和B分别被唤醒, 然后分别打印出1字节的数据, 最后A, B都阻塞掉
+
+nginx惊群解决
+----------------
+
+在worker去调用ep_wait的时候, 先抢一个互斥锁, 抢到才能调用ep_wait, 否则继续等待, 并且加入一个负载均衡
+
+当一个worker抢锁的次数达到总次数的7/8的时候, 就不再抢锁, 给其他锁有抢锁的机会
+
+比如A达到了7/8, 那么不抢锁了, 然后B达到7/8, 此时A又可以去抢锁了
 

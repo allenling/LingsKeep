@@ -2524,7 +2524,17 @@ A, B使用用一个epoll对象, 然后A拿到数据之后做处理, 此时又收
 
 下面的例子中, A每收到一个字节, 就sleep(1), 在A没有接收完毕的时候, 又发送数据, 那么B被唤醒
 
-此时出现数据交错
+此时出现数据交错, 这是因为虽然是ET模式, 但是当A没有接收完数据的时候, 此时sock_def_readable会调用到
+
+ep_poll_callback, ep_poll_callback会去唤醒线程B.
+
+**所以ET只是说, 在同一个epoll对象中, 不会把fd再次加入到就绪链表, 这样ep_scan_ready_list中不会唤醒了
+
+A又去唤醒B, 这样保证同一时间只有一个线程能被唤醒, 但是如果A还在读取数据并且没有读取完的时候
+
+此时ep_poll_callback还是会唤醒B, 而加入EPOLLONESHOT之后, 在ep_poll_callback中会判断到EPOLLONESHOT, 这样不会去唤醒了
+
+除非你手动调用epoll_ctl(EPOLL_CTL_MOD, ...)去重置fd**
 
 .. code-block:: python
 
@@ -2780,6 +2790,10 @@ accpet在LT模式下和read一样, 同一个epoll对象的话, 加不加EPOLLEXC
 线程等待, 然后epoll唤醒B, 然后B进行accept, 然后因为A必须等到EAGAIN, 也就是BlockingIOError, 才会再次调动epoll_wait
 
 所以, A继续accept, 而B因为也被唤醒了, 此时B进行accept, 那么B就遇到EAGAIN, 也就是B的唤醒是没必要的
+
+**之所以说accept的LT可以使用EPOLLEXCLUSIVE来解决, 是因为accept和read不一样, read有可能你拿到的数据没完
+
+然后再次有数据进来的时候, 会唤醒B, 而accept是一次就拿完数据了, 不会出现accept没拿完数据而B线程被唤醒的情况**
 
 然后在ET下, 参考[6]_中说accpet还会出现load balance的饥饿现象, **假设条件是一开始有2个连接!!!!**
 

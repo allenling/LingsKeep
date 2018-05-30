@@ -19,7 +19,22 @@ epoll
 
 .. [8] https://blog.csdn.net/mumumuwudi/article/details/50552470
 
-参考6和7是惊群的参考, 而参考8中, 说exclusive标志位能解决惊群, 但是其实是错的
+.. [9] https://github.com/torvalds/linux/commit/df0108c5da561c66c333bb46bfe3c1fc65905898
+
+.. [10] https://idea.popcount.org/2017-03-20-epoll-is-fundamentally-broken-22/
+
+参考6和7是惊群的参考, 而参考8中, 说内核4.5已经解决惊群了, 但是参考8中提到的那个内核的patch(也就是参考9)是说加入
+
+add_wait_queue_exclusive, 但是add_wait_queue_exclusive只是加入WQ_FLAG_EXCLUSIVE标志位, 并且在
+
+__wake_up_common中只是判断WQ_FLAG_EXCLUSIVE标志位而已, 也就是只是保证同一时间只有一个task被唤醒而已
+
+我感觉参考8中想说的标志位是EPOLLEXCLUSIVE标志位, 这个标志位在参考6中提到可以使用EPOLLEXCLUSIVE标志位去解决epoll监听accept的时候发生惊群问题
+
+**所以, 参考8中的代码截图有误导~~~截取的代码补全或者说不对**
+
+参考10是参考6的第二部分, 讲述了epoll在close/dup的问题
+
 
 
 小结
@@ -1986,8 +2001,11 @@ https://elixir.bootlin.com/linux/v4.15/source/kernel/sched/wait.c#L72
 
 由于:
 
-1. 我们在调用socket的poll实现的时候, 最后会调用到(tcp_poll -> poll_wait)ep_ptable_queue_proc中, 而该函数是调用add_wait_queue_exclusive把每一个
-   wait_queue_entry都设置上WQ_FLAG_EXCLUSIVE标识的.
+1. 我们在调用socket的poll实现的时候, 最后会调用到(tcp_poll -> poll_wait)ep_ptable_queue_proc中
+   
+   而该函数是调用add_wait_queue_exclusive把带有EPOLLEXCLUSIVE标志位的wait_queue_entry设置上WQ_FLAG_EXCLUSIVE标识的.
+
+   EPOLLEXCLUSIVE需要手动传入, 比如调用epoll_ctl的时候传入
 
 .. code-block:: c
 
@@ -1997,7 +2015,9 @@ https://elixir.bootlin.com/linux/v4.15/source/kernel/sched/wait.c#L72
         if (epi->nwait >= 0 && (pwq = kmem_cache_alloc(pwq_cache, GFP_KERNEL))) {
             // 省略一些代码
 
-            // EPOLLEXCLUSIVE是1<<28, 所以这个if必然是真
+            // 注意这里的EPOLLEXCLUSIVE判断
+            // 如果我们手动传入了EPOLLEXCLUSIVE标志位, 那么
+            // 就为wait_queue_entry加入WQ_FLAG_EXCLUSIVE标志位
             if (epi->event.events & EPOLLEXCLUSIVE)
     	        add_wait_queue_exclusive(whead, &pwq->wait);
     	    else
@@ -2081,6 +2101,8 @@ https://elixir.bootlin.com/linux/v4.15/source/kernel/sched/wait.c#L72
 
 **所以, WQ_FLAG_EXCLUSIVE和nr_exclusive, 两个参数指定了epoll的返回是exclusive的**
 
+**注意, 这里的__add_wait_queue_exclusive是头插!!! wait_queue_entry同样是头插!!**
+
 但是!!!
 =========
 
@@ -2150,40 +2172,38 @@ ep_poll的时候, 给ep_scan_ready_list传入的函数是ep_send_events_proc
 
 多个task去调用同一个socket的accept, 不会惊群, 这个问题是内核里面解决了, 代码没找到, 而epoll多核会惊群的
 
-**根据上面的流程, 看起来epoll是不会惊群的, 但是其实还是会的, exclusive只是说同一时间只有一个task(线程)被唤醒**
+下面的例子环境是ubuntu 18(内核4.15), 主线程称为A, 子线程称为B
 
-**但是在LT模式下, 如果多个线程使用用一个epoll对象去监听同一个fd, 那么epoll依然会唤醒多个task(线程)**
+例子1
+----------
 
-**而ET模式下会发送饿死现象(starvation), ET模式下面没有分析, 只分析了LT模式**
-
-下面的例子都是在ubuntu 18(内核4.15)下进行的, 主线程称为A, 子线程称为B
-
-例子1, A, B都使用同一个epoll对象, 去监听同一个fd是否可读, 并且A一次读完数据
+多线程共享一个epoll对象进行read, 发生惊群
 
 .. code-block:: python
+
 
     import threading
     import socket
     import selectors
+    import select
     
     
     def read(name, fobj):
-        data = fobj.recv(1024)
+        data = fobj.recv(1)
         print('%s got data' % name, data)
         return
+    
+    ss = {}
     
     
     def child(stor, sock):
         print('child runing')
         while True:
-            events = stor.select()
-            print('---------------child wake up', key, mask)
-            for key, mask in events:
-                if mask == selectors.EVENT_READ:
-                    read('-----------child', key.fileobj)
-                else:
-                    print('--------------child got nothing')
-                    print(key.fileobj == sock, mask == selectors.EVENT_READ)
+            events = stor.poll()
+            print('---------------child wakeup', events)
+            for k, v in events:
+                if v == select.EPOLLIN:
+                    read('---------child', sock)
         return
     
     
@@ -2191,33 +2211,29 @@ ep_poll的时候, 给ep_scan_ready_list传入的函数是ep_send_events_proc
         accept_sock = socket.socket()
         accept_sock.bind(('0.0.0.0', 1993))
         accept_sock.listen(100)
-        # accept!!!!!!!!!!!!!!
         sock = accept_sock.accept()[0]
         sock.setblocking(False)
-        stor = selectors.DefaultSelector()
-        stor.register(sock, selectors.EVENT_READ, None)
+        stor = select.epoll()
+        stor.register(sock, select.EPOLLIN)
         th = threading.Thread(target=child, args=(stor, sock))
         th.start()
         while True:
-            events = stor.select()
-            print('++++++++++++++++master wake up', key, mask)
-            for key, mask in events:
-                if mask == selectors.EVENT_READ:
-                    read('++++++++++++++master', key.fileobj)
-                else:
-                    print('+++++++++++++++master got nothing')
-                    print(key.fileobj == sock, mask == selectors.EVENT_READ)
+            events = stor.poll()
+            print('+++++++++++++++master wakeup', events)
+            for k, v in events:
+                if v == select.EPOLLIN:
+                    read('+++++++++++master', sock)
         return
     
     
     if __name__ == '__main__':
         main()
 
-如果发送10个字节, 那么看到结果就是, A被唤醒, 然后打印出结果, 然后B被唤醒, 然后B
+输出是A线程一直读取1字节然后打印出来, 然后B也被唤醒, 然后B报了一个erron=11, 也就是EAGAIN
 
-在调用read函数的时候, recv会报错, EAGAIN(erron=11), 也就是说, A, B均被唤醒
+这是因为在LT模式下, 我们会把fd再次加入到就绪链表中, 然后在ep_scan_ready_list中, 会去再次唤醒监听在epoll上的线程
 
-我们来看看源码, 回到ep_scan_ready_list和ep_send_events_proc中
+例子中就是B, 然后唤醒. 我们来看看源码, 回到ep_scan_ready_list和ep_send_events_proc中
 
 先看看ep_send_events_proc如果处理LT模式的
 
@@ -2335,13 +2351,582 @@ ep_poll的时候, 给ep_scan_ready_list传入的函数是ep_send_events_proc
 
 只会唤醒线程A, 这个没问题, 然后LT下, 唤醒A的同时, ep_scan_ready_list会判断rdllist中依然有fd, 那么, 再次去唤醒
 
-线程B, 所以接下来的流程就是, A先读取数据, B之后也被唤醒, 然后B又读取数据, 加入我们一次发送10字节
+线程B, 所以接下来的流程就是, A先读取数据, B之后也被唤醒, 然后B又读取数据, 如果A已经把数据读取完了
 
-然后此时A一次读取完10字节的数据, 那么B会发生EAGAIN(erron=11)
+那么fd缓存区没有数据, 那么B就遇到error=11, EAGAIN, 如果A没读取完, 那么剩下的数据就被B读取到
 
-如果A和B都只读取1字节(比如我们把例子中read函数中的recv的参数改为1), 我们发送10字节的时候
+**所以, 情况就是A, B线程都会读取到数据, 然后其中有一个会出现EAGAIN**
 
-就会发现A和B分别被唤醒, 然后分别打印出1字节的数据, 最后A, B都阻塞掉
+例子2
+----------
+
+多线程使用同一个epoll对象监听同一个fd, 但是epoll_ctl的时候, 加入EPOLLEXCLUSIVE标志位
+
+.. code-block:: python
+
+    import threading
+    import socket
+    import selectors
+    import select
+    
+    
+    def read(name, fobj):
+        data = fobj.recv(1)
+        print('%s got data' % name, data)
+        return
+    
+    ss = {}
+    
+    
+    def child(stor, sock):
+        print('child runing')
+        while True:
+            events = stor.poll()
+            print('---------------child wakeup', events)
+            for k, v in events:
+                if v == select.EPOLLIN:
+                    read('---------child', sock)
+        return
+    
+    
+    def main():
+        accept_sock = socket.socket()
+        accept_sock.bind(('0.0.0.0', 1993))
+        accept_sock.listen(100)
+        sock = accept_sock.accept()[0]
+        sock.setblocking(False)
+        stor = select.epoll()
+        stor.register(sock, select.EPOLLIN|select.EPOLLEXCLUSIVE)
+        th = threading.Thread(target=child, args=(stor, sock))
+        th.start()
+        while True:
+            events = stor.poll()
+            print('+++++++++++++++master wakeup', events)
+            for k, v in events:
+                if v == select.EPOLLIN:
+                    read('+++++++++++master', sock)
+        return
+    
+    
+    if __name__ == '__main__':
+        main()
+
+同样, 结果和例子1一样
+
+例子3
+---------
+
+多线程使用不同的epoll对象去监听同一个fd对象, 加入EPOLLEXCLUSIVE标志位
+
+.. code-block:: python
+
+    import threading
+    import socket
+    import selectors
+    import select
+    
+    
+    def read(name, fobj):
+        data = fobj.recv(1)
+        print('%s got data' % name, data)
+        return
+    
+    ss = {}
+    
+    
+    def child(sock):
+        print('child runing')
+        stor = select.epoll()
+        stor.register(sock, select.EPOLLIN|select.EPOLLEXCLUSIVE)
+        while True:
+            events = stor.poll()
+            print('---------------child wakeup', events)
+            for k, v in events:
+                if v == select.EPOLLIN:
+                    read('---------child', sock)
+        return
+    
+    
+    def main():
+        accept_sock = socket.socket()
+        accept_sock.bind(('0.0.0.0', 1993))
+        accept_sock.listen(100)
+        sock = accept_sock.accept()[0]
+        sock.setblocking(False)
+        stor = select.epoll()
+        stor.register(sock, select.EPOLLIN|select.EPOLLEXCLUSIVE)
+        th = threading.Thread(target=child, args=(sock,))
+        th.start()
+        while True:
+            events = stor.poll()
+            print('+++++++++++++++master wakeup', events)
+            for k, v in events:
+                if v == select.EPOLLIN:
+                    read('+++++++++++master', sock)
+        return
+    
+    
+    if __name__ == '__main__':
+        main()
+
+此时只有一个线程被唤醒, 并且不会出现EAGAIN错误
+
+
+小结
+===========
+
+例子1就是一般性的惊吓, 然后我们可以和参考6中的例子比对
+
+参考6中说使用EPOLLEXCLUSIVE标志位也不能阻止read的惊群, 但是其他参考6中说的情况是例子2
+
+也就是多个线程同一个epoll监听一个fd, 不管加不加入EPOLLEXCLUSIVE, 都会发生惊群的, 这是因为
+
+fd如果是可读的, 那么LT下总是重新把fd加入到就绪队列, 然后ep_scan_ready_list中判断是否还有监听的task
+
+有则唤醒, 如果是同一个epoll对象的话, 明显, 线程B会被唤醒, 所以B也去读取数据
+
+
+如果是不同的epoll对象的话, EPOLLEXCLUSIVE就起作用了
+
+EPOLLEXCLUSIVE的作用其实是说忘wait_queue_entry加入WQ_FLAG_EXCLUSIVE标志位, 那么也就是
+
+说, fd上有两个wait_queue_entry, 每一个都表示epoll对象, 然后wait_queue_entry上带有WQ_FLAG_EXCLUSIVE标志
+
+那么fd唤醒的时候, 只会唤醒一个epoll对象, 比如A, 然后A读取, 发现自己是LT模式, 然后把fd重新加入到自己的就绪链表,
+
+那么A继续epoll_wait的时候, 又立马返回去读取数据, 同时把新建一个wait_queue_entry对象加入到fd的wait_queue中, 注意, 此时是头插, 所以就选A
+
+读取完数据了, 之后又有数据进来, 那么很可能就是A, 因为遍历wait_queue是顺序遍历, 而插入wait_queue是头插法
+
+**所以, EPOLLEXCLUSIVE是有用的, 只是记得要分开epoll对象, 因为EPOLLEXCLUSIVE是使用了wait_queue上的WQ_FLAG_EXCLUSIVE标志位**
+
+EPOLLEXCLUSIVE的作用在参考[9]_中也有说明
+
+
+ET的read
+============
+
+ET的read一般是正常的, 但是在参考[9]_中说也会出现A, B分别拿到数据的情况, 其实是这样的
+
+A, B使用用一个epoll对象, 然后A拿到数据之后做处理, 此时又收到了数据, 那么B被唤醒
+
+下面的例子中, A每收到一个字节, 就sleep(1), 在A没有接收完毕的时候, 又发送数据, 那么B被唤醒
+
+此时出现数据交错
+
+.. code-block:: python
+
+    import threading
+    import errno
+    import socket
+    import selectors
+    import select
+    import time
+    
+    
+    def read(name, fobj):
+        data = ''
+        while True:
+            try:
+                tmp = fobj.recv(1)
+                print('recv tmp', tmp)
+                time.sleep(1)
+                if tmp:
+                    data += tmp.decode()
+                else:
+                    break
+            except BlockingIOError as e:
+                print(e)
+                break
+        print('%s got ' % name, data)
+        return
+    
+    ss = {}
+    
+    
+    def child(stor, sock):
+        print('child runing')
+        while True:
+            events = stor.poll()
+            print('---------------child wakeup', events)
+            for k, v in events:
+                if v == select.EPOLLIN:
+                    read('---------child', sock)
+        return
+    
+    
+    def main():
+        accept_sock = socket.socket()
+        while True:
+            try:
+                accept_sock.bind(('0.0.0.0', 1993))
+            except OSError:
+                time.sleep(1)
+                continue
+            break
+        print('accept done')
+        accept_sock.listen(100)
+        sock = accept_sock.accept()[0]
+        sock.setblocking(False)
+        stor = select.epoll()
+        stor.register(sock, select.EPOLLIN|select.EPOLLET)
+        th = threading.Thread(target=child, args=(stor, sock))
+        th.start()
+        while True:
+            events = stor.poll()
+            print('+++++++++++++++master wakeup', events)
+            for k, v in events:
+                if v == select.EPOLLIN:
+                    read('+++++++++++master', sock)
+        return
+    
+    
+    if __name__ == '__main__':
+        main()
+
+然后我们使用EPOLLONESHOT之后, 就正常了, 只有一个线程被唤醒去获取数据
+
+也就是A被唤醒去读取数据, 在A进行sleep中, 有数据进来, 那么B不会被唤醒的!!!
+
+下面的例子就是加入了EPOLLONESHOT
+
+.. code-block:: python
+
+    import threading
+    import errno
+    import socket
+    import selectors
+    import select
+    import time
+    
+    
+    def read(name, fobj):
+        data = ''
+        while True:
+            try:
+                tmp = fobj.recv(1)
+                print('recv tmp', tmp)
+                time.sleep(1)
+                if tmp:
+                    data += tmp.decode()
+                else:
+                    break
+            except BlockingIOError as e:
+                print(e)
+                break
+        print('%s got ' % name, data)
+        return
+    
+    ss = {}
+    
+    
+    def child(stor, sock):
+        print('child runing')
+        while True:
+            events = stor.poll()
+            print('---------------child wakeup', events)
+            for k, v in events:
+                if v == select.EPOLLIN:
+                    read('---------child', sock)
+        return
+    
+    
+    def main():
+        accept_sock = socket.socket()
+        while True:
+            try:
+                accept_sock.bind(('0.0.0.0', 1993))
+            except OSError:
+                time.sleep(1)
+                continue
+            break
+        print('accept done')
+        accept_sock.listen(100)
+        sock = accept_sock.accept()[0]
+        sock.setblocking(False)
+        stor = select.epoll()
+        stor.register(sock, select.EPOLLIN|select.EPOLLET|select.EPOLLONESHOT)
+        th = threading.Thread(target=child, args=(stor, sock))
+        th.start()
+        while True:
+            events = stor.poll()
+            print('+++++++++++++++master wakeup', events)
+            for k, v in events:
+                if v == select.EPOLLIN:
+                    read('+++++++++++master', sock)
+        return
+    
+    
+    if __name__ == '__main__':
+        main()
+
+
+但是, 有一个问题, 就是当A接收完数据, 碰到EAGAIN之后, 继续epoll_wait, 然后捏, 你再次发送数据的时候, 没有
+
+线程被唤醒了, 也就是A, B都不会被唤醒了!!!!!
+
+这个时候需要我们手动调用epoll_ctl(EPOLL_CTL_MOD)去重置fd
+
+.. code-block:: python
+
+    import threading
+    import errno
+    import socket
+    import selectors
+    import select
+    import time
+    
+    
+    def read(name, fobj, ep):
+        data = ''
+        while True:
+            try:
+                tmp = fobj.recv(1)
+                print('recv tmp', tmp)
+                time.sleep(1)
+                if tmp:
+                    data += tmp.decode()
+                else:
+                    break
+            except BlockingIOError as e:
+                print(e)
+                print('modify')
+                # 看这里, 需要modify!!!!!!!!!!
+                # 注意, 这里除了是EPOLLIN, 还必须带上EPOLLONSHOT!!
+                ep.modify(fobj.fileno(), select.EPOLLIN|select.EPOLLONESHOT)
+                break
+        print('%s got ' % name, data)
+        return
+    
+    ss = {}
+    
+    
+    def child(stor, sock):
+        print('child runing')
+        while True:
+            events = stor.poll()
+            print('---------------child wakeup', events)
+            for k, v in events:
+                if v == select.EPOLLIN:
+                    read('---------child', sock, stor)
+        return
+    
+    
+    def main():
+        accept_sock = socket.socket()
+        while True:
+            try:
+                accept_sock.bind(('0.0.0.0', 1993))
+            except OSError:
+                time.sleep(1)
+                continue
+            break
+        print('accept done')
+        accept_sock.listen(100)
+        sock = accept_sock.accept()[0]
+        sock.setblocking(False)
+        stor = select.epoll()
+        stor.register(sock, select.EPOLLIN|select.EPOLLET|select.EPOLLONESHOT)
+        th = threading.Thread(target=child, args=(stor, sock))
+        th.start()
+        while True:
+            events = stor.poll()
+            print('+++++++++++++++master wakeup', events)
+            for k, v in events:
+                if v == select.EPOLLIN:
+                    read('+++++++++++master', sock, stor)
+        return
+    
+    
+    if __name__ == '__main__':
+        main()
+
+
+注意的是, 我们modify的时候, 记得加上EPOLLONSHOT, 否则下次接收数据又会出现两个线程同时接收数据
+
+出现数据交错的情况
+
+
+EPOLLONSHOT
+===================
+
+这个是在ET模式下, 需要手动再调用epoll_ctl去重置fd, 否则后续的数据不会去唤醒任何线程
+
+1. 当我们传入的event带上有EPOLLONESHOT的话, 唤醒的时候在ep_send_events_proc中
+
+   不会加入到就绪链表中, 如果只是简单的ET模式, 也不会加入到就绪链表的
+
+
+.. code-block:: c
+
+    if (revents) {
+    	if (__put_user(revents, &uevent->events) ||
+    	    __put_user(epi->event.data, &uevent->data)) {
+    		list_add(&epi->rdllink, head);
+    		ep_pm_stay_awake(epi);
+    		return eventcnt ? eventcnt : -EFAULT;
+    	}
+    	eventcnt++;
+    	uevent++;
+        // 这里设置上EP_PRIVATE_BITS
+        // 并且不会走下面判断ET模式的代码块
+    	if (epi->event.events & EPOLLONESHOT)
+    		epi->event.events &= EP_PRIVATE_BITS;
+    	else if (!(epi->event.events & EPOLLET)) {
+    		/*
+    		 * If this file has been added with Level
+    		 * Trigger mode, we need to insert back inside
+    		 * the ready list, so that the next call to
+    		 * epoll_wait() will check again the events
+    		 * availability. At this point, no one can insert
+    		 * into ep->rdllist besides us. The epoll_ctl()
+    		 * callers are locked out by
+    		 * ep_scan_ready_list() holding "mtx" and the
+    		 * poll callback will queue them in ep->ovflist.
+    		 */
+    		list_add_tail(&epi->rdllink, &ep->rdllist);
+    		ep_pm_stay_awake(epi);
+    	}
+    }
+
+
+    // 而EP_PRIVATE_BIT有
+    #define EP_PRIVATE_BITS (EPOLLWAKEUP | EPOLLONESHOT | EPOLLET | EPOLLEXCLUSIVE)
+
+
+EP_PRIVATE_BITS是一堆标志位的集合, 此时, 假设没有加上EPOLLONESHOT标志位, 
+
+如果此时又有数据进来, 我们来看看ep_poll_callback
+
+2. ep_poll_callback
+
+.. code-block:: c
+
+    static int ep_poll_callback(wait_queue_entry_t *wait, unsigned mode, int sync, void *key)
+    {
+    
+        // 注意, 如果之前没带有EPOLLONESHOT的话
+        // 那么这个判断是过不了的, 走到下面的代码
+    	if (!(epi->event.events & ~EP_PRIVATE_BITS))
+    		goto out_unlock;
+    
+        // 这里, wake_up_locked去唤醒
+    	if (waitqueue_active(&ep->wq)) {
+    	    if ((epi->event.events & EPOLLEXCLUSIVE) &&
+    	    			!((unsigned long)key & POLLFREE)) {
+    	    	switch ((unsigned long)key & EPOLLINOUT_BITS) {
+    	    	case POLLIN:
+    	    		if (epi->event.events & POLLIN)
+    	    			ewake = 1;
+    	    		break;
+    	    	case POLLOUT:
+    	    		if (epi->event.events & POLLOUT)
+    	    			ewake = 1;
+    	    		break;
+    	    	case 0:
+    	    		ewake = 1;
+    	    		break;
+    	    	}
+    	    }
+    	    wake_up_locked(&ep->wq);
+    	}
+    	if (waitqueue_active(&ep->poll_wait))
+    		pwake++;
+    
+    }
+
+不带EPOLLONESHOT, 然后, 此时又有数据进来, 比如A没读取完数据, 有数据进来, 此时会唤醒B, 这是ep_poll_callback中, 因为
+
+判断语句 *epi->event.events & ~EP_PRIVATE_BITS* 为1, 那么*!(epi->event.events & ~EP_PRIVATE_BITS)*就是 !(1)=0, 那么就走到下面wake_up_locked
+
+的唤醒过程, 如果之前带上了EPOLLONESHOT的话, 那么判断语句 *epi->event.events & ~EP_PRIVATE_BITS* 就是
+
+*EP_PRIVATE_BITS & ~EP_PRIVATE_BITS* = 0, 所以那么*!(epi->event.events & ~EP_PRIVATE_BITS)*就是!(0) = 1
+
+直接走out_unlock代码块, 不走唤醒流程, 所有A可以一直读取数据直到EAGAIN
+
+
+3. 当我们手动调用epoll_ctl(EPOLL_CTL_MOD, EPOLLIN|EPOLLONESHOT)的时候, 调用modify去重置fd
+
+   注意, 如果是EPOLLONESHOT的话, 和EPOLLEXCLUSIVE进行and(&)操作也是true, 所有走到ep_modify函数
+
+
+.. code-block:: c
+
+    SYSCALL_DEFINE4(epoll_ctl, int, epfd, int, op, int, fd,
+    		struct epoll_event __user *, event)
+    {
+    
+    	switch (op) {
+    	case EPOLL_CTL_ADD:
+    		if (!epi) {
+    			epds.events |= POLLERR | POLLHUP;
+    			error = ep_insert(ep, &epds, tf.file, fd, full_check);
+    		} else
+    			error = -EEXIST;
+    		if (full_check)
+    			clear_tfile_check_list();
+    		break;
+    	case EPOLL_CTL_DEL:
+    		if (epi)
+    			error = ep_remove(ep, epi);
+    		else
+    			error = -ENOENT;
+    		break;
+
+        // 这里, 调用!!!ep_modify去重置fd
+        // 虽然这里是判断EPOLLEXCLUSIVE, 但是我们知道刚刚
+        // 我们把event添加上了EP_PRIVATE_BITS, 该标志位包含了
+        // EPOLLEXCLUSIVE
+        case EPOLL_CTL_MOD:
+    		if (epi) {
+    			if (!(epi->event.events & EPOLLEXCLUSIVE)) {
+    				epds.events |= POLLERR | POLLHUP;
+    				error = ep_modify(ep, epi, &epds);
+    			}
+    		} else
+    			error = -ENOENT;
+    		break;
+    	}
+    
+    }
+
+3. 关于ep_modify, 注释上感觉就是说重置fd的功能
+
+.. code-block:: c
+
+    /*
+     * Modify the interest event mask by dropping an event if the new mask
+     * has a match in the current file status. Must be called with "mtx" held.
+     */
+    static int ep_modify(struct eventpoll *ep, struct epitem *epi, struct epoll_event *event)
+    {
+    
+    
+    }
+
+
+这样, A读取完数据了进入wait状态, 重置fd的event为(EPOLLIN|EPOLLONESHOT), 而不是EP_PRIVATE_BITS
+
+这样接下来再有数据进来的话, 又有线程可以被唤醒了, 因为此时在ep_poll_callback中判断语句
+
+*!(epi->event.events & ~EP_PRIVATE_BITS)* 就为!(1) = 0, 那么就不会走判断语句下面的代码, 就直接走到唤醒的流程
+
+EP_PRIVATE_BITS = 1<<31 | 1<<30 | 1<< 29 | 1<<28, 也就是
+
+1111000000...000(一共32位), ~EP_PRIVATE_BITS = 0000111...1111(一共32位)
+
+
+EPOLLONESHOT/EPOLLEXCLUSIVE
+=====================================
+
+EPOLLEXCLUSIVE根据参考[9]_的内核补丁的说明是: 多个epoll对象可以使用这个标志, 这个标志呢则会
+
+使用wait_queue中的WQ_FLAG_EXCLUSIVE标志, 是得在fd上有多个epoll对象在监听的话, 只有一个epoll对象被唤醒
+
+而EPOLLONESHOT是说在ET模式下, 只要该fd是处于EPOLLONESHOT状态, 那么不会被主动唤醒, 必须手动调用
+
+epoll_ctl(EPOLL_CTL_MOD, EPOLLIN|EPOLLONESHOT)去重置fd的event, 这样后续的有数据的时候才会有线程被唤醒
 
 nginx惊群解决
 ----------------

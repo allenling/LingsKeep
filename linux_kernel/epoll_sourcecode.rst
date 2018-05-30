@@ -2471,13 +2471,23 @@ ep_poll的时候, 给ep_scan_ready_list传入的函数是ep_send_events_proc
 
 此时只有一个线程被唤醒, 并且不会出现EAGAIN错误
 
+但是, 如果在read中, recv后面sleep一下, 那么依然会出现B线程被唤醒然后数据交错
+
+这是因为A线程没读取完数据的时候, 此时有数据, 此时fd的wait_queue上有B, 虽然带上了WQ_FLAG_EXCLUSIVE, 但是
+
+还是会唤醒一个线程, 也就是B, 此时B也开始接收数据了
+
+**所以, LT的EPOLLEXCLUSIVE标志位只是说能阻止同时地去获取数据, 比如A, B同时被唤醒, 而能阻止说
+
+A先唤醒, 但是A没接收完数据的时候, B再次被唤醒!!!**
+
 
 小结
 ===========
 
 例子1就是一般性的惊吓, 然后我们可以和参考6中的例子比对
 
-参考6中说使用EPOLLEXCLUSIVE标志位也不能阻止read的惊群, 但是其他参考6中说的情况是例子2
+参考6中说使用EPOLLEXCLUSIVE标志位也不能阻止read的惊群, 但是参考6中说的情况是例子2
 
 也就是多个线程同一个epoll监听一个fd, 不管加不加入EPOLLEXCLUSIVE, 都会发生惊群的, 这是因为
 
@@ -2488,7 +2498,7 @@ fd如果是可读的, 那么LT下总是重新把fd加入到就绪队列, 然后e
 
 如果是不同的epoll对象的话, EPOLLEXCLUSIVE就起作用了
 
-EPOLLEXCLUSIVE的作用其实是说忘wait_queue_entry加入WQ_FLAG_EXCLUSIVE标志位, 那么也就是
+EPOLLEXCLUSIVE的作用其实是说往wait_queue_entry加入WQ_FLAG_EXCLUSIVE标志位, 那么也就是
 
 说, fd上有两个wait_queue_entry, 每一个都表示epoll对象, 然后wait_queue_entry上带有WQ_FLAG_EXCLUSIVE标志
 
@@ -2501,6 +2511,8 @@ EPOLLEXCLUSIVE的作用其实是说忘wait_queue_entry加入WQ_FLAG_EXCLUSIVE标
 **所以, EPOLLEXCLUSIVE是有用的, 只是记得要分开epoll对象, 因为EPOLLEXCLUSIVE是使用了wait_queue上的WQ_FLAG_EXCLUSIVE标志位**
 
 EPOLLEXCLUSIVE的作用在参考[9]_中也有说明
+
+**但是, 多个epoll对象使用EPOLLEXCLUSIVE标志也不能完全阻止惊群, 参考[6]_也是建议说使用ET模式加上EPOLLONESHOT标志位**
 
 
 ET的read
@@ -2746,6 +2758,50 @@ A, B使用用一个epoll对象, 然后A拿到数据之后做处理, 此时又收
 
 出现数据交错的情况
 
+accept惊群
+=============
+
+accpet在LT模式下和read一样, 同一个epoll对象的话, 加不加EPOLLEXCLUSIVE都不能阻止惊群, 只有多个epoll对象
+
+并且设置EPOLLEXCLUSIVE标志位才可能阻止惊群
+
+下面是参考[6]_中例子的理解, 假设条件是一开始有1个连接进来, 在A中有:
+
+.. code-block:: python
+   
+   try:
+       while True:
+           accept
+   except BlockingIOError:
+       pass
+
+那么A进行一次accept之后, fd此时是non readable状态, 那么此时A再次epoll_wait之前, 有一个连接进来, 那么此时只有B一个
+
+线程等待, 然后epoll唤醒B, 然后B进行accept, 然后因为A必须等到EAGAIN, 也就是BlockingIOError, 才会再次调动epoll_wait
+
+所以, A继续accept, 而B因为也被唤醒了, 此时B进行accept, 那么B就遇到EAGAIN, 也就是B的唤醒是没必要的
+
+然后在ET下, 参考[6]_中说accpet还会出现load balance的饥饿现象, **假设条件是一开始有2个连接!!!!**
+
+在A中是
+
+.. code-block:: python
+   
+   try:
+       while True:
+           accept
+   except BlockingIOError:
+       pass
+
+因为A进行accept, 此时fd还是readable状态, 那么此时又有第3个连接进来, 因为fd保存readable状态, 不会唤醒线程B
+
+然后假如一直有连接进来, 所有A一直都不会遇到BlockingIOError, 那么
+
+而B线程一直都是在等待状态, 这样就达不到load balance了, 此时需要手动调用epoll_ctl(EPOLL_CTL_MOD, ...)
+
+accept在LT的解决和read一样, 多个epoll对象加上EPOLLEXCLUSIVE
+
+accpet在ET的解决和read一样, 同一个epoll对象的话, 手动调用epoll_ctl
 
 EPOLLONSHOT
 ===================

@@ -970,8 +970,6 @@ https://elixir.bootlin.com/linux/v4.15/source/fs/eventpoll.c#L877
 
 **is_file_epoll** 这个函数是判断: f->f_op == &eventpoll_fops的, 所以, 比如socket, 那么必然不相等, 所以, 比如是调用if中的return语句, 也就是调用file对应的poll操作.
 
-socket的poll参考 `这里 <https://github.com/allenling/LingsKeep/tree/master/linux_kernel/socket.rst>`_
-
 所以, 大部分情况下, 都不会走到poll_wait中的.
 
 **那么, 什么时候会调用后面的poll_wait呢?** 暂时不知道, 看代码就是只有epi的file是一个epoll的时候才会走后面, 也就是epoll监听的fd对应的也是一个epoll才行
@@ -2167,7 +2165,7 @@ ep_poll的时候, 给ep_scan_ready_list传入的函数是ep_send_events_proc
    那么你继续ep_poll的话, rdllist上没有该fd, 所以是不会拿到通知的.
 
 
-多核惊群!!!!!!
+所以惊群!!!!!!
 =================
 
 多个task去调用同一个socket的accept, 不会惊群, 这个问题是内核里面解决了, 代码没找到, 而epoll多核会惊群的
@@ -2477,7 +2475,7 @@ ep_poll的时候, 给ep_scan_ready_list传入的函数是ep_send_events_proc
 
 还是会唤醒一个线程, 也就是B, 此时B也开始接收数据了
 
-**所以, LT的EPOLLEXCLUSIVE标志位只是说能阻止同时地去获取数据, 比如A, B同时被唤醒, 而能阻止说
+**所以, LT的EPOLLEXCLUSIVE标志位只是说能阻止同时地去获取数据, 比如A, B同时被唤醒, 而不能阻止说
 
 A先唤醒, 但是A没接收完数据的时候, 比如A一次接收1024字节, 但是传入1027字节, 然后再次传入3字节, 那么B还是被唤醒, B收到3+3=6字节!!!**
 
@@ -2485,7 +2483,7 @@ A先唤醒, 但是A没接收完数据的时候, 比如A一次接收1024字节, �
 LT下read的小结
 ===============
 
-例子1就是一般性的惊吓, 然后我们可以和参考6中的例子比对
+例子1就是一般性的惊群, 然后我们可以和参考6中的例子比对
 
 参考6中说使用EPOLLEXCLUSIVE标志位也不能阻止read的惊群, 但是参考6中说的情况是例子2
 
@@ -2508,33 +2506,64 @@ EPOLLEXCLUSIVE的作用其实是说往wait_queue_entry加入WQ_FLAG_EXCLUSIVE标
 
 读取完数据了, 之后又有数据进来, 那么很可能就是A, 因为遍历wait_queue是顺序遍历, 而插入wait_queue是头插法
 
-**所以, EPOLLEXCLUSIVE是有用的, 只是记得要分开epoll对象, 因为EPOLLEXCLUSIVE是使用了wait_queue上的WQ_FLAG_EXCLUSIVE标志位**
+**所以, EPOLLEXCLUSIVE是有用的, 只是记得要分开epoll对象, 因为EPOLLEXCLUSIVE是使用了wait_queue上的WQ_FLAG_EXCLUSIVE标志位, 并且保证
 
-EPOLLEXCLUSIVE的作用在参考[9]_中也有说明
+一次性能读完所有的数据**
 
-**但是, 多个epoll对象使用EPOLLEXCLUSIVE标志也不能完全阻止惊群, 参考[6]_也是建议说使用ET模式加上EPOLLONESHOT标志位**
+EPOLLEXCLUSIVE的作用在参考[9]_中也有说明: EPOLLEXCLUSIVE是保证多个epoll对象同时只有一个被唤醒, 注意的是 **同时只有一个, 不保证说分别唤醒一个**
+
+**所以, 多个epoll对象使用EPOLLEXCLUSIVE标志也不能完全阻止惊群, 参考[6]_也是建议说使用ET模式加上EPOLLONESHOT标志位**
 
 
 ET的read
 ============
 
-ET的read一般是正常的, 但是在参考[9]_中说也会出现A, B分别拿到数据的情况, 其实是这样的
+首先, ET的现象是这样的, 使用ET模式的话, 比如没有读取完数据, 因为epoll(去判断是否有数据了)不会把fd再次加入到rdllist
 
-A, B使用用一个epoll对象, 然后A拿到数据之后做处理, 此时又收到了数据, 那么B被唤醒
+所以, 再次epoll_wait的时候不会提醒, 但是!! 如果再次发送数据, 那么还是会收到提醒的, 也就是说:
 
-下面的例子中, A每收到一个字节, 就sleep(1), 在A没有接收完毕的时候, 又发送数据, 那么B被唤醒
+1. 发送10字节, 读取了1字节, 然后此时没有数据进来, 那么线程再次epoll_wait的时候, 不会提醒
 
-此时出现数据交错, 这是因为虽然是ET模式, 但是当A没有接收完数据的时候, 此时sock_def_readable会调用到
+   因为没有把fd再次加入到rdllist
 
-ep_poll_callback, ep_poll_callback会去唤醒线程B.
+2. 发送10字节, 读取1字节, 然后线程epoll_wait, 没有提醒, 但是此时再次有数据进来, 那么线程的epoll_wait有提醒
 
-**所以ET只是说, 在同一个epoll对象中, 不会把fd再次加入到就绪链表, 这样ep_scan_ready_list中不会唤醒了
+   读取的就是上一次的9字节和新进来的1字节!!!!!!
 
-A又去唤醒B, 这样保证同一时间只有一个线程能被唤醒, 但是如果A还在读取数据并且没有读取完的时候
 
-此时ep_poll_callback还是会唤醒B, 而加入EPOLLONESHOT之后, 在ep_poll_callback中会判断到EPOLLONESHOT, 这样不会去唤醒了
+3. 扩展到多个线程的情况, 比如A, B线程用同一个epoll对象, 然后是ET模式, 然后发送10字节, A被唤醒, 因为
 
-除非你手动调用epoll_ctl(EPOLL_CTL_MOD, ...)去重置fd**
+   不会把fd再次加入到rdllist, 所以ep_scan_ready_list判断都rdllist没有数据, 不会去唤醒B线程
+
+   然后A没读取1个字节就sleep(1), 当过了5s, 此时有数据进来, 那么epoll会唤醒B, 此时A, B就出现了
+
+   数据交错
+
+
+4. 关键函数在于ep_poll_callback, 每次有数据进来的时候, fd都会调用ep_poll_callback, ep_poll_callback只会判断
+
+   EP_PRIVATE_BITS标志位, 而不管ET/LT, 所以, 不管ET/LT, 都会被唤醒, 而ET/LT的区别在于会不会分别唤醒
+
+   LT因为加入到就绪链表的, 所以ep_scan_ready_list会接着唤醒B, 而ET因为没有加入就绪链表, 所以不会唤醒B
+
+5. 所以, 就算ET模式下, 如果A正在读取数据, 此时有数据进来的话, ep_poll_callback依然会唤醒B线程!!!
+
+   造成数据交错
+
+6. 而EPOLLONESHOT影响的是ep_poll_callback的, 如果register的时候带上了EPOLLONESHOT, 那么fd在第一次被唤醒的时候
+   
+   fd的event被设置上EP_PRIVATE_BITS, 在ep_poll_callback的时候, 判断到fd的event是EP_PRIVATE_BITS, 那么不唤醒线程
+
+   也就是此时不唤醒B线程, 所以A可以一直读取数据了
+
+
+7. 但是, 由于fd第一次被唤醒的时候, event上带了EP_PRIVATE_BITS, 那么后续有数据进来的话, ep_poll_callback遇到EP_PRIVATE_BITS
+
+   都是直接退出, 所有后续的数据都不会唤醒任何线程了, 所以, A线程需要在读取完数据之后, 手动ep_ctl(EPOLL_CTL_MOD, EPOLLIN|EPOLLLET|EPOLLONESHOT)
+
+   去重置fd, 也就是消除掉fd的event上的EP_PRIVATE_BITS, 所以后续有数据进来的话, 就可以重新唤醒线程了
+
+8. 关键点: ep_poll_callback, EP_PRIVATE_BITS!!!!
 
 .. code-block:: python
 

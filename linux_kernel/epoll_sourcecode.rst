@@ -2165,12 +2165,12 @@ ep_poll的时候, 给ep_scan_ready_list传入的函数是ep_send_events_proc
    那么你继续ep_poll的话, rdllist上没有该fd, 所以是不会拿到通知的.
 
 
-所以惊群!!!!!!
+多核惊群!!!!!!
 =================
 
-多个task去调用同一个socket的accept, 不会惊群, 这个问题是内核里面解决了, 代码没找到, 而epoll多核会惊群的
+多个task去调用同一个socket的accept, 不会惊群, 这个问题是内核里面解决了, accpet的代码没看
 
-下面的例子环境是ubuntu 18(内核4.15), 主线程称为A, 子线程称为B
+而epoll多核下依然会惊群的, 下面的例子环境是ubuntu 18(内核4.15), 主线程称为A, 子线程称为B
 
 例子1
 ----------

@@ -17,6 +17,14 @@ python中调用hash的时候的流程
 
    偏移计算: 64位机器下, x是地址p的64整数, 则hash的结果是 x>>4 | x<<60, 结果是负数是因为补码表示法
 
+4. hash只能作用于不可变(immutable)对象, 所以list是不可以被hash的, 而tuple是可以被hash的
+
+   但是, 因为tuple的hash和其中元素的hash有关, 所以, 如果tuple中有可变对象, 比如([1], 2)这样, 那么也不能hash
+
+5. tuple的hash值没有被缓存, 原因看issue #9685, 大概意思就是在经过测试之后, 缓存了tuple的hash值之后
+   
+   速度并没有明显的提升
+
 内建hash函数
 ==============
 
@@ -469,4 +477,102 @@ cpython/Python/pyhash.c
 返回负数是因为, 如果翻转的后四位最高位是1, 比如0000000000000000011111110110110001011000011001010011010001111000
 
 那么需要按补码表示来取值
+
+
+list/tuple
+================
+
+list是可变对象, 所以不能hash
+
+.. code-block:: c
+
+    PyTypeObject PyList_Type = {
+        PyVarObject_HEAD_INIT(&PyType_Type, 0)
+        "list",
+        sizeof(PyListObject),
+        0,
+        (destructor)list_dealloc,                   /* tp_dealloc */
+        0,                                          /* tp_print */
+        0,                                          /* tp_getattr */
+        0,                                          /* tp_setattr */
+        0,                                          /* tp_reserved */
+        (reprfunc)list_repr,                        /* tp_repr */
+        0,                                          /* tp_as_number */
+        &list_as_sequence,                          /* tp_as_sequence */
+        &list_as_mapping,                           /* tp_as_mapping */
+
+        // 看这里!!!!!!!
+        PyObject_HashNotImplemented,                /* tp_hash */
+    
+    
+    }
+
+list的tp_hash定义是NotImplemented, 所以hash(list)报错
+
+
+而tuple是不可变对象, 所以能hash
+
+
+.. code-block:: c
+
+    PyTypeObject PyTuple_Type = {
+        PyVarObject_HEAD_INIT(&PyType_Type, 0)
+        "tuple",
+    
+        // 这里
+        (hashfunc)tuplehash,                        /* tp_hash */
+    
+    
+    }
+
+tuple的hash函数是tuplehash, 然后注释说不会去缓存tuple的hash值, 在issue #9685中提到了
+
+貌似是因为就算缓存了也没发现性能上有明显的提升
+
+然后tuple的hash值和每一个元素hash值有关, 经过一系列的翻转的出来的
+
+
+.. code-block:: c
+
+    /* Prime multiplier used in string and various other hashes. */
+    #define _PyHASH_MULTIPLIER 1000003UL  /* 0xf4243 */
+
+    /* The addend 82520, was selected from the range(0, 1000000) for
+       generating the greatest number of prime multipliers for tuples
+       upto length eight:
+    
+         1082527, 1165049, 1082531, 1165057, 1247581, 1330103, 1082533,
+         1330111, 1412633, 1165069, 1247599, 1495177, 1577699
+    
+       下面一句就是说, 经过测试发现, 就算缓存了性能也灭有明显的提升
+       Tests have shown that it's not worth to cache the hash value, see
+       issue #9685.
+    */
+    
+    static Py_hash_t
+    tuplehash(PyTupleObject *v)
+    {
+        Py_uhash_t x;  /* Unsigned for defined overflow behavior. */
+        Py_hash_t y;
+        Py_ssize_t len = Py_SIZE(v);
+        PyObject **p;
+        Py_uhash_t mult = _PyHASH_MULTIPLIER;
+        x = 0x345678UL;
+        p = v->ob_item;
+        while (--len >= 0) {
+            y = PyObject_Hash(*p++);
+            if (y == -1)
+                return -1;
+            x = (x ^ y) * mult;
+            /* the cast might truncate len; that doesn't change hash stability */
+            mult += (Py_hash_t)(82520UL + len + len);
+        }
+        x += 97531UL;
+        if (x == (Py_uhash_t)-1)
+            x = -2;
+        return x;
+    }
+
+
+
 

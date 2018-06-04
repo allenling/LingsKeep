@@ -13,7 +13,9 @@ Python中的自定义类
 .. [1] http://hyry.dip.jp/tech/slice/slice.html/33
 
 
-参考1是类中获取属性的时候, 使用全局数组缓存了最近使用的方法
+参考1是类中获取属性的时候, 使用全局数组缓存了最近使用的方法, 其中一些数据变了(因为文中是python2.版本的)
+
+思路没有变
 
 PyType_Type
 ==============
@@ -371,12 +373,85 @@ lookup_method则会去查找self对象, self已经是一个所谓的实例了, s
 属性查询
 =============
 
-  *Python的确需要通过继承树搜索属性，但是它会缓存最近的1024个搜索结果，如果没有下标冲突问题，这样做能极大提高循环中对某几个属性的访问
+  Python的确需要通过继承树搜索属性，但是它会缓存最近的1024个搜索结果，如果没有下标冲突问题，这样做能极大提高循环中对某几个属性的访问
   
   但是如果存在下标冲突，则访问速度又降回到无缓存的情况，会有一定的速度损失。如果你真的很在乎属性访问速度，那么可以在进行大量循环之前
   
-  将所有要访问的属性用局域变量进行缓存，这应该是最快捷的方案了*
+  将所有要访问的属性用局域变量进行缓存，这应该是最快捷的方案了
   
   --- 参考1
+
+在查找类属性的时候, 是函数_PyType_Lookup
+
+.. code-block:: c
+
+    /* Internal API to look for a name through the MRO.
+       This returns a borrowed reference, and doesn't set an exception! */
+    PyObject *
+    _PyType_Lookup(PyTypeObject *type, PyObject *name)
+    {
+        Py_ssize_t i, n;
+        PyObject *mro, *res, *base, *dict;
+        unsigned int h;
+    
+        // 先直接从cache里面找
+        if (MCACHE_CACHEABLE_NAME(name) &&
+            PyType_HasFeature(type, Py_TPFLAGS_VALID_VERSION_TAG)) {
+            // 下面是计算hash, 然后得到下标
+            // 查看数组对应下标中的保存的类(也就是tp_version_tag)和属性名是否一致
+            /* fast path */
+            h = MCACHE_HASH_METHOD(type, name);
+            if (method_cache[h].version == type->tp_version_tag &&
+                method_cache[h].name == name) {
+    #if MCACHE_STATS
+                method_cache_hits++;
+    #endif
+                return method_cache[h].value;
+            }
+        }
+
+        // 找不到从mro中, 也就是继承树上找
+        /* Look in tp_dict of types in MRO */
+        mro = type->tp_mro;
+
+        if (mro == NULL) {
+
+        }
+    
+    }
+
+
+比较的时候, 会通过属性名的hash, 得到一个缓存数组的下标, 然后看看数组对应下标下的元素是否是
+
+我们需要查找的, 也就是比较tp_version_tag和name
+
+而数组下标的计算是宏MCACHE_HASH_METHOD
+
+.. code-block:: c
+
+    #define MCACHE_MAX_ATTR_SIZE    100
+    #define MCACHE_SIZE_EXP         12
+    #define MCACHE_HASH(version, name_hash)                                 \
+            (((unsigned int)(version) ^ (unsigned int)(name_hash))          \
+             & ((1 << MCACHE_SIZE_EXP) - 1))
+    
+    #define MCACHE_HASH_METHOD(type, name)                                  \
+            MCACHE_HASH((type)->tp_version_tag,                     \
+                        ((PyASCIIObject *)(name))->hash)
+    #define MCACHE_CACHEABLE_NAME(name)                             \
+            PyUnicode_CheckExact(name) &&                           \
+            PyUnicode_IS_READY(name) &&                             \
+            PyUnicode_GET_LENGTH(name) <= MCACHE_MAX_ATTR_SIZE
+
+
+所以, python会缓存最近访问的4096(1<<12 = 2**12 = 4096)个属性, 然后属性名长度不能大于100
+
+其中MCACHE_HASH是计算缓存数组下标的, 计算方式就是(version ^ name_hash) & (1<<12 - 1)
+
+也就是version ^ name_hash的值, 假设是x, 然后x & (1<<12 - 1) = x & (4096 - 1) = x & 4095
+
+我们把4095在64位下展开, 就是000...000(52个0)111...111(12个1), 所以就是取x的低12位
+
+上面的一些参数和参考[1]_中有区别, 参考1中只存1024个属性, 然后计算方式是x的值往右移 8*4 - 10 == 22(可以看成取高10位?)
 
 

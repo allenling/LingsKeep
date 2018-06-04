@@ -370,7 +370,211 @@ lookup_method则会去查找self对象, self已经是一个所谓的实例了, s
 然后调用PyObject_Call去调用\_\_init\_\_对应的py函数
 
 
-属性查询
+对象属性查询
+=================
+
+搜索对象属性的时候, 先搜索出类是否有该属性, 然后再搜索对象的__dict__是否有该属性, 然后优先去对象中__dict__的属性值
+
+字节码
+
+.. code-block:: python
+
+    In [35]: dis.dis("a.data")
+      1           0 LOAD_NAME                0 (a)
+                  2 LOAD_ATTR                1 (data)
+                  4 RETURN_VALUE
+
+
+LOAD_ATTR是调用PyObject_GetAttr
+
+.. code-block:: c
+
+        TARGET(LOAD_ATTR) {
+            PyObject *name = GETITEM(names, oparg);
+            PyObject *owner = TOP();
+            PyObject *res = PyObject_GetAttr(owner, name);
+            Py_DECREF(owner);
+            SET_TOP(res);
+            if (res == NULL)
+                goto error;
+            DISPATCH();
+        }
+
+
+而PyObject_GetAttr中, 首先去找tp_getattro, 然后是tp_getattr, 否则报错, 一般性对象, 注意, 这里是对象, 都有tp_getattro
+
+其中tp_geattro指向PyObject_GenericGetAttr
+
+.. code-block:: c
+
+    PyObject *
+    PyObject_GetAttr(PyObject *v, PyObject *name)
+    {
+        PyTypeObject *tp = Py_TYPE(v);
+    
+        if (!PyUnicode_Check(name)) {
+            PyErr_Format(PyExc_TypeError,
+                         "attribute name must be string, not '%.200s'",
+                         name->ob_type->tp_name);
+            return NULL;
+        }
+
+        // 这里调用tp_getattro函数!!!!!!!!!!!!!!!
+        if (tp->tp_getattro != NULL)
+            return (*tp->tp_getattro)(v, name);
+        if (tp->tp_getattr != NULL) {
+            char *name_str = PyUnicode_AsUTF8(name);
+            if (name_str == NULL)
+                return NULL;
+            return (*tp->tp_getattr)(v, name_str);
+        }
+        PyErr_Format(PyExc_AttributeError,
+                     "'%.50s' object has no attribute '%U'",
+                     tp->tp_name, name);
+        return NULL;
+    }
+
+而一般, PyObject->ob_type->tp_getattro则是PyObject_GenericGetAttr, 调用路径是
+
+PyObject_GenericGetAttr -> _PyObject_GenericGetAttrWithDict -> _PyType_Lookup
+
+而_PyObject_GenericGetAttrWithDict中, 先调用_PyType_Lookup去查找类的属性, 再查找对象的__dict__是否有对应的属性值
+
+**_PyType_Lookup中是具体查找类属性, 会遍历mro的过程, 但是有缓存的, 注意, 这里是类属性查找**
+
+然后优先返回对象的__dict__的属性值
+
+.. code-block:: c
+
+    PyObject *
+    _PyObject_GenericGetAttrWithDict(PyObject *obj, PyObject *name, PyObject *dict)
+    {
+    
+        // _PyType_Lookup去查找类属性
+        descr = _PyType_Lookup(tp, name);
+        
+        if (descr != NULL) {
+            // 如果存在, 则校验一下, 省略校验过程
+
+            // 如果校验通过, 直接走到done, 也就是返回值
+        }
+        
+        // 然后继续查找对象__dict__
+        if (dict == NULL) {
+            /* Inline _PyObject_GetDictPtr */
+            dictoffset = tp->tp_dictoffset;
+        
+            // 省略代码
+        
+            // 所以, 对象的__dict__也不是存储在对象中
+            // 而是和unicode object一样, 存储在隔壁
+            // 因为这里是object的地址, 往后移动一个距离, 得到dict, 也就是__dict__
+            dictptr = (PyObject **) ((char *)obj + dictoffset);
+            dict = *dictptr;
+        
+        }
+        
+        // 如果__dict__不为空, 那么查找__dict__
+        if (dict != NULL) {
+            Py_INCREF(dict);
+            res = PyDict_GetItem(dict, name);
+            // 如果__dict__中存在属性, 则返回属性
+            if (res != NULL) {
+                Py_INCREF(res);
+                Py_DECREF(dict);
+                goto done;
+            }
+            Py_DECREF(dict);
+        }
+        
+        // 省略代码
+        
+        // 如果类中有属性, 显然__dict__中不存在属性
+        if (descr != NULL) {
+            // 那么res=类属性
+            // 最后会返回res, 也就是类属性
+            res = descr;
+            descr = NULL;
+            goto done;
+        }
+    
+    }
+
+
+类属性查询
+============
+
+类属性查询和对象属性查询相同点就是
+
+1. 字节码都是LOAD_ATTR
+   
+2. 都会调用_PyType_Lookup去查询mro
+   
+但是有一点区别, 区别就是类的tp_getattro是函数type_getattro, 这是因为类是一个PyTypeObejct, 其ob_type是PyType_Type
+
+而PyType_Type的tp_getattro就是tp_getattro
+
+流程就是:
+
+1. 搜索类属性的时候先去搜索meta_type, 也就是PyType_Type, 
+
+2. 然后再次搜索自己, 而搜索自己的时候, 因为_PyType_Lookup会搜索mro, 搜索搜索自己的时候就是搜索继承树
+
+3. 1, 2中的搜索函数都是_PyType_Lookup
+
+.. code-block:: c
+
+    /* This is similar to PyObject_GenericGetAttr(),
+       but uses _PyType_Lookup() instead of just looking in type->tp_dict. */
+    static PyObject *
+    type_getattro(PyTypeObject *type, PyObject *name)
+    {
+        // 得到metatype, 一般就是PyType_Type
+        PyTypeObject *metatype = Py_TYPE(type);
+
+        // 省略代码
+    
+        // 搜索metatype
+        /* Look for the attribute in the metatype */
+        meta_attribute = _PyType_Lookup(metatype, name);
+    
+        if (meta_attribute != NULL) {
+            // 如果metatype中存在属性, 校验
+            // 省略了校验过程
+            // 如果校验成功, 那么直接返回
+        }
+    
+        // 否则搜索自己
+        /* No data descriptor found on metatype. Look in tp_dict of this
+         * type and its bases */
+        attribute = _PyType_Lookup(type, name);
+        if (attribute != NULL) {
+            // 如果找到了属性
+            // 就可以返回
+            /* Implement descriptor functionality, if any */
+            descrgetfunc local_get = Py_TYPE(attribute)->tp_descr_get;
+    
+            Py_XDECREF(meta_attribute);
+    
+            if (local_get != NULL) {
+                /* NULL 2nd argument indicates the descriptor was
+                 * found on the target object itself (or a base)  */
+                return local_get(attribute, (PyObject *)NULL,
+                                 (PyObject *)type);
+            }
+    
+            Py_INCREF(attribute);
+            // 返回当前类的属性
+            return attribute;
+        }
+
+        // 后面还是校验的过程和报错, 先省略
+
+        return NULL;
+    }
+
+
+属性查询缓存
 =============
 
   Python的确需要通过继承树搜索属性，但是它会缓存最近的1024个搜索结果，如果没有下标冲突问题，这样做能极大提高循环中对某几个属性的访问

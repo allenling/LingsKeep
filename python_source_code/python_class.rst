@@ -454,4 +454,33 @@ lookup_method则会去查找self对象, self已经是一个所谓的实例了, s
 
 上面的一些参数和参考[1]_中有区别, 参考1中只存1024个属性, 然后计算方式是x的值往右移 8*4 - 10 == 22(可以看成取高10位?)
 
+最后, 当从mro中找到属性之后, 把属性名和tp_version_tag放入到cache数组中
+
+.. code-block:: c
+
+    PyObject *
+    _PyType_Lookup(PyTypeObject *type, PyObject *name)
+    {
+        mro = type->tp_mro;
+
+        //省略mro的搜索过程
+    
+        if (MCACHE_CACHEABLE_NAME(name) && assign_version_tag(type)) {
+            // 计算下标
+            h = MCACHE_HASH_METHOD(type, name);
+            // 保存到cache数组
+            method_cache[h].version = type->tp_version_tag;
+            method_cache[h].value = res;  /* borrowed */
+            Py_INCREF(name);
+            assert(((PyASCIIObject *)(name))->hash != -1);
+        #if MCACHE_STATS
+                if (method_cache[h].name != Py_None && method_cache[h].name != name)
+                    method_cache_collisions++;
+                else
+                    method_cache_misses++;
+        #endif
+                Py_SETREF(method_cache[h].name, name);
+        }
+    
+    }
 

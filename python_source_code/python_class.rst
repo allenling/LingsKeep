@@ -454,7 +454,7 @@ PyObject_GenericGetAttr -> _PyObject_GenericGetAttrWithDict -> _PyType_Lookup
         descr = _PyType_Lookup(tp, name);
         
         if (descr != NULL) {
-            // 如果存在, 则校验一下, 省略校验过程
+            // 如果存在, 则校验一下, 省略校验是否是property
 
             // 如果校验通过, 直接走到done, 也就是返回值
         }
@@ -516,9 +516,9 @@ PyObject_GenericGetAttr -> _PyObject_GenericGetAttrWithDict -> _PyType_Lookup
 
 流程就是:
 
-1. 搜索类属性的时候先去搜索meta_type, 也就是PyType_Type, 
+1. 搜索类属性的时候先去搜索meta_type, 一般是PyType_Type, 一般也找不到, 除非是搜索的是内置的PyType_Type属性, 
 
-2. 然后再次搜索自己, 而搜索自己的时候, 因为_PyType_Lookup会搜索mro, 搜索搜索自己的时候就是搜索继承树
+2. 然后再次搜索自己, 而搜索自己的时候, 因为_PyType_Lookup会搜索mro, 搜索搜索自己的时候就是搜索自己和继承树
 
 3. 1, 2中的搜索函数都是_PyType_Lookup
 
@@ -534,12 +534,12 @@ PyObject_GenericGetAttr -> _PyObject_GenericGetAttrWithDict -> _PyType_Lookup
 
         // 省略代码
     
-        // 搜索metatype
+        // 搜索metatype, 一般都是PyType_Type
         /* Look for the attribute in the metatype */
         meta_attribute = _PyType_Lookup(metatype, name);
     
         if (meta_attribute != NULL) {
-            // 如果metatype中存在属性, 校验
+            // 如果metatype中存在属性, 校验是否是property
             // 省略了校验过程
             // 如果校验成功, 那么直接返回
         }
@@ -687,4 +687,169 @@ PyObject_GenericGetAttr -> _PyObject_GenericGetAttrWithDict -> _PyType_Lookup
         }
     
     }
+
+property
+============
+
+我们看到, 在搜索属性的时候, 总是会校验对象的类属性, 或者类的metatype所返回的属性, 或者得到类/对象本身的属性值的时候
+
+总是有一个校验过程是, 而这个校验过程是和property有关的
+
+https://stackoverflow.com/questions/17330160/how-does-the-property-decorator-work
+
+https://docs.python.org/3/howto/descriptor.html
+
+property返回一个property对象, property对象是属于data descriptor的数据模型, data descriptor是这样一个定义了__get__, __set__, __delete__方法的对象
+
+.. code-block:: python
+
+    In [1]: import inspect
+    
+    In [2]: def my_getter(self): return 'in my_getter'
+    
+    In [3]: prop = property(my_getter)
+    
+    In [4]: type(prop)
+    Out[4]: property
+    
+    In [5]: inspect.isdatadescriptor(prop)
+    Out[5]: True
+
+
+data descriptor的特点呢, 就是如果一个 **某个类的属性是data descriptor**, 那么当访问 **这个类** 该属性的时候, 会调用data descriptor的__get__方法, setter, deleter同理.
+
+
+.. code-block:: python
+
+    In [13]: class C:
+        ...:     x = prop
+        ...:     
+    
+    In [14]: C.x
+    Out[14]: <property at 0x7fec39a68318>
+    
+    In [15]: c=C()
+    
+    In [16]: c.x
+    Out[16]: 'in my_getter'
+
+
+可以看到, 定义C类中的一个属性x为property(data descriptor), 然后如果用C.x访问，就是一个property对象, 如果是实例c访问, c.x, 那么会直接调用prop这个property(data descriptor)
+
+的__get__方法, 会调用property对象定义的getter方法, 也就是my_getter函数
+
+
+要注意的是, **property(data descriptor)只有定义在类中才有用!!**
+
+
+.. code-block:: python
+
+    In [17]: def my_getter(self): return 'in my_getter'
+    
+    In [18]: prop = property(my_getter)
+    
+    In [19]: class C:
+        ...:     def __init__(self):
+        ...:         self.x = prop
+        ...:         
+    
+    In [20]: C.x
+    ---------------------------------------------------------------------------
+    AttributeError                            Traceback (most recent call last)
+    <ipython-input-20-64cce3573e3e> in <module>()
+    ----> 1 C.x
+    
+    AttributeError: type object 'C' has no attribute 'x'
+    
+    In [21]: c=C()
+    
+    In [22]: c.x
+    Out[22]: <property at 0x7fec3872b408>
+
+
+上面的例子中, x这个property是在__init__中赋值给实例属性的, 而不是类属性, 所以直接c.x的时候, 得到的是property对象, 而不是期望的in my_getter字符串.
+
+**property只有在类中才能生效, 推测这是因为property的各个魔术方法(__get__, __set__, __delete__)都接收一个instance和owner, owner就是类, 也就是说property是跟类绑定的**
+
+.. code-block:: python
+
+    In [31]: prop.__get__?
+    Signature:      prop.__get__(instance, owner, /)
+    Call signature: prop.__get__(*args, **kwargs)
+    Type:           method-wrapper
+    String form:    <method-wrapper '__get__' of property object at 0x7fec3872b408>
+    Docstring:      Return an attribute of instance, which is of type owner.
+    
+    In [32]: prop.__get__(c, C)
+    Out[32]: 'in my_getter'
+
+__get__方法接收owner, 也就是一个类, 比如我们直接调用prop.__get__(c, C)就直接调用了定义的getter方法
+
+
+实例中动态设置类property
+---------------------------
+
+可以动态地在实例中设置类的property, 使用self.__class__就可以了
+
+.. code-block:: python
+
+    In [23]: class C:
+        ...:     def __init__(self):
+        ...:         c_class = self.__class__
+        ...:         c_class.x = prop
+        ...:         return
+        ...:     
+    
+    In [24]: C.x
+    ---------------------------------------------------------------------------
+    AttributeError                            Traceback (most recent call last)
+    <ipython-input-24-64cce3573e3e> in <module>()
+    ----> 1 C.x
+    
+    AttributeError: type object 'C' has no attribute 'x'
+    
+    In [25]: c=C()
+    
+    In [26]: c.x
+    Out[26]: 'in my_getter'
+
+
+所以, 总结起来就是, property只有类属性的时候才会调用property(data descriptor)对象的__get__方法, 如果某个实例属性被定义为property, 那也是无效的, 访问该属性只能得到property对象
+
+可以在实例中动态地使用self.__class__来将property赋值给类
+
+
+最后, 我们回过去看看获取类属性的流程, 以它为例子看看property的校验
+
+.. code-block:: c
+
+
+    static PyObject *
+    type_getattro(PyTypeObject *type, PyObject *name)
+    {
+    
+        attribute = _PyType_Lookup(type, name);
+        if (attribute != NULL) {
+            /* Implement descriptor functionality, if any */
+            // 这里, 如果拿到的属性是data descriptor, 那么拿到descriptor
+            // 中的tp_descr_get方法
+            descrgetfunc local_get = Py_TYPE(attribute)->tp_descr_get;
+    
+            Py_XDECREF(meta_attribute);
+    
+            // 如果存在tp_desc_get存在, 直接调用然后返回
+            if (local_get != NULL) {
+                /* NULL 2nd argument indicates the descriptor was
+                 * found on the target object itself (or a base)  */
+                return local_get(attribute, (PyObject *)NULL,
+                                 (PyObject *)type);
+            }
+    
+            Py_INCREF(attribute);
+            return attribute;
+        }
+    
+    }
+
+
 

@@ -278,6 +278,9 @@ cpython/Python/bltinmodule.c
    如果类没有定义\_\_init\_\_, 那么给个默认的tp_init函数, 就是object_init
 
 
+3. tp_call指向object_new
+
+
 创建实例
 ============
 

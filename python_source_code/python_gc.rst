@@ -693,9 +693,398 @@ gc_refs == GC_TENTATIVELY_UNREACHABLE
 2. 如果gc_refs是GC_REACHABLE(-3), 那么说明这个对象是其他代(generation)的, 也不用管他.
 
 
+\_\_del\_\_
+=============
+
+在collect的过程中, 处理完可达不可达之后, 后面还会处理带有\_\_del\_\_析构函数的对象
+
+**注意, 定义了\_\_del\_\_函数的对象中, 在C代码级别不是tp_del, 而是tp_finalize!!!!**
+
+其中, 如果定义了\_\_del\_\_方法, 那么tp_finalize会指向slot_tp_finalize函数, slot_tp_finalize这个函数是调用对象的\_\_del\_\_方法的
+
+那么tp_del是干嘛的呢? 根据 `python issue#4934 <https://bugs.python.org/issue4934>`_ 可知
+
+tp_del只是内部使用, 并且已被废弃, tp_finalize替代了tp_del
+
+*The reason tp_del has remained undocumented is that it's now obsolete.  You should use tp_finalize instead
+
+tp_finalize is roughly the C equivalent of __del__ (tp_del was something else, despite the name).*
+
+.. code-block:: c
+
+    // 这个函数就是寻找__del__方法, 然后调用了
+    static void
+    slot_tp_finalize(PyObject *self)
+    {
+        _Py_IDENTIFIER(__del__);
+        PyObject *del, *res;
+        PyObject *error_type, *error_value, *error_traceback;
+    
+        /* Save the current exception, if any. */
+        PyErr_Fetch(&error_type, &error_value, &error_traceback);
+    
+        /* Execute __del__ method, if any. */
+        del = lookup_maybe(self, &PyId___del__);
+        if (del != NULL) {
+            // 调用__del__方法!!!!
+            res = PyEval_CallObject(del, NULL);
+            if (res == NULL)
+                PyErr_WriteUnraisable(del);
+            else
+                Py_DECREF(res);
+            Py_DECREF(del);
+        }
+    
+        /* Restore the saved exception. */
+        PyErr_Restore(error_type, error_value, error_traceback);
+    }
 
 
+来看看collect中接下来如何处理带有\_\_del\_\_方法的对象的
+    
+.. code-block:: c
 
+    static Py_ssize_t
+    collect(int generation, Py_ssize_t *n_collected, Py_ssize_t *n_uncollectable,
+            int nofail)
+    {
+    
+        update_refs(young);
+        subtract_refs(young);
+    
+        /* Leave everything reachable from outside young in young, and move
+         * everything else (in young) to unreachable.
+         * NOTE:  This used to move the reachable objects into a reachable
+         * set instead.  But most things usually turn out to be reachable,
+         * so it's more efficient to move the unreachable things.
+         */
+        gc_list_init(&unreachable);
+        move_unreachable(young, &unreachable);
+    
+    
+        // 上面是处理可达不可达的情况, 下面是针对__del__
+    
+        /* All objects in unreachable are trash, but objects reachable from
+        * legacy finalizers (e.g. tp_del) can't safely be deleted.
+        */
+        gc_list_init(&finalizers);
+    
+        // 针对tp_del的, 可以不用看
+        move_legacy_finalizers(&unreachable, &finalizers);
+    
+        /* finalizers contains the unreachable objects with a legacy finalizer;
+         * unreachable objects reachable *from* those are also uncollectable,
+         * and we move those into the finalizers list too.
+         */
+        move_legacy_finalizer_reachable(&finalizers);
+
+        // 这里会调用__del__方法
+        /* Call tp_finalize on objects which have one. */
+        finalize_garbage(&unreachable);
+
+        if (check_garbage(&unreachable)) {
+        }
+        else {
+            /* Call tp_clear on objects in the unreachable set.  This will cause
+             * the reference cycles to be broken.  It may also cause some objects
+             * in finalizers to be freed.
+             */
+            // 这里!!!!!会调用tp_clear函数去回收对象
+            delete_garbage(&unreachable, old);
+        }
+    
+        /* Append instances in the uncollectable set to a Python
+         * reachable list of garbage.  The programmer has to deal with
+         * this if they insist on creating this type of structure.
+         */
+         // 这个其实也不用看
+        (void)handle_legacy_finalizers(&finalizers, old);
+    
+    }
+
+
+所以, 主要是5个函数:
+
+1. move_legacy_finalizers, move_legacy_finalizer_reachable, 以及
+   
+   handle_legacy_finalizers这是哪个函数主要是针对遗留的tp_del进行的处理
+
+   前两个函数是把带有tp_del方法的对象加入到finalizers链表中, 同时把对象设置为可达对象, 也就是不回收
+
+   然后最后一个函数是把对象放入到garbage这个list中, 也就是gc.garbage
+
+2. finalize_garbage, 遍历uncollectable链表, 调用其中对象的tp_finalize函数, 也就是\_\_del\_\_方法
+
+3. delete_garbage, 遍历unreachable链表, 调用其中对象的tp_clear函数去回收对象
+
+4. 如果定义了DEBUG_SAVEALL, 那么只会把要回收的对象加入到gc.garbage而不是回收!!!!!!!!!!!!!!!!!
+   
+
+legacy(带有tp_del)处理
+=========================
+
+move_legacy_finalizers是把unreachable链表中, 带有tp_del函数的对象移动到finalizers链表中, 并且移动到
+
+finalizers链表的对象被设置为可达的(GC_REACHABLE)!
+
+.. code-block:: c
+
+    // 判断是否带有__del__方法
+    static int
+    has_legacy_finalizer(PyObject *op)
+    {
+        return op->ob_type->tp_del != NULL;
+    }
+
+
+    // 注释说明的功能
+    /* Move the objects in unreachable with tp_del slots into `finalizers`.
+     * Objects moved into `finalizers` have gc_refs set to GC_REACHABLE; the
+     * objects remaining in unreachable are left at GC_TENTATIVELY_UNREACHABLE.
+     */
+    static void
+    move_legacy_finalizers(PyGC_Head *unreachable, PyGC_Head *finalizers)
+    {
+        PyGC_Head *gc;
+        PyGC_Head *next;
+    
+        /* March over unreachable.  Move objects with finalizers into
+         * `finalizers`.
+         */
+        // 下面的for就是判断然后加入到finalizers, 同时设置gc状态为可达
+        for (gc = unreachable->gc.gc_next; gc != unreachable; gc = next) {
+            PyObject *op = FROM_GC(gc);
+    
+            assert(IS_TENTATIVELY_UNREACHABLE(op));
+            next = gc->gc.gc_next;
+    
+            if (has_legacy_finalizer(op)) {
+                gc_list_move(gc, finalizers);
+                _PyGCHead_SET_REFS(gc, GC_REACHABLE);
+            }
+        }
+    }
+
+
+注意, 上一个函数是说把带有tp_del的对象移动到finalizers链表, 并且设置为可达状态
+
+**所以, 下一步必须把finalizers中对象包含的对象也需要被设置为可达对象, 也就是说move_legacy_finalizers是移动
+
+第一级对象, 而move_legacy_finalizer_reachable则是把第一级对象所引用的所有对象都设置为可达状态!!!!!**
+
+.. code-block:: c
+
+    // 这个就是遍历finalizers链表时候的处理函数
+    static int
+    visit_move(PyObject *op, PyGC_Head *tolist)
+    {
+        if (PyObject_IS_GC(op)) {
+            // 也就是说, 在finalizers中的对象都是可达的
+            // 那么必然, 其引用的对象也都是可达的
+            // 如果不可达, 那么设置为可达对象, 然后从finalizers链表中移除
+            if (IS_TENTATIVELY_UNREACHABLE(op)) {
+                PyGC_Head *gc = AS_GC(op);
+                gc_list_move(gc, tolist);
+                _PyGCHead_SET_REFS(gc, GC_REACHABLE);
+            }
+        }
+        return 0;
+    }
+    
+    /* Move objects that are reachable from finalizers, from the unreachable set
+     * into finalizers set.
+     */
+    static void
+    move_legacy_finalizer_reachable(PyGC_Head *finalizers)
+    {
+        traverseproc traverse;
+        PyGC_Head *gc = finalizers->gc.gc_next;
+        for (; gc != finalizers; gc = gc->gc.gc_next) {
+            /* Note that the finalizers list may grow during this. */
+            traverse = Py_TYPE(FROM_GC(gc))->tp_traverse;
+            (void) traverse(FROM_GC(gc),
+                            (visitproc)visit_move,
+                            (void *)finalizers);
+        }
+    }
+
+所以, 经过move_legacy_finalizers和move_legacy_finalizer_reachable之后, 我们在finalizers
+
+链表上就得到了所有带有tp_del函数的对象, 接下来就是handle_legacy_finalizers
+
+可以看到, 把finalizers中的对象加入到gc.garbage这个list中
+
+.. code-block:: c
+
+    static int
+    handle_legacy_finalizers(PyGC_Head *finalizers, PyGC_Head *old)
+    {
+        PyGC_Head *gc = finalizers->gc.gc_next;
+    
+        if (garbage == NULL) {
+            garbage = PyList_New(0);
+            if (garbage == NULL)
+                Py_FatalError("gc couldn't create gc.garbage list");
+        }
+        for (; gc != finalizers; gc = gc->gc.gc_next) {
+            PyObject *op = FROM_GC(gc);
+    
+            if ((debug & DEBUG_SAVEALL) || has_legacy_finalizer(op)) {
+                // 加入链表
+                if (PyList_Append(garbage, op) < 0)
+                    return -1;
+            }
+        }
+    
+        gc_list_merge(finalizers, old);
+        return 0;
+    }
+
+
+finalize_garbage
+=====================
+
+调用对象的tp_finalize函数, 也就是__del__方法
+
+.. code-block:: c
+
+    static void
+    finalize_garbage(PyGC_Head *collectable)
+    {
+        destructor finalize;
+        PyGC_Head seen;
+    
+        /* While we're going through the loop, `finalize(op)` may cause op, or
+         * other objects, to be reclaimed via refcounts falling to zero.  So
+         * there's little we can rely on about the structure of the input
+         * `collectable` list across iterations.  For safety, we always take the
+         * first object in that list and move it to a temporary `seen` list.
+         * If objects vanish from the `collectable` and `seen` lists we don't
+         * care.
+         */
+        gc_list_init(&seen);
+    
+        while (!gc_list_is_empty(collectable)) {
+            PyGC_Head *gc = collectable->gc.gc_next;
+            PyObject *op = FROM_GC(gc);
+            gc_list_move(gc, &seen);
+            if (!_PyGCHead_FINALIZED(gc) &&
+                    PyType_HasFeature(Py_TYPE(op), Py_TPFLAGS_HAVE_FINALIZE) &&
+                    (finalize = Py_TYPE(op)->tp_finalize) != NULL) {
+                _PyGCHead_SET_FINALIZED(gc, 1);
+                Py_INCREF(op);
+                finalize(op);
+                Py_DECREF(op);
+            }
+        }
+        gc_list_merge(&seen, collectable);
+    }
+
+其中, *finalize = Py_TYPE(op)->tp_finalize*, 也就是__del__方法, 然后调用finalize()
+
+check_garbage/delete_garbage
+===============================
+
+在collect中, delete_garbage的条件是调用check_garbage返回0
+
+也就是check_garbage是在真正回收对象之前再次校验unreachable链表中, 是否都是可回收对象
+
+因为如果存在tp_del的对象的话, unreachable中有可能存在可达对象, 这个时候就不会去回收对象
+
+注意, 当存在tp_del对象的时候, unreachable链表上所有的对象都不会被回收, 也就是不会走到delete_garbage
+
+.. code-block:: c
+
+    // 如果check_garbage返回的不是0
+    if (check_garbage(&unreachable)) {
+        // revive_garbage则是把所有的对象都设置为可达
+        revive_garbage(&unreachable);
+        // 然后把所有对象都加入到gc链表中
+        gc_list_merge(&unreachable, old);
+    }
+    else {
+        // 也就是说, check_garbage返回0, 也就是说unreachable都是reachable的
+        /* Call tp_clear on objects in the unreachable set.  This will cause
+         * the reference cycles to be broken.  It may also cause some objects
+         * in finalizers to be freed.
+         */
+        delete_garbage(&unreachable, old);
+    }
+
+check_garbage
+----------------
+
+一个个校验的过程
+
+.. code-block:: c
+
+    // 看注释, 注释说校验是否存储被finalizers, 也就是存在tp_del对象, 造成
+    // unreachable链表中存在可达对象的情况
+    /* Walk the collectable list and check that they are really unreachable
+       from the outside (some objects could have been resurrected by a
+       finalizer). */
+    static int
+    check_garbage(PyGC_Head *collectable)
+    {
+        PyGC_Head *gc;
+        for (gc = collectable->gc.gc_next; gc != collectable;
+             gc = gc->gc.gc_next) {
+            _PyGCHead_SET_REFS(gc, Py_REFCNT(FROM_GC(gc)));
+            assert(_PyGCHead_REFS(gc) != 0);
+        }
+        subtract_refs(collectable);
+        for (gc = collectable->gc.gc_next; gc != collectable;
+             gc = gc->gc.gc_next) {
+            assert(_PyGCHead_REFS(gc) >= 0);
+            if (_PyGCHead_REFS(gc) != 0)
+                // 如果存在可达对象, 返回-1, 也就是不会走到
+                // delete_garbage
+                return -1;
+        }
+        return 0;
+    }
+
+
+delete_garbage
+-----------------
+
+回收的地方, 调用tp_clear函数, 但是, 如果定义了debug并且DEBUG_SAVEALL, 就不会去回收对象
+
+只是把对象加入到gc.garbage这个list中, 来自 `文档 <https://docs.python.org/3/library/gc.html>`_ :
+
+*If DEBUG_SAVEALL is set, then all unreachable objects will be added to this list rather than freed.*
+
+.. code-block:: c
+
+    static void
+    delete_garbage(PyGC_Head *collectable, PyGC_Head *old)
+    {
+        inquiry clear;
+    
+        while (!gc_list_is_empty(collectable)) {
+            PyGC_Head *gc = collectable->gc.gc_next;
+            PyObject *op = FROM_GC(gc);
+    
+            if (debug & DEBUG_SAVEALL) {
+                PyList_Append(garbage, op);
+            }
+            else {
+                // 这里!!!!!!!!
+                if ((clear = Py_TYPE(op)->tp_clear) != NULL) {
+                    Py_INCREF(op);
+                    clear(op);
+                    Py_DECREF(op);
+                }
+            }
+            if (collectable->gc.gc_next == gc) {
+                /* object is still alive, move it, it may die later */
+                gc_list_move(gc, old);
+                _PyGCHead_SET_REFS(gc, GC_REACHABLE);
+            }
+        }
+    }
+    
+    
 Finalizers
 =============
 

@@ -1093,6 +1093,89 @@ delete_garbage
         }
     }
     
+
+gc线程安全的例子
+=====================
+
+参考: https://zhuanlan.zhihu.com/p/37665784
+
+参考中貌似是python2.7的情况, 但是其实在python3中也会有问题
+
+参考中的例子:
+
+.. code-block:: python
+
+    import gc
+    counter = 0
+    
+    class MyObject(object):
+        def __init__(self):
+            global counter
+            l = counter
+            # Trigger GC
+            a = list()
+            for _ in range(10):
+                a = [a]
+                a.append(a)
+            del a
+            counter = l + 1
+        def __del__(self):
+            global counter
+            l = counter
+            counter = l - 1
+    
+    for _ in range(10000):
+        a = list()
+        b = list()
+        a.append(b)
+        b.append(a)
+        a.append(MyObject())
+        del a
+        del b
+        #gc.collect()
+    
+    gc.collect()
+    print(counter)
+
+如果将注释掉的gc.collect()恢复，就会正确输出0；否则会输出一个远远比0大的值。注意这是一个单线程的程序
+
+评论中有指出: 
+
+.. code-block:: python
+
+    '''
+    和原子操作有联系的，在程序员看来，init和del中的代码应该是顺序执行，即便其中会插入runtime的过程，但至少这两者是独立的
+    
+    然而py的gc机制可能使得其不独立，典型例子就是，在执行init的循环的时候（这时候counter的值被l缓存了）
+    
+    触发了gc过程，而gc过程中会回调其他MyObject对象的del，操作了counter，结果counter的加减操作被穿插了，简单点就是：
+    
+    il = counter #init的代码
+    
+    #被gc机制强制跳到了del
+    
+    dl = counter #del的代码
+    
+    count = dl - 1 #del中counter减一了
+    
+    #del执行完，假设这时候gc结束，跳回被中断的init
+    
+    count = il + 1 #你以为init中加一了，其实这里相对上面这句，是加2了
+    
+    而且，中间dl的两句在gc过程中会被重复N次，偏差更大，最终的结果就是counter远大于0
+    
+    '''
+
+理解上面评论的关键点在于, 不管是init还是del, 都是使用l来保存counter, 也就是说, 即使global的counter被修改了
+
+因为init和del已经用l来保存counter旧值, 那么不管是+1还是-1, 都是老值去执行. 比如l = counter = 10, 然后counter被
+
+-1, 也就是counter = 9, 但是因为init和del中是counter = l + 1, 也就是counter = 10 + 1 = 11, 所以说counter的值就变化了
+
+如果我们不用l去保存counter的值, 而是counter += 1, counter -= 1, 那么结果就是正确的
+
+然后参考中也指出python的pep556的提案, 说会提供线程安全的gc
+
     
 Finalizers
 =============

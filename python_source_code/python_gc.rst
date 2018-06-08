@@ -700,14 +700,21 @@ gc_refs == GC_TENTATIVELY_UNREACHABLE
 
 **注意, python3中, 定义了\_\_del\_\_函数的对象中, 在C代码级别不是tp_del, 而是tp_finalize!!!!而python2.7中__del__才是被映射到tp_del**
 
+.. code-block:: c
+
+    // 2.7中的tp_del, cpythonObjects/typeobject.c
+    TPSLOT("__del__", tp_del, slot_tp_del, NULL, ""),
+    
+    // 3.6中的tp_finalize
+    TPSLOT("__del__", tp_finalize, slot_tp_finalize, (wrapperfunc)wrap_del, ""),
+
 其中, 如果定义了\_\_del\_\_方法, 那么tp_finalize会指向slot_tp_finalize函数, slot_tp_finalize这个函数是调用对象的\_\_del\_\_方法的
 
-那么tp_del是干嘛的呢? 根据 `python issue#4934 <https://bugs.python.org/issue4934>`_ 可知
+那么3.6中的tp_del是干嘛的呢? 根据 `python issue#4934 <https://bugs.python.org/issue4934>`_ 可知
 
 tp_del只是内部使用, 并且已被废弃, tp_finalize替代了tp_del
 
 *The reason tp_del has remained undocumented is that it's now obsolete.  You should use tp_finalize instead
-
 tp_finalize is roughly the C equivalent of __del__ (tp_del was something else, despite the name).*
 
 .. code-block:: c

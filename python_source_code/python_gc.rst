@@ -698,7 +698,7 @@ gc_refs == GC_TENTATIVELY_UNREACHABLE
 
 在collect的过程中, 处理完可达不可达之后, 后面还会处理带有\_\_del\_\_析构函数的对象
 
-**注意, 定义了\_\_del\_\_函数的对象中, 在C代码级别不是tp_del, 而是tp_finalize!!!!**
+**注意, python3中, 定义了\_\_del\_\_函数的对象中, 在C代码级别不是tp_del, 而是tp_finalize!!!!而python2.7中__del__才是被映射到tp_del**
 
 其中, 如果定义了\_\_del\_\_方法, 那么tp_finalize会指向slot_tp_finalize函数, slot_tp_finalize这个函数是调用对象的\_\_del\_\_方法的
 
@@ -822,6 +822,8 @@ tp_finalize is roughly the C equivalent of __del__ (tp_del was something else, d
 
 legacy(带有tp_del)处理
 =========================
+
+python2.7的情况的处理
 
 move_legacy_finalizers是把unreachable链表中, 带有tp_del函数的对象移动到finalizers链表中, 并且移动到
 

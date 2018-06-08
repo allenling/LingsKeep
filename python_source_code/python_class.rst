@@ -70,6 +70,35 @@ PyType_Type
 
 注意下tp_call, tp_new, tp_init
 
+1. tp_dict是类的属性的dict, 而实例的属性dict是object地址 + offset, 这个offset
+
+   就是tp_dictoffset, 下面来自 `文档 <https://docs.python.org/3/c-api/typeobj.html#c.PyTypeObject.tp_dictoffset>`_
+
+   If the instances of this type have a dictionary containing instance variables, this field is non-zero and
+
+   contains the offset in the instances of the type of the instance variable dictionary
+
+   **Do not confuse this field with tp_dict; that is the dictionary for attributes of the type object itself.**
+
+2. 属性缓存是类有关! 和对象实例无关!!
+   
+   具体来说类是使用tp_version_tag来判断的, 一个类(PyTypeObject)有一个唯一的tp_version_tag, 然后同一个
+
+   类的实例因为是指向同一个PyTypeObject, 那么多个对象的同一个属性名则会存储在同一个缓存数组下标中
+
+3. 属性缓存数组的hash计算是和tp_version_tag和name有关的, 所以, 多次访问类属性的时候, 会先访问缓存数组
+
+   访问不到, 才会去访问实例数组(tp_dictoffset有关) 
+
+4. 然后如果基础树上找到父类的属性之后, 会把当前类和属性值一起设置到缓存数组中
+
+   比如B继承于A(class B(A)), B的tp_version_tag = 10, A的tp_version_tag=5, 然后A有data属性, 我们查找B.data的时候
+
+   那么通关mro, 查找到A.data=1, 那么在缓存数组中, 就是cached[hash(B.tp_version_tag, name)] = 1
+
+5. PyType_Type也是一个PyTypeObject, 其中PyType_Type->ob_type是自己, 也就是
+
+   PyType_Type->ob_type == PyType_Type
 
 魔术方法
 ===========
@@ -269,7 +298,7 @@ cpython/Python/bltinmodule.c
 1. 调用一个函数去编译类中定义的函数, 把类方法都放到ns, 也就是类自己的属性dict中
 
 
-2. 调用PyType_Type->tp_call -> PyType-Type->tp_new去生成一个新的PyTypeObject
+2. 调用PyType_Type->tp_call -> PyType_Type->tp_new去生成一个新的PyTypeObject
 
    然后在1的ns, 也就是类自己的属性dict中, 找魔术方法, 比如\_\_init\_\_
 
@@ -278,7 +307,93 @@ cpython/Python/bltinmodule.c
    如果类没有定义\_\_init\_\_, 那么给个默认的tp_init函数, 就是object_init
 
 
-3. tp_call指向object_new
+3. tp_call此时是NULL, 所以, 调用类的时候, 会去调用PyType_Type的tp_call
+
+   也就是调用路径就是(PyType_Type->tp_call)
+
+
+4. PyType_Type->tp_call中, 会调用传入的PyTypeObject->tp_new, 也就是object_new
+
+   以及PyTypeObject->tp_init, 如果我们定义了\_\_init\_\_方法, 那么就是slot_tp_init
+
+   否则就是object_init, object_init其实什么也没做, 就判断参数, 如果有参数进来, 报错
+
+
+5. 所以, 创建类的时候, 调用PyType_Type->tp_call, tp_call == type_call, type_call其中传入的type参数是PyType_Type
+   
+   而已type->tp_new是type_new, 以及type->tp_init是type_init
+
+6. 当创建实例对象的时候, 调用的也是类的ob_type->tp_call, 也就是而类的ob_type是PyType_Type
+
+   所以依然会调用PyType_Type->tp_call, 也就是type_call, 然后type_call中依然会调用tp_new和tp_init
+
+   但是因为此时传给type_call的参数type不是5中的PyType_Type, 而是类的PyTypeObject, 比如PyTypeObject('A')
+
+   那么类A的tp_new和tp_init就是object_new和object_init/slot_tp_init
+
+7. 所以, 流程一样, 都是调用PyType_Type->tp_call(type_call函数), 然后一次调用type->tp_new和tp_init
+   
+   但是传入的type参数不同, 调用的函数不同
+
+8. 当然, 如果你在类中定义了\_\_call\_\_, 那么PyTypeObject('A')->tp_call = \_\_call\_\_
+
+   所以a=A(), a()的时候, 调用a->ob_type->tp_call, a是PyObject, a->ob_type=PyTypeObject('A')
+
+   所以a()就是PyTypeObject('A')->tp_call, 也就是slot_tp_call, 也就会调用\_\_call\_\_
+
+type_new/type_init
+======================
+
+这两个函数是PyType_Type的tp_new和tp_init, 作用是生成新的类以及初始化类
+
+type_new太长了, 先放着
+
+看看type_init
+
+.. code-block:: c
+
+    static int
+    type_init(PyObject *cls, PyObject *args, PyObject *kwds)
+    {
+        int res;
+    
+        assert(args != NULL && PyTuple_Check(args));
+        assert(kwds == NULL || PyDict_Check(kwds));
+    
+        if (kwds != NULL && PyTuple_Check(args) && PyTuple_GET_SIZE(args) == 1 &&
+            PyDict_Check(kwds) && PyDict_Size(kwds) != 0) {
+            PyErr_SetString(PyExc_TypeError,
+                            "type.__init__() takes no keyword arguments");
+            return -1;
+        }
+    
+        if (args != NULL && PyTuple_Check(args) &&
+            (PyTuple_GET_SIZE(args) != 1 && PyTuple_GET_SIZE(args) != 3)) {
+            PyErr_SetString(PyExc_TypeError,
+                            "type.__init__() takes 1 or 3 arguments");
+            return -1;
+        }
+    
+        /* Call object.__init__(self) now. */
+        /* XXX Could call super(type, cls).__init__() but what's the point? */
+        args = PyTuple_GetSlice(args, 0, 0);
+        // 看看这里!!!!!!!!!!!!!
+        res = object_init(cls, args, NULL);
+        Py_DECREF(args);
+        return res;
+    }
+
+
+1. 传入的cls就是PyTypeObject, 比如PyTypeObject('A')
+
+2. 会走到object_init, 其实object_init也没干嘛, 判断是否是新建实例
+   
+   其中传入的第一个参数就是PyTypeObject('A'), 然后type=PY_TYPE(cls), 判断(type->tp_new == object_new || type->tp_init != object_init)
+
+   显然, 类创建的时候, type->tp_new和type->tp_init是type_new, type_init
+   
+   如果是, 传入的参数一定为0, 否则报错
+
 
 
 创建实例
@@ -297,14 +412,13 @@ cpython/Python/bltinmodule.c
                  10 RETURN_VALUE
 
 
+生成类实例的时候, 依然和创建类的时候一样, 调用ob_type->tp_call, 因为类的ob_type是PyType_Type
 
-会调用A"函数", 因为A(类, PyTypeObejct)也是一个callable对象, 那么会判断都A(PyTypeObject)定义了\_\_call\_\_方法, 所以调用
+所以就是调用PyType_Type->tp_call, 在tp_call中, 根据传入的参数type, 依次调用type->tp_new和type->tp_init
 
-PyTypeObject->ob_type(PyType_Type)->tp_call
+此时type就是PyTypeObject('A'), 那么其tp_new是object_new, 而tp_init是object_new(没有定义\_\_init\_\_方法)或者
 
-而tp_call会调用tp_new, 调用alloc去分配一个新的内存, 内存中, ob_type就是H这个PyTypeObject, 然后
-
-再调用tp_init, 也就是我们之前说的slot_tp_init, 调动类的\_\_init\_\_这个python函数
+slot_tp_init(定义了\_\_init\_\_方法)
 
 .. code-block:: c
 
@@ -312,14 +426,16 @@ PyTypeObject->ob_type(PyType_Type)->tp_call
     type_call(PyTypeObject *type, PyObject *args, PyObject *kwds)
     {
     
-        // 调用tp_new, 也就是object_new
+        // 这里传入的type是PyTypeObject('A'), 其tp_new=object_new
         obj = type->tp_new(type, args, kwds);
+
+        // 
         obj = _Py_CheckFunctionResult((PyObject*)type, obj, NULL);
         if (obj == NULL)
             return NULL;
     
     
-        // 调用tp_init, 也就是slot_tp_init
+        // 调用tp_init, 也就是slot_tp_init或者object_init
         if (type->tp_init != NULL) {
             int res = type->tp_init(obj, args, kwds);
             if (res < 0) {
@@ -334,8 +450,43 @@ PyTypeObject->ob_type(PyType_Type)->tp_call
     
     }
 
+源码中, obj经过tp_new的时候, 就是一个PyObject, 其ob_type=PyTypeObject('A')
 
-看看slot_tp_init
+PyTypeObject->tp_new
+=======================
+
+指向object_new
+
+主要是调用PyTypeObject->tp_alloc去分配内存, 默认tp_alloc是PyType_GenericAlloc
+
+.. code-block:: c
+
+    static PyObject *
+    object_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
+    {
+        if (excess_args(args, kwds) &&
+            (type->tp_init == object_init || type->tp_new != object_new)) {
+            PyErr_SetString(PyExc_TypeError, "object() takes no parameters");
+            return NULL;
+        }
+    
+        if (type->tp_flags & Py_TPFLAGS_IS_ABSTRACT) {
+            // 抽象类的处理, 先略过
+        error:
+            Py_XDECREF(joined);
+            Py_XDECREF(sorted_methods);
+            Py_XDECREF(abstract_methods);
+            return NULL;
+        }
+        return type->tp_alloc(type, 0);
+    }
+
+
+PyTypeObject->tp_init
+=======================
+
+
+object_init没什么好看的, 看看slot_tp_init
 
 .. code-block:: c
 
@@ -439,7 +590,7 @@ LOAD_ATTR是调用PyObject_GetAttr
 
 而一般, PyObject->ob_type->tp_getattro则是PyObject_GenericGetAttr, 调用路径是
 
-PyObject_GenericGetAttr -> _PyObject_GenericGetAttrWithDict -> _PyType_Lookup
+PyObject_GenericGetAttr -> _PyObject_GenericGetAttrWithDict
 
 而_PyObject_GenericGetAttrWithDict中, 先调用_PyType_Lookup去查找类的属性, 再查找对象的__dict__是否有对应的属性值
 
@@ -503,6 +654,17 @@ PyObject_GenericGetAttr -> _PyObject_GenericGetAttrWithDict -> _PyType_Lookup
     
     }
 
+1. descr, 先查询出类的属性(调用_PyType_Lookup进行mro查询, 注意有缓存的), 然后判断descr是否是
+
+   descriptor(property), 如果是, 直接调用get方法返回, 否则保存主, 然后继续
+
+2. 获取对象的dict地址, 也就是object地址 + tp_dictoffset
+
+3. 从对象dict中拿到属性, 如果那不到, 继续4, 否则返回
+
+4. 如果3拿不到属性, 那么返回1中拿到的descr
+
+5. 总结起来就是先拿类属性, 判断是否是descriptor, 如果是, 直接返回, 否则再查询类属性, 存在则返回, 否则返回类属性
 
 类属性查询
 ============
@@ -577,8 +739,8 @@ PyObject_GenericGetAttr -> _PyObject_GenericGetAttrWithDict -> _PyType_Lookup
     }
 
 
-属性查询缓存
-=============
+类属性查询缓存
+=================
 
   Python的确需要通过继承树搜索属性，但是它会缓存最近的1024个搜索结果，如果没有下标冲突问题，这样做能极大提高循环中对某几个属性的访问
   
@@ -588,7 +750,7 @@ PyObject_GenericGetAttr -> _PyObject_GenericGetAttrWithDict -> _PyType_Lookup
   
   --- 参考1
 
-在查找类属性的时候, 是函数_PyType_Lookup
+在查找!! **类属性的时候, 是函数_PyType_Lookup**
 
 .. code-block:: c
 

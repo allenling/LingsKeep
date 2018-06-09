@@ -196,14 +196,12 @@ dis里面的内容就是:
 
 2. 两个LOAD_CONST分别拿到类的code object和A这个unicode object, 下面的A都是值为'A'的unicode object
 
-3. 生成函数对象, 函数名字就是'A'
+3. MAKE_FUNCTION生成函数对象, 函数名是'A'
    
-   **注意这里, 这个函数对象的code object是负责生成一系列方法的, 比如你定义了两个方法, 这个code object**
+   **注意, 这里的函数是赋值类属性(包括方法), 也就是把属性和方法设置到类的__dict__中.**
 
-   **就是编译这两个方法, 然后保存到f->f_locals, 而f->f_locals则是类自己的一个属性字典**
-
-   往下看就比较清楚
-
+   所以, 这里的函数是赋值类A属性(方法)的, 和定义类A没什么关系, 往后看
+   
 4. 8中的LOAD_CONST是再拿到'A', 这里, 拿到的'A'是3中的函数对象
    
    然后我们CALL_FUNCTION, 这里的CALL_FUNCTION是在栈区直接拿的, 而'A'函数则是在CONST, 所以这里调用的是1中入栈的builtins.\_\_\_build\_class\_\_
@@ -294,11 +292,129 @@ cpython/Python/bltinmodule.c
         return cls;
     }
 
+PyEval_EvalCodeEx
+=========================
 
-1. 调用一个函数去编译类中定义的函数, 把类方法都放到ns, 也就是类自己的属性dict中
+这里的PyEval_EvalCodeEx是执行传入的func, 这个func是绑定函数属性和方法的, 传入的func就是字节码中MAKE_FUNCTION生成的function object
+
+传入的locals是ns, 也就是__prepare__方法返回的值
+
+__prepare__必须返回dict(默认的__prepare__返回一个空dict), 这个dict我们这里称为类作用域
+
+然后执行func中的code object, 就是:
+
+1. 赋值类默认属性, 类作用域中\_\_qualname\_\_ = 'A',
+
+2. 类自定义属性, 比如定义A的时候, name = 'A', 那么类作用域中, name = 'A'
+
+3. 关联方法, A中定义了方法get_data, get_data = function object, 那么类作用域中'get_data' = get_data(function object)
+
+   注意, 这里是function object而不是method object, 只有生成实例的时候, 才会生成一个method object
+
+   而method object中的__func__属性会指向同一个function object
+
+   比如: a=A(), *a.get_name.__func__ is A.get_name* 结果为真
+
+提一下访问对象的方法的时候, method object和function, 访问对象的方法, 很明显, 方法是保存在类中的, 也就是A.tp_dict中
+
+存储的是function object, 但是我们对象方法的时候, 为什么是method object
+
+这是因为我们寻找到方法的是, 会新生成一个method object返回
+
+.. code-block:: c
+
+    // 对象属性的查找函数
+    PyObject *
+    _PyObject_GenericGetAttrWithDict(PyObject *obj, PyObject *name, PyObject *dict)
+    {
+    
+        // 查找类属性
+        descr = _PyType_Lookup(tp, name);
+    
+        f = NULL;
+        // 如果descr不是NULl
+        // 比如我们查找方法get_data
+        if (descr != NULL) {
+            Py_INCREF(descr);
+            // 注意, f被赋值了
+            f = descr->ob_type->tp_descr_get;
+            // 但是descr如果是方法, PyDescr_IsData就是false了
+            // 因为PyDescr_IsData是判断descr是否是descriptor对象的
+            if (f != NULL && PyDescr_IsData(descr)) {
+                res = f(descr, obj, (PyObject *)obj->ob_type);
+                goto done;
+            }
+        }
+    
+        // 我们还去查找了对象的dict中是否存在属性, 此部分先略过
+    
+        // 我们调用f
+        // f就是会把function给wrap成一个method
+        if (f != NULL) {
+            res = f(descr, obj, (PyObject *)Py_TYPE(obj));
+            goto done;
+        }
+    
+    }
 
 
-2. 调用PyType_Type->tp_call -> PyType_Type->tp_new去生成一个新的PyTypeObject
+f = descr->ob_type->tp_descr_get, 而function object->ob_type->tp_descr_get是func_descr_get
+
+f是返回一个新生成的method object
+
+.. code-block:: c
+
+    /* Bind a function to an object */
+    static PyObject *
+    func_descr_get(PyObject *func, PyObject *obj, PyObject *type)
+    {
+        if (obj == Py_None || obj == NULL) {
+            Py_INCREF(func);
+            return func;
+        }
+        // 看这里!!!!!!!!!!!!!!
+        return PyMethod_New(func, obj);
+    }
+
+PyObject_FastCallDict(meta, ...)
+======================================
+
+这里调用meta, 也就是meta是一个callable对象, 然后这里meta一般是PyType_Type, 并且PyType_Type也是一个PyTypeObject
+
+其ob_type是自己PyType_Type, 所以也就是PyObject_FastCallDict中调用func->ob_type->tp_call会调用到PyType_Type->tp_call
+
+而tp_call中传入的参数就是上一步生成的ns, 也就是类作用域了
+
+.. code-block:: c
+
+    PyObject *
+    _PyObject_FastCallDict(PyObject *func, PyObject **args, Py_ssize_t nargs,
+                           PyObject *kwargs)
+    {
+    
+        // 这里func传入的是meta, 也就是PyType_Type
+        // PyType_Type->ob_type 也是PyType_Type
+
+        // 所以, call = PyType_Type->tp_call
+        call = func->ob_type->tp_call;
+        if (call == NULL) {
+            PyErr_Format(PyExc_TypeError, "'%.200s' object is not callable",
+                         func->ob_type->tp_name);
+            goto exit;
+        }
+        
+        tuple = _PyStack_AsTuple(args, nargs);
+        if (tuple == NULL) {
+            goto exit;
+        }
+        
+        result = (*call)(func, tuple, kwargs);
+        Py_DECREF(tuple);
+    }
+
+
+
+1. 调用PyType_Type->tp_call -> PyType_Type->tp_new去生成一个新的PyTypeObject
 
    然后在1的ns, 也就是类自己的属性dict中, 找魔术方法, 比如\_\_init\_\_
 
@@ -307,23 +423,23 @@ cpython/Python/bltinmodule.c
    如果类没有定义\_\_init\_\_, 那么给个默认的tp_init函数, 就是object_init
 
 
-3. tp_call此时是NULL, 所以, 调用类的时候, 会去调用PyType_Type的tp_call
+2. tp_call此时是NULL, 所以, 调用类的时候, 会去调用PyType_Type的tp_call
 
    也就是调用路径就是(PyType_Type->tp_call)
 
 
-4. PyType_Type->tp_call中, 会调用传入的PyTypeObject->tp_new, 也就是object_new
+3. PyType_Type->tp_call中, 会调用传入的PyTypeObject->tp_new, 也就是object_new
 
    以及PyTypeObject->tp_init, 如果我们定义了\_\_init\_\_方法, 那么就是slot_tp_init
 
    否则就是object_init, object_init其实什么也没做, 就判断参数, 如果有参数进来, 报错
 
 
-5. 所以, 创建类的时候, 调用PyType_Type->tp_call, tp_call == type_call, type_call其中传入的type参数是PyType_Type
+4. 所以, 创建类的时候, 调用PyType_Type->tp_call, tp_call == type_call, type_call其中传入的type参数是PyType_Type
    
    而已type->tp_new是type_new, 以及type->tp_init是type_init
 
-6. 当创建实例对象的时候, 调用的也是类的ob_type->tp_call, 也就是而类的ob_type是PyType_Type
+5. 当创建实例对象的时候, 调用的也是类的ob_type->tp_call, 也就是而类的ob_type是PyType_Type
 
    所以依然会调用PyType_Type->tp_call, 也就是type_call, 然后type_call中依然会调用tp_new和tp_init
 
@@ -331,11 +447,11 @@ cpython/Python/bltinmodule.c
 
    那么类A的tp_new和tp_init就是object_new和object_init/slot_tp_init
 
-7. 所以, 流程一样, 都是调用PyType_Type->tp_call(type_call函数), 然后一次调用type->tp_new和tp_init
+6. 所以, 流程一样, 都是调用PyType_Type->tp_call(type_call函数), 然后一次调用type->tp_new和tp_init
    
    但是传入的type参数不同, 调用的函数不同
 
-8. 当然, 如果你在类中定义了\_\_call\_\_, 那么PyTypeObject('A')->tp_call = \_\_call\_\_
+7. 当然, 如果你在类中定义了\_\_call\_\_, 那么PyTypeObject('A')->tp_call = \_\_call\_\_
 
    所以a=A(), a()的时候, 调用a->ob_type->tp_call, a是PyObject, a->ob_type=PyTypeObject('A')
 
@@ -346,9 +462,31 @@ type_new/type_init
 
 这两个函数是PyType_Type的tp_new和tp_init, 作用是生成新的类以及初始化类
 
-type_new太长了, 先放着
+type_new太长了, 先放着, 比如设置tp_dict, 接上一个例子的话
+
+.. code-block:: python
+   
+   // 这里只列举了2个, 当然还有其他, 比如__doc__等等
+   A.tp_dict = {'get_name': <function __main__.A.get_name>,
+                 '__name__': 'A',
+                 }
+
+
+设置tp_clear等函数:
+
+.. code-block:: c
+
+    /* Always override allocation strategy to use regular heap */
+    type->tp_alloc = PyType_GenericAlloc;
+    if (type->tp_flags & Py_TPFLAGS_HAVE_GC) {
+        type->tp_free = PyObject_GC_Del;
+        type->tp_traverse = subtype_traverse;
+        type->tp_clear = subtype_clear;
+    }
+
 
 看看type_init
+------------------
 
 .. code-block:: c
 

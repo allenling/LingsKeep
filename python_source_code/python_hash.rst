@@ -4,6 +4,8 @@ hash
 
 python中调用hash的时候的流程
 
+.. [1] https://hynek.me/articles/hashes-and-equality/
+
 
 1. unicode对象的hash是创建的时候是赋值-1, 第一次计算之后就缓存下来了
    
@@ -24,6 +26,10 @@ python中调用hash的时候的流程
 5. tuple的hash值没有被缓存, 原因看issue #9685, 大概意思就是在经过测试之后, 缓存了tuple的hash值之后
    
    速度并没有明显的提升
+
+6. 定义了\_\_hash\_\_的类, 如果\_\_hash\_\_的返回值变了, 那么有可能in操作不存在
+
+   参考[1]_
 
 内建hash函数
 ==============
@@ -477,6 +483,32 @@ cpython/Python/pyhash.c
 返回负数是因为, 如果翻转的后四位最高位是1, 比如0000000000000000011111110110110001011000011001010011010001111000
 
 那么需要按补码表示来取值
+
+object的__hash__
+--------------------
+
+下面例子来自参考[1]_
+
+.. code-block:: python
+
+    In [43]: c=C()
+    
+    In [44]: c.data = 1
+    
+    In [45]: x={}
+    
+    In [46]: x[c] = 'c'
+    
+    In [47]: x
+    Out[47]: {<__main__.C at 0x7feda0bc8ef0>: 'c'}
+    
+    In [48]: c.data = 2
+    
+    In [49]: c in x
+    Out[49]: False
+
+
+x这个dict命名保存了c对象, 然后我们更改c.__hash__的返回值之后, c in x 就是False了
 
 
 list/tuple

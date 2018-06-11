@@ -1111,7 +1111,7 @@ https://elixir.bootlin.com/linux/v4.15/source/include/linux/wait.h#L87
     // https://elixir.bootlin.com/linux/v4.15/source/include/uapi/linux/eventpoll.h#L44
     #define EPOLLEXCLUSIVE (1U << 28)
 
-这样不管是read还是write, and操作EPOLLEXCLUSIVE都是真, add_wait_queue_exclusive调用是把wait_queue_entry设置上WQ_FLAG_EXCLUSIVE标志, 这样唤醒的时候, 只会唤醒一个.
+add_wait_queue_exclusive调用是把wait_queue_entry设置上WQ_FLAG_EXCLUSIVE标志, 这样唤醒的时候, 只会唤醒一个.
 
 .. code-block:: c
 
@@ -1126,9 +1126,7 @@ https://elixir.bootlin.com/linux/v4.15/source/include/linux/wait.h#L87
     	spin_unlock_irqrestore(&wq_head->lock, flags);
     }
 
-
-惊群参考 `这里 <http://wangxuemin.github.io/2016/01/25/Epoll%20%E6%96%B0%E5%A2%9E%20EPOLLEXCLUSIVE%20%E9%80%89%E9%A1%B9%E8%A7%A3%E5%86%B3%E4%BA%86%E6%96%B0%E5%BB%BA%E8%BF%9E%E6%8E%A5%E7%9A%84%E2%80%99%E6%83%8A%E7%BE%A4%E2%80%98%E9%97%AE%E9%A2%98/>`_
-
+具体的惊群参考后面
 
 结构图示为:
 
@@ -2187,6 +2185,7 @@ ep_poll的时候, 给ep_scan_ready_list传入的函数是ep_send_events_proc
     
     
     def read(name, fobj):
+        # 这里改成一次性读取1024字节等等, 都一样会惊群
         data = fobj.recv(1)
         print('%s got data' % name, data)
         return
@@ -2353,7 +2352,9 @@ ep_poll的时候, 给ep_scan_ready_list传入的函数是ep_send_events_proc
 
 那么fd缓存区没有数据, 那么B就遇到error=11, EAGAIN, 如果A没读取完, 那么剩下的数据就被B读取到
 
-**所以, 情况就是A, B线程都会读取到数据, 然后其中有一个会出现EAGAIN**
+**所以, 情况就是A, B线程都会读取到数据, 然后如果A先读取完数据, 那么B会EAGIN, 也就是其中有一个会出现EAGAIN, 或者A没有读取完
+
+比如A一次读1字节, 那么B也会被唤醒, 出现数据交错**
 
 例子2
 ----------

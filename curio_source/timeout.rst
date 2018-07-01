@@ -10,7 +10,54 @@ curio中的sleep和timeout实现
 
 所以也就是从休眠队列中, 获取最小休眠时间, 然后如果中间被唤醒, 也就是select被唤醒, 那么优先处理被唤醒的event
 
-否则进入timeout判断
+否则进入timeout判断, 简单总结来说:
+
+1. timeout的计算是通过绝对流逝时间来表示的, 比如当期那流逝时间current_monic=10s, A这个task的timeout=1s
+
+   则用A.timeout_monic = 11s
+
+2. sleepq可以简单看成一个优先队列(priority queue), 可以简单看成一个堆, 然后我们把timeout_monic
+
+   加入到优先队列中. 当然curio中的实现没那么简单, 会有一些优化, 比如sleepq加入bucket
+
+3. 超时判断是在kernel的每一个while循环中, 每次while开始的时候, kernel会从sleepq中拿到最近的一个timeout_monic
+
+   也就是距离当前最近的一个超时流逝时间, near_deadline, 然后select(当然一般是epoll, select是通用术语, 表示事件驱动机制)
+   
+   的timeout就是near_deadline
+
+4. 因为kernel中的select还负责其他fd的监视, 比如read_wait, write_wait, 那么如果在near_deadline期间有fd被唤醒, 那么
+
+   kernel会去处理被唤醒的coro, 如果没有fd被唤醒, 那么kernel中select返回的events就是空, 那么kernel则回去sleepq中
+
+   拿到最近一个timeout
+
+5. 拿到timeout之后, 如果coro是休眠状态, 那么执行cancel的callback, 然后设置task.next_exec=TaskTimeout
+   
+   接着reschedule(task), 也就是把task加入到ready队列(list)
+
+6. 那么kernel处理到timeout的task的时候, 发现task.next_exec不是None, 则throw, 也就是把TaskTimeout异常发送到coro中
+
+   此时我们在coro中的try/except就走到except了
+
+7. 如果没有超时, 意味着with _TimeoutAfter中走到_TimeoutAfter.__aexit__函数中(当然, 就算超时也会走)
+
+   那么在_TimeoutAfter.__aexit__中, 会去调用_unset_timeout, 把sleepq中, 关于task的timeout配置解除掉
+
+   我们可以简单的看成sleepq中有关task的timeout配置从优先队列中移除
+
+8. 就像7所说的, 超时之后也会走到_TimeoutAfter.__aexit__中, 一样会把task的timeout配置从sleepq中移除
+
+
+9. 如果timeout了, 但是因为当前的task花了很久, 导致执行到超时的task的时候, 我们发现当前流逝的时间超过我们超时的配置了
+
+   那么curio中会报一个wanring: *Timeout occurred, but was uncaught. Ignored.*
+
+10. 接9, 比如这样一个例子, current表示当前执行的task, A表示已经超时的task, 当前流逝时间current_monic=10s, 然后A.timeout_monic=11s
+
+    然后current执行了3s, 然后yield, 接着kernel发现A已经超时, 那么判断到current_monic=13s > A.timeout_monic, 那么报warning, 然后
+
+    继续执行A
 
 例子
 ======
@@ -511,8 +558,114 @@ for sleepq.expired
 
 上面的流程就是task已经超时了, 那么没有超时呢?
 
-
 我们把例子中, timeout_func中sleep改为1, 然后timeout_func中timeout_after传入10s
+
+显然, 在with _TimeoutAfter中, 如果我们的coro已经返回了, 比如sleep(1), 然后显然, 要进入_TimeoutAfter.__aexit__函数中
+
+里面会处理timeout的
+
+**当然, 超时的时候也会进入__aexit__!!!!!!!!!!!!!!!!!!!!!!!!!!!!!**
+
+.. code-block:: python
+
+    class _TimeoutAfter(object):
+    
+        async def __aexit__(self, ty, val, tb):
+            # 我们的coro已经返回了, 那么进入到__aexit__函数中
+            # 调用_unset_timeout系统调用
+            current_clock = await _unset_timeout(self._prior)
+    
+            # Discussion.  If a timeout has occurred, it will either
+            # present itself here as a TaskTimeout or TimeoutCancellationError
+            # exception.  The value of this exception is set to the current
+            # kernel clock which can be compared against our own deadline.
+            # What happens next is driven by these rules:
+            #
+            # 1.  If we are the outer-most context where the timeout
+            #     period has expired, then a TaskTimeout is raised.
+            #
+            # 2.  If the deadline has expired for at least one outer
+            #     context, (but not us), a TimeoutCancellationError is
+            #     raised.  This means that time has expired elsewhere.
+            #     We're being cancelled because of that, but the reason
+            #     for the cancellation wasn't due to a timeout on our
+            #     part.
+            #
+            # 3.  If the timeout period has not expired on ANY remaining
+            #     timeout context, it means that a timeout has escaped
+            #     some inner timeout context where it should have been
+            #     caught. This is an operational error.  We raise
+            #     UncaughtTimeoutError.
+    
+            try:
+                # 如果是超时异常, ty就是TaskTimeout
+                if ty in (TaskTimeout, TimeoutCancellationError):
+                    timeout_clock = val.args[0]
+                    # Find the outer most deadline that has expired
+                    for n, deadline in enumerate(self._deadlines):
+                        if deadline <= timeout_clock:
+                            break
+                    else:
+                        # No remaining context has expired. An operational error
+                        raise UncaughtTimeoutError('Uncaught timeout received')
+    
+                    if n < len(self._deadlines) - 1:
+                        if ty is TaskTimeout:
+                            raise TimeoutCancellationError(val.args[0]).with_traceback(tb) from None
+                        else:
+                            return False
+                    else:
+                        # The timeout is us.  Make sure it's a TaskTimeout (unless ignored)
+                        self.result = self._timeout_result
+                        self.expired = True
+                        if self._ignore:
+                            return True
+                        else:
+                            if ty is TimeoutCancellationError:
+                                raise TaskTimeout(val.args[0]).with_traceback(tb) from None
+                            else:
+                                return False
+                elif ty is None:
+                    if current_clock > self._deadlines[-1]:
+                        # Further discussion.  In the presence of threads and blocking
+                        # operations, it's possible that a timeout has expired, but 
+                        # there was simply no opportunity to catch it because there was
+                        # no suspension point.  
+                        log.warning('%r. Timeout occurred, but was uncaught. Ignored.',
+                                    await current_task())
+    
+            finally:
+                self._deadlines.pop()
+
+1. 如果超时了, 比如sleep(10), timeout_after(1), 那么带入的ty就是TaskTimeout
+
+
+2. 如果没有超时, 比如sleep(1), timeout_after(10), 那么传入的ty就是None
+
+   并且一般current_task > self._deadlines[-1], 那么表示没有超时, 但是呢, 我们超时时间之后才进入到
+
+   __aexit__函数, 比如sleep(1), timeout_after(10), 那么如果你debug的时候, 我们debug走到__aexit__中的时候是第11s
+
+   那么表示有某些原因导致我们在超时之后的时间才进入到\_\_aexit\_\_, 那么这里打个warning就好了, 一般的话
+
+   current_task < self._deadlines[-1], 表示我们在超时之前就进入了__aexit__函数, 也就是超时之前就退出了
+
+3. 不管超没超时, 第一步总是调用_unset_timeout这个系统调用, 去解除跟task相关的所有timeout配置
+
+   也就是会去调用sleepq相关的方法去把超时队列中的task相关的配置给清除掉
+
+所以, 最关键的还是sleepq的实现
+
+
+sleepq实现细节
+================
+
+sleepq是一个TimeQueue对象
+
+
+.. code-block:: python
+
+
 
 
 

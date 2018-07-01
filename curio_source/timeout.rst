@@ -376,7 +376,7 @@ sleep系统调用
 _suspend_task
 ================
 
-把task加入到暂停队列(suspend queue)
+把current设置为None, 也就是表示当前没有任务在执行, 那么kernel则会去负责选择下一个task来执行
 
 .. code-block:: python
 

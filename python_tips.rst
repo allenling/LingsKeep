@@ -813,3 +813,164 @@ handler
 
 所以每次调用flush的时候, 都会去拿self.lock这个锁
 
+
+
+
+memoryviews
+==================
+
+https://stackoverflow.com/questions/18655648/what-exactly-is-the-point-of-memoryview-in-python
+
+One reason memoryviews are useful is because they can be sliced without copying the underlying data, unlike bytes/str.
+
+
+
+
+subprocess流程
+=====================
+
+
+思路是打开一个子进程, 然后重定向pipe, 然后使用select(timeout)去拉取pipe数据流
+
+打开子进程是是通过fork_exec(python内部的_posixsubprocess.fork_exec函数), 流程就是fork一个子进程, 然后exec传入的命令(默认是bash -c)
+
+通过pipe把命令发送到子进程的stdin, 子进程执行, 然后父进程调用select, 
+
+遇到有读事件发生的时候, 调用os.read, 也就是会读取到第一个EOF, 然后就会把pipe
+
+关闭pipe(关闭子进程的stdin)之后, 子进程会变成僵尸进程!!!!!
+
+然后父进程因为重定向了子进程的stdout, stderr, 那么父进程还是可以拿到pipe中的数据的
+
+但是注意, 父进程一定要调用waitpid去回收僵尸进程(默认subprocess.Popen.communicate(_communicate)函数已经帮我们调用了)
+
+**一般你启动bash的话, 关闭stdin进程就终止了, 但是如果你执行的命令(不是bash或者是bash脚本, 脚本中无限循环了), 那么close_stdin是不能够关闭进程的
+
+所以注意, 如果是自己的bash脚本, 需要有终止的输入, 比如发送exit给bash脚本, 让其终止**
+
+
+
+epoll和file
+==================
+
+如果你想用epoll去读取常规文件(用open返回的文件对象)的话, 这是不行的
+
+
+https://stackoverflow.com/questions/8645721/why-does-select-select-work-with-disk-files-but-not-epoll
+
+*select allows filedescriptors pointing to regular files to be monitored, however it will always report a file as readable/writable (i.e. it's somewhat useless, as it doesn't tell you whether a read/write would actually block).
+
+epoll just disallows monitoring of regular files, as it has no mechanism (on linux at least) available to tell whether reading/writing a regular file would block*
+
+大概意思是select会总是返回这个文件fd一直是可读可写的, 而epoll没法判断文件是否可读可写, 所以可以理解事件驱动(select/poll/epoll)都不支持常规文件的监控的
+
+
+https://stackoverflow.com/questions/8057892/epoll-on-regular-files
+
+*Not really. epoll only makes sense for file descriptors which would normally exhibit blocking behavior on read/write, like pipes and sockets. Normal file descriptors will always either return a result or end-of-file more or less immediately, so epoll wouldn't do anything useful for them.*
+
+https://blog.csdn.net/zxjcarrot/article/details/32935001
+
+*Linux中不支持磁盘文件的NON_BLOCKING模式, 也不需要支持!*
+
+
+
+我感觉是因为文件内容一直存在, 而select/epoll是使用缓冲区去判断是否可读可写, 这样因为文件一直是有内容的, 那么就是说这个fd都是可读可写的
+
+
+**深入原因再说~~现在先这样想**
+
+
+
+
+**所以一般常规文件都是直接read, 但是如果我们需要等待文件有新内容的时候, 怎么办?**
+
+
+named pipe(fifo)
+====================
+
+接epoll和file那一节
+
+我们可以使用named pipe, 这样父子进程之间就不需要传递pipe了, 而是约定一个named pipe的路径
+
+然后使用mkfifo去进行读写, 此时是可以进行监控的
+
+
+但是, 当我们mkfifo(path)之后, 如果直接opne(path, r)的话, 会阻塞的
+
+https://stackoverflow.com/questions/5782279/why-does-a-read-only-open-of-a-named-pipe-block
+
+
+所以, 要使用os.open(path, os.O_RDONLY|os.O_NONBLOCK)
+
+但是如果加入了异步模式, 那么每次os.read(fd, 1024)的话都直接返回的, 所以!!!!??????
+
+如果我们调用os.read(fd, 1024)之前, 设置block模式呢, os.set_blocking(f, True), 这样也没什么用
+
+
+因为named pipe是另一方写入的时候, open才会阻塞返回, 所以, 需要父进程mkfifo, 然后启动子进程, 子进程先write(比如一个启动字符)
+
+然后父进程open, 此时open会返回, 然后难道字符, 每次父进程要读取pipe的时候, 都是open而不是read!!!!!!!!!!!!要记住
+
+
+那么一步模式读取可以吗?
+
+
+有一个问题, named pipe一旦读取完数据之后, 接下来的read都会马上返回空'', 不管是阻塞还是非阻塞模式!!!!
+
+所以就算你open是非阻塞模式, 然后加入到epoll中, 一旦读取完数据, 然后每次epoll.select都会立即返回空而不是说没有数据就阻塞住
+
+此时epoll拿到的event是16(EBUSY, 设备忙碌)
+
+错了!!上面的原因是我没有显式的去打开一个named pipe去write
+
+
+比如读取的时候依然是epoll模式, 然后我在命令行echo "haha" >> /path/to/namedpipe
+
+那么这样epoll就会每次都EBUSY, 每次都返回
+
+如果我是写入端也是open(/path/to/namedpipe, os.O_WRONLY), 那么我os.write之后, 读取端的epoll会挂起的!!!!!!!!!!!
+
+所以, bash中需要进行open(/path/to/namedpipe, os.O_WRONLY)操作!!!!!!!!1
+
+**然而, bash脚本并没有手动打开/关闭文件的操作, 都是(>>, <<)这样的操作, 也就是操作完之后就直接关闭文件了**
+
+
+但是!!!!!!!!!bash中是可以打开文件的!!!!!
+
+https://unix.stackexchange.com/questions/207487/how-do-i-close-a-fifo-pipe
+
+
+
+.. code-block:: pythono
+
+    '''
+    
+    
+    #!/bin/bash
+    
+    exec 3<> /tmp/hatchery.fifo
+    
+    read cmd
+    while [ "$cmd" != "exit" ];
+    do
+        echo "got $cmd"
+        $cmd
+        status_code=$?
+        echo $status_code >&3
+        read cmd
+    done
+    
+    exec 3<&- 
+    echo "runner subprocess exit"
+    
+    '''
+
+
+其中 exec 3<>这个操作就是打开文件, 并且是读写模式!!!!exec 3<&-则是可以看出关闭文件!!!!!!!!!!!!!
+
+一旦写端关闭了pipe, 那么读端就会得到EBUSY错误!!!!!!!!!
+
+
+当然, 简单来讲, 自然是阻塞状态, 每次都用open去读取named pipe最简单了!!!!!!!!!!!!
+

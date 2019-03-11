@@ -290,4 +290,164 @@ http://stackoverflow.com/questions/5440128/thread-context-switch-vs-process-cont
 
 http://stackoverflow.com/questions/12630214/context-switch-internals
 
+zero copy
+================
+
+零拷贝
+
+https://blog.csdn.net/u013256816/article/details/52589524
+
+
+当我们需要把一个静态文件发送给用户的时候:
+
+1. 调用read时, 文件A被拷贝到了kernel模式
+
+2. 之后, CPU控制将kernel模式数据copy到user模式下
+
+3. 调用write时, 先将user模式下的内容copy到kernel模式下的socket的buffer中
+
+4. 最后将kernel模式下的socket buffer的数据copy到网卡设备中传送
+
+实现是依赖于操作系统底层的sendFile()实现的
+
+
+使用了Zero-Copy技术之后，整个过程如下：
+
+1. transferTo方法使得文件A的内容直接拷贝到一个read buffer(kernel buffer)中；
+
+2. 然后数据(kernel buffer)拷贝到socket buffer中。
+
+3. 最后将socket buffer中的数据拷贝到网卡设备（protocol engine）中传输； 
+
+这显然是一个伟大的进步: 这里把上下文的切换次数从4次减少到2次, 同时也把数据copy的次数从4次降低到了3次.
+
+但是这是Zero-Copy么，答案是否定的. Linux从2.1之后内核引入了sendfile. 通过sendfile传送文件只需要一次系统调用, 当调用sendfile时:
+
+1. 首先(通过DMA)将数据从磁盘读取到kernel buffer中
+
+2. 然后将kernel buffer拷贝到socket buffer中
+
+3. 最后将socket buffer中的数据copy到网卡设备(protocol engine)中发送
+
+Linux2.4 内核对sendfile做了改进:
+
+
+1. 将文件拷贝到kernel buffer中
+
+2. 向socket buffer中追加当前要发生的数据在kernel buffer中的位置和偏移量
+   
+3. 根据socket buffer中的位置和偏移量直接将kernel buffer的数据copy到网卡设备(protocol engine)中
+
+
+free
+========
+
+
+调用free的时候, 传参只有一个指针, 那么怎么决定到对释放多少内存呢?
+
+ndFile()实现的
+
+
+使用了Zero-Copy技术之后，整个过程如下：
+
+1. transferTo方法使得文件A的内容直接拷贝到一个read buffer(kernel buffer)中；
+
+2. 然后数据(kernel buffer)拷贝到socket buffer中。
+
+3. 最后将socket buffer中的数据拷贝到网卡设备（protocol engine）中传输； 
+
+这显然是一个伟大的进步: 这里把上下文的切换次数从4次减少到2次, 同时也把数据copy的次数从4次降低到了3次.
+
+但是这是Zero-Copy么，答案是否定的. Linux从2.1之后内核引入了sendfile. 通过sendfile传送文件只需要一次系统调用, 当调用sendfile时:
+
+1. 首先(通过DMA)将数据从磁盘读取到kernel buffer中
+
+2. 然后将kernel buffer拷贝到socket buffer中
+
+3. 最后将socket buffer中的数据copy到网卡设备(protocol engine)中发送
+
+Linux2.4 内核对sendfile做了改进:
+
+
+1. 将文件拷贝到kernel buffer中
+
+2. 向socket buffer中追加当前要发生的数据在kernel buffer中的位置和偏移量
+   
+3. 根据socket buffer中的位置和偏移量直接将kernel buffer的数据copy到网卡设备(protocol engine)中
+
+
+free
+========
+
+
+调用free的时候, 传参只有一个指针, 那么怎么决定到对释放多少内存呢?
+
+
+ndFile()实现的
+
+
+使用了Zero-Copy技术之后，整个过程如下：
+
+1. transferTo方法使得文件A的内容直接拷贝到一个read buffer(kernel buffer)中；
+
+2. 然后数据(kernel buffer)拷贝到socket buffer中。
+
+3. 最后将socket buffer中的数据拷贝到网卡设备（protocol engine）中传输； 
+
+这显然是一个伟大的进步: 这里把上下文的切换次数从4次减少到2次, 同时也把数据copy的次数从4次降低到了3次.
+
+但是这是Zero-Copy么，答案是否定的. Linux从2.1之后内核引入了sendfile. 通过sendfile传送文件只需要一次系统调用, 当调用sendfile时:
+
+1. 首先(通过DMA)将数据从磁盘读取到kernel buffer中
+
+2. 然后将kernel buffer拷贝到socket buffer中
+
+3. 最后将socket buffer中的数据copy到网卡设备(protocol engine)中发送
+
+Linux2.4 内核对sendfile做了改进:
+
+
+1. 将文件拷贝到kernel buffer中
+
+2. 向socket buffer中追加当前要发生的数据在kernel buffer中的位置和偏移量
+   
+3. 根据socket buffer中的位置和偏移量直接将kernel buffer的数据copy到网卡设备(protocol engine)中
+
+malloc_static和malloc_trim
+=================================
+
+https://unix.stackexchange.com/questions/53447/does-free-unmap-the-memory-of-a-process
+
+https://stackoverflow.com/questions/2215259/will-malloc-implementations-return-free-ed-memory-back-to-the-system
+
+https://stackoverflow.com/questions/38644578/understanding-glibc-malloc-trimming
+
+free不一定会立刻把内存返回给内核, 什么时候回收到内核取决于os的实现, 比如有可能不会立刻回收, 因为避免内存碎片
+
+所以应用层只需要关心到free调用就好, 内存的管理和os的实现有关
+
+在malloc_static以及这篇文章https://sploitfun.wordpress.com/2015/02/10/understanding-glibc-malloc/中, 可以看到熟悉的名词, arena, freelist等等, python中内存也是
+
+这样一些组件, 可以猜测释放内存不会立马释放到os, 而是释放到arena, 也就是arena是管理内存, 他来决定是否释放给内核
+
+
+gnu的文章: https://www.gnu.org/software/libc/manual/html_node/Memory-Allocation.html
+
+https://reverseengineering.stackexchange.com/questions/15033/how-does-glibc-malloc-work
+
+http://liveoverflow.com/binary_hacking/
+
+
+
+malloc和free
+===============
+
+接上一节, 两者怎么工作的: https://stackoverflow.com/questions/1119134/how-do-malloc-and-free-work
+
+
+以及调用free的时候, 传参只有一个指针, 那么怎么决定到对释放多少内存呢?(malloc的时候会把指针记录下来, 记录的是指针的一些元信息, 包括大小)
+
+
+https://stackoverflow.com/questions/1518711/how-does-free-know-how-much-to-free
+
 
